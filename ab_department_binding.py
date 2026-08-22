@@ -197,6 +197,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", type=Path, default=STREAMLINED_ROOT / ".ab-results")
     parser.add_argument("--workflow", choices=("baseline", "streamlined", "both"), default="both")
+    parser.add_argument("--case", action="append", choices=tuple(CASES))
     parser.add_argument("--compare-only", action="store_true")
     args = parser.parse_args()
     output_root = args.output_root.resolve()
@@ -208,7 +209,7 @@ def main() -> None:
             if args.workflow == "both"
             else ((args.workflow, BASELINE_ROOT if args.workflow == "baseline" else STREAMLINED_ROOT),)
         )
-        for case in CASES:
+        for case in args.case or CASES:
             for workflow, source_root in workflows:
                 _run_one(workflow, source_root, case, output_root)
     if all(
