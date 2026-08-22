@@ -1,0 +1,32 @@
+# Never commit credentials or hotel financial data.
+.env
+*.key
+*.pem
+*.xls
+*.xlsx
+*.xlsm
+
+# Local runtime and generated output.
+.venv/
+outputs/
+output/
+work/
+**/work/
+**/summary.json
+**/run_log.json
+*-normalized/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Editor and OS files.
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# The authored output template is application code and must remain tracked.
+!hotel_pl_normalizer/data/output_template.xlsx

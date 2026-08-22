@@ -1,0 +1,270 @@
+department,coa_id,account_name,hierarchy_path,parent_coa_id,is_residual,mapping_note,synonyms
+Summary,S12.rooms_available,Rooms Available,,,FALSE,,
+Summary,S12.rooms_sold,Rooms Sold,,,FALSE,,
+Summary,S12.occupancy,Occupancy,,,FALSE,,
+Summary,S12.adr,ADR,,,FALSE,,
+Summary,S12.revpar,RevPAR,,,FALSE,,
+Summary,S12.total_rooms_revenue,Total Rooms Revenue,,,FALSE,,
+Summary,S12.total_food_and_beverage_revenue,Total Food and Beverage Revenue,,,FALSE,,
+Summary,S12.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,,
+Summary,S12.total_miscellaneous_income,Total Miscellaneous Income,,,FALSE,,
+Summary,S12.total_revenue,Total Revenue,,,FALSE,,
+Summary,S12.total_rooms_expenses,Total Rooms Expenses,,,FALSE,,
+Summary,S12.total_food_and_beverage_expenses,Total Food and Beverage Expenses,,,FALSE,,
+Summary,S12.total_other_operated_departments_expenses,Total Other Operated Departments Expenses,,,FALSE,"Miscellaneous income expenses, although they should not be present, can be mapped to this account.",
+Summary,S12.total_departmental_expenses,Total Departmental Expenses,,,FALSE,,
+Summary,S12.departmental_profit,Departmental Profit,,,FALSE,,
+Summary,S12.total_administrative_and_general_expenses,Total Administrative and General Expenses,,,FALSE,,
+Summary,S12.total_information_and_telecommunications_systems_expenses,Total Information and Telecommunications Systems Expenses,,,FALSE,,
+Summary,S12.total_sales_and_marketing_expenses,Total Sales and Marketing Expenses,,,FALSE,,
+Summary,S12.total_property_operation_and_maintenance_expenses,Total Property Operation and Maintenance Expenses,,,FALSE,,
+Summary,S12.total_utilities_expenses,Total Utilities Expenses,,,FALSE,,
+Summary,S12.total_undistributed_expenses,Total Undistributed Expenses,,,FALSE,,
+Summary,S12.gop,GOP,,,FALSE,,
+Summary,S12.total_management_fees,Total Management Fees,,,FALSE,,
+Summary,S12.income_after_management_fees,Income After Management Fees,,,FALSE,,
+Summary,S12.non_operating_income,Non-Operating Income,,,FALSE,,
+Summary,S12.rent,Rent,,,FALSE,,
+Summary,S12.property_and_other_taxes,Property and Other Taxes,,,FALSE,,
+Summary,S12.insurance,Insurance,,,FALSE,,
+Summary,S12.other,Other Non-Operating Expenses,,,FALSE,,
+Summary,S12.total_non_operating_income_and_expenses,Total Non-Operating Income and Expenses,,,FALSE,,
+Summary,S12.ebitda,EBITDA,,,FALSE,,
+Summary,S12.ffe_reserve,FF&E Reserve,,,FALSE,Do not invent when absent or zero.,replacement reserve|furniture fixtures and equipment reserve
+Summary,S12.noi,EBITDA Less Replacement Reserve (NOI),,,FALSE,Do not invent when absent or zero.,net operating income|EBITDA less replacement reserve
+Rooms,S1.discount,Discount,Total Rooms Revenue > Transient Rooms Revenue > Discount,S1.transient_rooms_revenue,FALSE,Includes package,promotions | opaque | package
+Rooms,S1.negotiated,Negotiated,Total Rooms Revenue > Transient Rooms Revenue > Negotiated,S1.transient_rooms_revenue,FALSE,typically corporate transient rates,LNR
+Rooms,S1.qualified,Qualified,Total Rooms Revenue > Transient Rooms Revenue > Qualified,S1.transient_rooms_revenue,FALSE,Government transient maps here; government group maps to Government.,government transient | AAA | loyalty redemptions
+Rooms,S1.retail,Retail,Total Rooms Revenue > Transient Rooms Revenue > Retail,S1.transient_rooms_revenue,FALSE,"Includes consortia like amex, chase, virtuoso and Internet Non-Opaque",best available rate|rack rate|internet non-opaque
+Rooms,S1.wholesale,Wholesale,Total Rooms Revenue > Transient Rooms Revenue > Wholesale,S1.transient_rooms_revenue,FALSE,,transient tour and travel
+Rooms,S1.transient_rooms_revenue,Transient Rooms Revenue,Total Rooms Revenue > Transient Rooms Revenue,S1.total_rooms_revenue,FALSE,,
+Rooms,S1.association_convention,Association/Convention,Total Rooms Revenue > Group Rooms Revenue > Association/Convention,S1.group_rooms_revenue,FALSE,,
+Rooms,S1.corporate,Corporate,Total Rooms Revenue > Group Rooms Revenue > Corporate,S1.group_rooms_revenue,FALSE,,
+Rooms,S1.government,Government,Total Rooms Revenue > Group Rooms Revenue > Government,S1.group_rooms_revenue,FALSE,,
+Rooms,S1.smerf,SMERF,Total Rooms Revenue > Group Rooms Revenue > SMERF,S1.group_rooms_revenue,FALSE,,social military educational religious fraternal
+Rooms,S1.tour_wholesalers,Tour/Wholesalers,Total Rooms Revenue > Group Rooms Revenue > Tour/Wholesalers,S1.group_rooms_revenue,FALSE,,
+Rooms,S1.group_rooms_revenue,Group Rooms Revenue,Total Rooms Revenue > Group Rooms Revenue,S1.total_rooms_revenue,FALSE,,
+Rooms,S1.contract_rooms_revenue,Contract Rooms Revenue,Total Rooms Revenue > Contract Rooms Revenue,S1.total_rooms_revenue,FALSE,,crew rooms|airline crew
+Rooms,S1.other_rooms_revenue,Other Rooms Revenue,Total Rooms Revenue > Other Rooms Revenue,S1.total_rooms_revenue,TRUE,,
+Rooms,S1.allowances_and_breakage,Allowances and Breakage,Total Rooms Revenue > Allowances and Breakage,S1.total_rooms_revenue,FALSE,,
+Rooms,S1.total_rooms_revenue,Total Rooms Revenue,,,FALSE,,
+Rooms,S1.management,Management,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S1.salaries_and_wages,FALSE,Managers only; exclude supervisors.,
+Rooms,S1.complimentary_f_b,Complimentary F&B,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Complimentary F&B,S1.nonmanagement,FALSE,,
+Rooms,S1.front_office,Front Office,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Front Office,S1.nonmanagement,FALSE,,
+Rooms,S1.guest_services,Guest Services,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Guest Services,S1.nonmanagement,FALSE,,
+Rooms,S1.housekeeping,Housekeeping,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Housekeeping,S1.nonmanagement,FALSE,"Housekeeping management maps to Management, not Housekeeping.",
+Rooms,S1.laundry,Laundry,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Laundry,S1.nonmanagement,FALSE,,
+Rooms,S1.reservations_labor,Reservations Labor,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Reservations Labor,S1.nonmanagement,FALSE,,
+Rooms,S1.transportation,Transportation,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Transportation,S1.nonmanagement,FALSE,,
+Rooms,S1.nonmanagement,Nonmanagement,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S1.salaries_and_wages,FALSE,Includes supervisors; excludes managers.,supervisors|hourly staff
+Rooms,S1.salaries_and_wages,Salaries and Wages,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages,S1.labor_costs_and_related_expenses,FALSE,,
+Rooms,S1.bonuses_and_incentives,Bonuses and Incentives,Total Rooms Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S1.labor_costs_and_related_expenses,FALSE,,
+Rooms,S1.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Rooms Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S1.labor_costs_and_related_expenses,FALSE,,
+Rooms,S1.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Rooms Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S1.total_payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation
+Rooms,S1.payroll_taxes,Payroll Taxes,Total Rooms Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Payroll Taxes,S1.total_payroll_related_expenses,FALSE,Excludes workers comp.,FICA|FUTA|SUTA
+Rooms,S1.supplemental_pay,Supplemental Pay,Total Rooms Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Supplemental Pay,S1.total_payroll_related_expenses,FALSE,Include service charge distributions,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+Rooms,S1.total_payroll_related_expenses,Total Payroll-Related Expenses,Total Rooms Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses,S1.labor_costs_and_related_expenses,FALSE,,
+Rooms,S1.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Rooms Expenses > Labor Costs and Related Expenses,S1.total_rooms_expenses,FALSE,,
+Rooms,S1.commissions,Commissions,Total Rooms Expenses > Other Expenses > Commissions,S1.other_expenses,FALSE,,
+Rooms,S1.complimentary_fnb_gifts_services,"Complimentary F&B, Gifts and Services","Total Rooms Expenses > Other Expenses > Complimentary F&B, Gifts and Services",S1.other_expenses,FALSE,"Exclude guest entertainment, guest relations, Guest Ent/Relations, cable TV and amenities.",complimentary food and beverage|complimentary gifts
+Rooms,S1.complimentary_in_room_entertainment_cable_tv,Complimentary In-Room Entertainment and Cable TV,Total Rooms Expenses > Other Expenses > Complimentary In-Room Entertainment and Cable TV,S1.other_expenses,FALSE,,cable tv|in-room entertainment|guestroom entertainment
+Rooms,S1.corporate_office_reimbursables,Corporate Office Reimbursables,Total Rooms Expenses > Other Expenses > Corporate Office Reimbursables,S1.other_expenses,FALSE,Include cluster services.,cluster services|corporate office allocation
+Rooms,S1.dues_and_subscriptions,Dues and Subscriptions,Total Rooms Expenses > Other Expenses > Dues and Subscriptions,S1.other_expenses,FALSE,,
+Rooms,S1.contract_services,Contract Services,Total Rooms Expenses > Other Expenses > Contract Services,S1.other_expenses,FALSE,,
+Rooms,S1.guest_cleaning_operating_supplies,Guest Cleaning Operating Supplies,Total Rooms Expenses > Other Expenses > Guest Cleaning Operating Supplies,S1.other_expenses,FALSE,All operating supplies should map here. ,guest supplies|room supplies|in room amenities | operating supplies
+Rooms,S1.laundry_and_dry_cleaning,Laundry and Dry Cleaning,Total Rooms Expenses > Other Expenses > Laundry and Dry Cleaning,S1.other_expenses,FALSE,exclude linen purchases and uniform laundry,
+Rooms,S1.licenses_and_permits,Licenses and Permits,Total Rooms Expenses > Other Expenses > Licenses and Permits,S1.other_expenses,FALSE,,
+Rooms,S1.linen,Linen,Total Rooms Expenses > Other Expenses > Linen,S1.other_expenses,FALSE,,
+Rooms,S1.all_travel,All Travel,Total Rooms Expenses > Other Expenses > All Travel,S1.other_expenses,FALSE,,T&E|travel and entertainment|travel meals and entertainment | travel other
+Rooms,S1.reservations_opex,Reservations OpEx,Total Rooms Expenses > Other Expenses > Reservations OpEx,S1.other_expenses,FALSE,Exclude guest-walk costs. MI Program Services Fund in Rooms opex is not Reservations OpEx.,reservations expense|booking expense
+Rooms,S1.rooms_all_other,Rooms All Other,Total Rooms Expenses > Other Expenses > Rooms All Other,S1.other_expenses,TRUE,Includes uniform laundry and guest-walk costs.,
+Rooms,S1.other_expenses,Other Expenses,Total Rooms Expenses > Other Expenses,S1.total_rooms_expenses,FALSE,,
+Rooms,S1.total_rooms_expenses,Total Rooms Expenses,,,FALSE,,
+F&B,S2.venue1_food_revenue,Venue 1 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 1 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue2_food_revenue,Venue 2 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 2 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue3_food_revenue,Venue 3 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 3 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue4_food_revenue,Venue 4 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 4 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue5_food_revenue,Venue 5 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 5 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue6_food_revenue,Venue 6 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 6 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue7_food_revenue,Venue 7 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 7 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue8_food_revenue,Venue 8 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 8 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue9_food_revenue,Venue 9 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 9 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.venue10_food_revenue,Venue 10 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 10 Food Revenue,S2.food_revenue,FALSE,,
+F&B,S2.banquet_conference_catering_food_revenue,Banquet/Conference/Catering Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Banquet/Conference/Catering Food Revenue,S2.food_revenue,FALSE,Never map to a generic venue.,banquet food|catering food|food - banquets|B&C food
+F&B,S2.in_room_dining_food_revenue,In-Room Dining Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > In-Room Dining Food Revenue,S2.food_revenue,FALSE,Never map to a generic venue.,in-room dining food|room service food|IRD food
+F&B,S2.food_allowances,Food Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Food Allowances,S2.food_revenue,FALSE,Allowances may appear below Total Food Revenue.,food discounts|food comps|food revenue adjustment
+F&B,S2.food_other,Food Other,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Food Other,S2.food_revenue,TRUE,,miscellaneous food revenue
+F&B,S2.food_revenue,Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue,S2.food_and_beverage_revenue,FALSE,Food Allowances is contra-revenue; Food Other is residual; Allowances may appear below Total F&B Revenue.,
+F&B,S2.venue1_beverage_revenue,Venue 1 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 1 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue2_beverage_revenue,Venue 2 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 2 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue3_beverage_revenue,Venue 3 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 3 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue4_beverage_revenue,Venue 4 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 4 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue5_beverage_revenue,Venue 5 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 5 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue6_beverage_revenue,Venue 6 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 6 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue7_beverage_revenue,Venue 7 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 7 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue8_beverage_revenue,Venue 8 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 8 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue9_beverage_revenue,Venue 9 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 9 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.venue10_beverage_revenue,Venue 10 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 10 Beverage Revenue,S2.beverage_revenue,FALSE,,
+F&B,S2.banquet_conference_catering_beverage_revenue,Banquet/Conference/Catering Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Banquet/Conference/Catering Beverage Revenue,S2.beverage_revenue,FALSE,Never map to a generic venue.,banquet beverage|catering beverage|beverage - banquets|B&C beverage
+F&B,S2.in_room_dining_beverage_revenue,In-Room Dining Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > In-Room Dining Beverage Revenue,S2.beverage_revenue,FALSE,Never map to a generic venue.,in-room dining beverage|room service beverage|IRD beverage
+F&B,S2.beverage_allowances,Beverage Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Beverage Allowances,S2.beverage_revenue,FALSE,,beverage discounts|beverage comps|beverage revenue adjustment
+F&B,S2.beverage_other,Beverage Other,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Beverage Other,S2.beverage_revenue,TRUE,,miscellaneous beverage revenue
+F&B,S2.beverage_revenue,Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue,S2.food_and_beverage_revenue,FALSE,"Beverage Allowances is contra-revenue; Beverage Other is residual, Allowances may appear below Total F&B Revenue.",
+F&B,S2.food_and_beverage_revenue,Food and Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue,S2.total_food_and_beverage_revenue,FALSE,Rank generic venues by combined net F&B revenue; use matching venue names.,
+F&B,S2.audiovisual,Audiovisual,Total Food and Beverage Revenue > Other Revenue > Audiovisual,S2.other_revenue,FALSE,,
+F&B,S2.function_room_rental_and_setup_charges,Function Room Rental and Setup Charges,Total Food and Beverage Revenue > Other Revenue > Function Room Rental and Setup Charges,S2.other_revenue,FALSE,Include event fees.,
+F&B,S2.surcharges_service_charges_other,"Surcharges, Service Charges and Other","Total Food and Beverage Revenue > Other Revenue > Surcharges, Service Charges and Other",S2.other_revenue,TRUE,Include package revenue.,surcharges|service charges|setup fees
+F&B,S2.other_revenue,Other Revenue,Total Food and Beverage Revenue > Other Revenue,S2.total_food_and_beverage_revenue,FALSE,"Non-consumable charges; Surcharges, Service Charges and Other is residual.",
+F&B,S2.total_food_and_beverage_revenue,Total Food and Beverage Revenue,,,FALSE,,
+F&B,S2.cost_of_food_sales,Cost of Food Sales,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Food and Beverage Sales > Cost of Food Sales,S2.cost_of_food_and_beverage_sales,FALSE,,
+F&B,S2.cost_of_beverage_sales,Cost of Beverage Sales,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Food and Beverage Sales > Cost of Beverage Sales,S2.cost_of_food_and_beverage_sales,FALSE,,
+F&B,S2.cost_of_food_and_beverage_sales,Cost of Food and Beverage Sales,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Food and Beverage Sales,S2.total_cost_of_sales_and_other_revenue,FALSE,,
+F&B,S2.audiovisual_cost,Audiovisual Cost,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Other Revenue > Audiovisual Cost,S2.cost_of_other_revenue,FALSE,,
+F&B,S2.miscellaneous_cost,Miscellaneous Cost,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Other Revenue > Miscellaneous Cost,S2.cost_of_other_revenue,FALSE,,
+F&B,S2.cost_of_other_revenue,Cost of Other Revenue,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Other Revenue,S2.total_cost_of_sales_and_other_revenue,FALSE,,
+F&B,S2.total_cost_of_sales_and_other_revenue,Total Cost of Sales and Other Revenue,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue,S2.total_food_and_beverage_expenses,FALSE,,
+F&B,S2.management,Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S2.salaries_and_wages,FALSE,,
+F&B,S2.service_management,Service Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management > Service Management,S2.management,FALSE,,
+F&B,S2.kitchen_management,Kitchen Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management > Kitchen Management,S2.management,FALSE,,
+F&B,S2.nonmanagement,Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S2.salaries_and_wages,FALSE,,
+F&B,S2.kitchen_nonmanagement,Kitchen Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Kitchen Nonmanagement,S2.nonmanagement,FALSE,,
+F&B,S2.service_nonmanagement,Service Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Service Nonmanagement,S2.nonmanagement,FALSE,,
+F&B,S2.salaries_and_wages,Salaries and Wages,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages,S2.labor_costs_and_related_expenses,FALSE,,
+F&B,S2.bonuses_and_incentives,Bonuses and Incentives,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S2.labor_costs_and_related_expenses,FALSE,,
+F&B,S2.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Food and Beverage Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S2.labor_costs_and_related_expenses,FALSE,,
+F&B,S2.service_charge_distribution,Service Charge Distribution,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Service Charge Distribution,S2.labor_costs_and_related_expenses,FALSE,,
+F&B,S2.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Food and Beverage Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S2.total_payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation
+F&B,S2.payroll_taxes,Payroll Taxes,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Payroll Taxes,S2.total_payroll_related_expenses,FALSE,Excludes workers comp.,FICA|FUTA|SUTA
+F&B,S2.supplemental_pay,Supplemental Pay,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses > Supplemental Pay,S2.total_payroll_related_expenses,FALSE,,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+F&B,S2.total_payroll_related_expenses,Total Payroll-Related Expenses,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Total Payroll-Related Expenses,S2.labor_costs_and_related_expenses,FALSE,,
+F&B,S2.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Food and Beverage Expenses > Labor Costs and Related Expenses,S2.total_food_and_beverage_expenses,FALSE,,
+F&B,S2.other_expenses,Other Expenses,Total Food and Beverage Expenses > Other Expenses,S2.total_food_and_beverage_expenses,FALSE,,
+F&B,S2.total_food_and_beverage_expenses,Total Food and Beverage Expenses,,,FALSE,,
+OOD,S3.total_parking_revenue,Total Parking Revenue,Total Other Operated Departments Revenue > Total Parking Revenue,S3.total_other_operated_departments_revenue,FALSE,,self parking revenue|valet revenue|garage
+OOD,S3.parking_cogs,Parking COGS,Total Other Operated Departments Expenses > Total Parking Expenses > Parking COGS,S3.total_parking_expenses,FALSE,,
+OOD,S3.parking_payroll,Parking Payroll,Total Other Operated Departments Expenses > Total Parking Expenses > Parking Payroll,S3.total_parking_expenses,FALSE,Include payroll taxes and benefits.,
+OOD,S3.parking_opex,Parking Opex,Total Other Operated Departments Expenses > Total Parking Expenses > Parking Opex,S3.total_parking_expenses,FALSE,,parking expense|valet expense
+OOD,S3.total_parking_expenses,Total Parking Expenses,Total Other Operated Departments Expenses > Total Parking Expenses,S3.total_other_operated_departments_expenses,FALSE,,
+OOD,S3.spa_merchandise_sales_revenue,Spa Merchandise Sales Revenue,Total Other Operated Departments Revenue > Spa > Spa Merchandise Sales Revenue,S3.spa,FALSE,,
+OOD,S3.massage_and_body_treatment_revenue,Massage and Body Treatment Revenue,Total Other Operated Departments Revenue > Spa > Massage and Body Treatment Revenue,S3.spa,FALSE,,
+OOD,S3.spa,Spa,Total Other Operated Departments Revenue > Spa,S3.total_other_operated_departments_revenue,FALSE,Spa only; map health club to Recreation.,
+OOD,S3.spa_cogs,Spa COGS,Total Other Operated Departments Expenses > Spa Expenses > Spa COGS,S3.spa_expenses,FALSE,,
+OOD,S3.spa_payroll,Spa Payroll,Total Other Operated Departments Expenses > Spa Expenses > Spa Payroll,S3.spa_expenses,FALSE,,
+OOD,S3.spa_opex,Spa Opex,Total Other Operated Departments Expenses > Spa Expenses > Spa Opex,S3.spa_expenses,FALSE,,
+OOD,S3.spa_expenses,Spa Expenses,Total Other Operated Departments Expenses > Spa Expenses,S3.total_other_operated_departments_expenses,FALSE,Spa only; map health club to Recreation.,
+OOD,S3.retail_revenue,Retail Revenue,Total Other Operated Departments Revenue > Retail Revenue,S3.total_other_operated_departments_revenue,FALSE,,
+OOD,S3.retail_cogs,Retail COGS,Total Other Operated Departments Expenses > Total Retail Expenses > Retail COGS,S3.total_retail_expenses,FALSE,Merchandise cost of sales; not retail opex.,retail cost of sales|merchandise cost
+OOD,S3.retail_payroll,Retail Payroll,Total Other Operated Departments Expenses > Total Retail Expenses > Retail Payroll,S3.total_retail_expenses,FALSE,,
+OOD,S3.retail_opex,Retail Opex,Total Other Operated Departments Expenses > Total Retail Expenses > Retail Opex,S3.total_retail_expenses,FALSE,,
+OOD,S3.total_retail_expenses,Total Retail Expenses,Total Other Operated Departments Expenses > Total Retail Expenses,S3.total_other_operated_departments_expenses,FALSE,,
+OOD,S3.recreation_revenue,Recreation Revenue,Total Other Operated Departments Revenue > Recreation Revenue,S3.total_other_operated_departments_revenue,FALSE,Include health club revenue.,health club revenue|fitness center revenue
+OOD,S3.recreation_expenses,Recreation Expenses,Total Other Operated Departments Expenses > Recreation Expenses,S3.total_other_operated_departments_expenses,FALSE,Include health club expenses.,health club expenses|fitness center expenses
+OOD,S3.minibar_revenue,Minibar Revenue,Total Other Operated Departments Revenue > Minibar Revenue,S3.total_other_operated_departments_revenue,FALSE,,
+OOD,S3.minibar_expenses,Minibar Expenses,Total Other Operated Departments Expenses > Minibar Expenses,S3.total_other_operated_departments_expenses,FALSE,,
+OOD,S3.total_golf_course_and_pro_shop_revenue,Total Golf Course and Pro Shop Revenue,Total Other Operated Departments Revenue > Total Golf Course and Pro Shop Revenue,S3.total_other_operated_departments_revenue,FALSE,,
+OOD,S3.total_golf_course_and_pro_shop_expenses,Total Golf Course and Pro Shop Expenses,Total Other Operated Departments Expenses > Total Golf Course and Pro Shop Expenses,S3.total_other_operated_departments_expenses,FALSE,,
+OOD,S3.other_department_revenue,Other Other Operated Department Revenue,Total Other Operated Departments Revenue > Other Other Operated Department Revenue,S3.total_other_operated_departments_revenue,TRUE,,
+OOD,S3.other_department_expenses,Other Other Operated Department Expenses,Total Other Operated Departments Expenses > Other Other Operated Department Expenses,S3.total_other_operated_departments_expenses,TRUE,"Miscellaneous income expenses, although they should not be present, can be mapped to this account.",
+OOD,S3.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,"Miscellaneous income expenses, although they should not be present, can be mapped to this account.",
+OOD,S3.total_other_operated_departments_expenses,Total Other Operated Departments Expenses,,,FALSE,,
+Misc Income,S4.attrition_and_cancellation_fees,Attrition and Cancellation Fees,Total Miscellaneous Income > Attrition and Cancellation Fees,S4.total_miscellaneous_income,FALSE,,
+Misc Income,S4.destination_resort_urban_fees,Destination Resort Urban Fees,Total Miscellaneous Income > Destination Resort Urban Fees,S4.total_miscellaneous_income,FALSE,,
+Misc Income,S4.space_rental_and_concessions,Space Rental and Concessions,Total Miscellaneous Income > Space Rental and Concessions,S4.total_miscellaneous_income,FALSE,Space or concession rent; exclude commission revenue.,space rental|concession rent
+Misc Income,S4.other_misc_income,Other Miscellaneous Income,Total Miscellaneous Income > Other Miscellaneous Income,S4.total_miscellaneous_income,TRUE,,commission income|revenue share|other miscellaneous income
+Misc Income,S4.total_miscellaneous_income,Total Miscellaneous Income,,,FALSE,,
+A&G,S5.salaries_and_wages,Salaries and Wages,Total Administrative and General Expenses > Labor Costs and Related Expenses > Salaries and Wages,S5.labor_costs_and_related_expenses,FALSE,,
+A&G,S5.bonuses_and_incentives,Bonuses and Incentives,Total Administrative and General Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S5.labor_costs_and_related_expenses,FALSE,,
+A&G,S5.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Administrative and General Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S5.labor_costs_and_related_expenses,FALSE,,
+A&G,S5.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Administrative and General Expenses > Labor Costs and Related Expenses > Total Payroll Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S5.total_payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation|workers comp
+A&G,S5.supplemental_pay,Supplemental Pay,Total Administrative and General Expenses > Labor Costs and Related Expenses > Total Payroll Related Expenses > Supplemental Pay,S5.total_payroll_related_expenses,FALSE,,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+A&G,S5.payroll_taxes,Payroll Taxes,Total Administrative and General Expenses > Labor Costs and Related Expenses > Total Payroll Related Expenses > Payroll Taxes,S5.total_payroll_related_expenses,FALSE,Excludes workers comp.,FICA|FUTA|SUTA
+A&G,S5.total_payroll_related_expenses,Total Payroll Related Expenses,Total Administrative and General Expenses > Labor Costs and Related Expenses > Total Payroll Related Expenses,S5.labor_costs_and_related_expenses,FALSE,,
+A&G,S5.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Administrative and General Expenses > Labor Costs and Related Expenses,S5.total_administrative_and_general_expenses,FALSE,,
+A&G,S5.legal_services_and_professional_fees,Legal Services and Professional Fees,Total Administrative and General Expenses > Other Expenses > Legal Services and Professional Fees,S5.other_expenses,FALSE,Exclude accounting fees.,
+A&G,S5.accounting_charges,Accounting Charges,Total Administrative and General Expenses > Other Expenses > Accounting Charges,S5.other_expenses,FALSE,Exclude payroll services.,central accounting|shared accounting charges|accounting fees
+A&G,S5.payroll_services,Payroll Services,Total Administrative and General Expenses > Other Expenses > Payroll Services,S5.other_expenses,FALSE,,payroll processing|payroll service fees
+A&G,S5.contract_services,Contract Services,Total Administrative and General Expenses > Other Expenses > Contract Services,S5.other_expenses,FALSE,,
+A&G,S5.dues_and_subscriptions,Dues and Subscriptions,Total Administrative and General Expenses > Other Expenses > Dues and Subscriptions,S5.other_expenses,FALSE,,
+A&G,S5.corporate_office_reimbursables,Corporate Office Reimbursables,Total Administrative and General Expenses > Other Expenses > Corporate Office Reimbursables,S5.other_expenses,FALSE,"Requires corporate, regional, cluster or shared-service allocation context.",corporate office allocation|regional allocation|cluster services|shared services
+A&G,S5.credit_card_commissions,Credit Card Commissions,Total Administrative and General Expenses > Other Expenses > Credit Card Commissions,S5.other_expenses,FALSE,Exclude bank charges and credit and collection.,merchant fees|credit card fees|card commissions
+A&G,S5.human_resources,Human Resources,Total Administrative and General Expenses > Other Expenses > Human Resources,S5.other_expenses,FALSE,Includes A&G training and non-payroll HR programs.,human resources|HR|training|recruiting|employee relations
+A&G,S5.security,Security,Total Administrative and General Expenses > Other Expenses > Security,S5.other_expenses,FALSE,Exclude armored-car and cash-transport services.,
+A&G,S5.ag_all_other,AG All Other,Total Administrative and General Expenses > Other Expenses > AG All Other,S5.other_expenses,TRUE,,bank charges|armored car|cash transport
+A&G,S5.other_expenses,Other Expenses,Total Administrative and General Expenses > Other Expenses,S5.total_administrative_and_general_expenses,FALSE,,
+A&G,S5.total_administrative_and_general_expenses,Total Administrative and General Expenses,,,FALSE,,
+IT,S6.cost_of_cell_phones,Cost of Cell Phones,Total Information and Telecommunications Systems Expenses > Cost of Services > Cost of Cell Phones,S6.cost_of_services,FALSE,,
+IT,S6.cost_of_internet,Cost of Internet,Total Information and Telecommunications Systems Expenses > Cost of Services > Cost of Internet,S6.cost_of_services,FALSE,,internet service|connectivity|broadband
+IT,S6.complimentary_in_room_entertainment_cable_tv,Complimentary In-Room Entertainment and Cable TV,Total Information and Telecommunications Systems Expenses > Cost of Services > Complimentary In-Room Entertainment and Cable TV,S6.cost_of_services,FALSE,Includes cable TV.,cable tv|in-room entertainment|guestroom entertainment
+IT,S6.other_cost_of_services,Other Cost of Services,Total Information and Telecommunications Systems Expenses > Cost of Services > Other Cost of Services,S6.cost_of_services,FALSE,,
+IT,S6.cost_of_services,Cost of Services,Total Information and Telecommunications Systems Expenses > Cost of Services,S6.total_information_and_telecommunications_systems_expenses,FALSE,,
+IT,S6.salaries_and_wages,Salaries and Wages,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Salaries and Wages,S6.labor_costs_and_related_expenses,FALSE,,
+IT,S6.bonuses_and_incentives,Bonuses and Incentives,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S6.labor_costs_and_related_expenses,FALSE,,
+IT,S6.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S6.labor_costs_and_related_expenses,FALSE,,
+IT,S6.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S6.payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation|workers comp
+IT,S6.supplemental_pay,Supplemental Pay,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Supplemental Pay,S6.payroll_related_expenses,FALSE,,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+IT,S6.payroll_taxes,Payroll Taxes,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Payroll Taxes,S6.payroll_related_expenses,FALSE,Excludes workers comp.,FICA|FUTA|SUTA
+IT,S6.payroll_related_expenses,Payroll-Related Expenses,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses,S6.labor_costs_and_related_expenses,FALSE,,
+IT,S6.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Information and Telecommunications Systems Expenses > Labor Costs and Related Expenses,S6.total_information_and_telecommunications_systems_expenses,FALSE,,
+IT,S6.system_expenses,System Expenses,Total Information and Telecommunications Systems Expenses > System Expenses,S6.total_information_and_telecommunications_systems_expenses,FALSE,Labels containing systems likely map here.,
+IT,S6.brand_program_fees_and_corporate_office_reimbursables,Brand Program Fees and Corporate Office Reimbursables,Total Information and Telecommunications Systems Expenses > Other Expenses > Brand Program Fees and Corporate Office Reimbursables,S6.other_expenses,FALSE,Include cluster services.,brand program fees|corporate IT allocation|shared-service IT|cluster services
+IT,S6.all_other_expenses,All Other Expenses,Total Information and Telecommunications Systems Expenses > Other Expenses > All Other Expenses,S6.other_expenses,TRUE,,
+IT,S6.other_expenses,Other Expenses,Total Information and Telecommunications Systems Expenses > Other Expenses,S6.total_information_and_telecommunications_systems_expenses,FALSE,,
+IT,S6.total_information_and_telecommunications_systems_expenses,Total Information and Telecommunications Systems Expenses,,,FALSE,,
+S&M,S7.salaries_and_wages,Salaries and Wages,Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Salaries and Wages,S7.labor_costs_and_related_expenses,FALSE,,
+S&M,S7.bonuses_and_incentives,Bonuses and Incentives,Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S7.labor_costs_and_related_expenses,FALSE,,
+S&M,S7.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S7.labor_costs_and_related_expenses,FALSE,,
+S&M,S7.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S7.payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation|workers comp
+S&M,S7.supplemental_pay,Supplemental Pay,Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Supplemental Pay,S7.payroll_related_expenses,FALSE,,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+S&M,S7.payroll_taxes,Payroll Taxes,Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Payroll Taxes,S7.payroll_related_expenses,FALSE,Excludes workers comp.,payroll tax|employer payroll taxes|FICA|FUTA|SUTA
+S&M,S7.payroll_related_expenses,Payroll-Related Expenses,Total Sales and Marketing Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses,S7.labor_costs_and_related_expenses,FALSE,,
+S&M,S7.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Sales and Marketing Expenses > Labor Costs and Related Expenses,S7.total_sales_and_marketing_expenses,FALSE,,
+S&M,S7.agency_fees,Agency Fees,Total Sales and Marketing Expenses > Other Expenses > Agency Fees,S7.other_expenses,FALSE,Includes public relations.,PR|public relations|advertising agency fees|marketing agency fees
+S&M,S7.outside_services_market_research,Outside Services and Market Research,Total Sales and Marketing Expenses > Other Expenses > Outside Services and Market Research,S7.other_expenses,FALSE,,market research|outside sales representation
+S&M,S7.website,Website,Total Sales and Marketing Expenses > Other Expenses > Website,S7.other_expenses,FALSE,,
+S&M,S7.photography,Photography,Total Sales and Marketing Expenses > Other Expenses > Photography,S7.other_expenses,FALSE,,
+S&M,S7.trade_shows_and_travel,Trade Shows and Travel,Total Sales and Marketing Expenses > Other Expenses > Trade Shows and Travel,S7.other_expenses,FALSE,,T&E|travel and entertainment|trade shows|sales travel | conventions
+S&M,S7.promotion,Promotion,Total Sales and Marketing Expenses > Other Expenses > Promotion,S7.other_expenses,FALSE,"Explicit labels with ""promotion""",promotion
+S&M,S7.corporate_office_reimbursables,Corporate Office Reimbursables,Total Sales and Marketing Expenses > Other Expenses > Corporate Office Reimbursables,S7.other_expenses,FALSE,"Requires corporate, regional, cluster or shared-service allocation context. Include franchise items only with corporate-office reimbursement context.",corporate office allocation|regional allocation|cluster services|shared services
+S&M,S7.contract_services,Contract Services,Total Sales and Marketing Expenses > Other Expenses > Contract Services,S7.other_expenses,FALSE,,
+S&M,S7.media_ecommerce_digital,"Media, E-Commerce and Digital","Total Sales and Marketing Expenses > Other Expenses > Media, E-Commerce and Digital",S7.other_expenses,FALSE,Includes e-commerce.,e-commerce|digital marketing|paid media|online distribution
+S&M,S7.marketing_fees_revenue_fees,Marketing Fees and Revenue Fees,Total Sales and Marketing Expenses > Other Expenses > Marketing Fees and Revenue Fees,S7.other_expenses,FALSE,,revenue management fees|marketing fees
+S&M,S7.franchise_and_affiliation_fees_royalties,Franchise and Affiliation Fees-Royalties,Total Sales and Marketing Expenses > Other Expenses > Franchise and Affiliation Fees-Royalties,S7.other_expenses,FALSE,,franchise fees|royalties
+S&M,S7.franchise_and_affiliation_marketing,Franchise and Affiliation Marketing,Total Sales and Marketing Expenses > Other Expenses > Franchise and Affiliation Marketing,S7.other_expenses,FALSE,Include MI Program Services Fund only when found within S&M; do not reclassify the same label from Rooms.,franchise marketing|brand marketing assessment|program service contribution|MI Program Services Fund
+S&M,S7.dues_and_subscriptions,Dues and Subscriptions,Total Sales and Marketing Expenses > Other Expenses > Dues and Subscriptions,S7.other_expenses,FALSE,,
+S&M,S7.loyalty_programs,Loyalty Programs,Total Sales and Marketing Expenses > Other Expenses > Loyalty Programs,S7.other_expenses,FALSE,,
+S&M,S7.sm_all_other,SM All Other,Total Sales and Marketing Expenses > Other Expenses > SM All Other,S7.other_expenses,TRUE,,collateral materials|brochures|printing|promotional materials
+S&M,S7.other_expenses,Other Expenses,Total Sales and Marketing Expenses > Other Expenses,S7.total_sales_and_marketing_expenses,FALSE,,
+S&M,S7.total_sales_and_marketing_expenses,Total Sales and Marketing Expenses,,,FALSE,,
+POM,S8.salaries_and_wages,Salaries and Wages,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Salaries and Wages,S8.labor_costs_and_related_expenses,FALSE,,
+POM,S8.bonuses_and_incentives,Bonuses and Incentives,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S8.labor_costs_and_related_expenses,FALSE,,
+POM,S8.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S8.labor_costs_and_related_expenses,FALSE,,
+POM,S8.employee_benefits_health_insurance_workers_comp,"Employee Benefits, Health Insurance and Workers' Compensation","Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Employee Benefits, Health Insurance and Workers' Compensation",S8.payroll_related_expenses,FALSE,Includes workers comp; excludes payroll taxes.,employee benefits|health insurance|workers compensation
+POM,S8.supplemental_pay,Supplemental Pay,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Supplemental Pay,S8.payroll_related_expenses,FALSE,,vacation PTO | sick pay | holiday pay | vacation expense | personal days
+POM,S8.payroll_taxes,Payroll Taxes,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses > Payroll Taxes,S8.payroll_related_expenses,FALSE,Excludes workers comp.,FICA|FUTA|SUTA
+POM,S8.payroll_related_expenses,Payroll-Related Expenses,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses > Payroll-Related Expenses,S8.labor_costs_and_related_expenses,FALSE,,
+POM,S8.labor_costs_and_related_expenses,Labor Costs and Related Expenses,Total Property Operation and Maintenance Expenses > Labor Costs and Related Expenses,S8.total_property_operation_and_maintenance_expenses,FALSE,,
+POM,S8.contract_services,Contract Services,Total Property Operation and Maintenance Expenses > Other Expenses > Contract Services,S8.other_expenses,FALSE,"Only labels that explcitly include ""contract"" in it",contract services|service contracts|maintenance contracts
+POM,S8.grounds_maintenance_and_landscaping,Grounds Maintenance and Landscaping,Total Property Operation and Maintenance Expenses > Other Expenses > Grounds Maintenance and Landscaping,S8.other_expenses,FALSE,,
+POM,S8.waste_removal,Waste Removal,Total Property Operation and Maintenance Expenses > Other Expenses > Waste Removal,S8.other_expenses,FALSE,,trash removal|garbage collection|waste hauling|recycling service
+POM,S8.hvac,HVAC,Total Property Operation and Maintenance Expenses > Other Expenses > HVAC,S8.other_expenses,FALSE,,heating | ventilation | air conditioning | electrical and mechanical
+POM,S8.elevators,Elevators,Total Property Operation and Maintenance Expenses > Other Expenses > Elevators,S8.other_expenses,FALSE,,
+POM,S8.building,Building,Total Property Operation and Maintenance Expenses > Other Expenses > Building,S8.other_expenses,FALSE,"Only map labels that explicitly include ""Building"" in it",
+POM,S8.pom_all_other,POM All Other,Total Property Operation and Maintenance Expenses > Other Expenses > POM All Other,S8.other_expenses,TRUE,,
+POM,S8.other_expenses,Other Expenses,Total Property Operation and Maintenance Expenses > Other Expenses,S8.total_property_operation_and_maintenance_expenses,FALSE,,
+POM,S8.total_property_operation_and_maintenance_expenses,Total Property Operation and Maintenance Expenses,,,FALSE,,
+Utilities,S9.energy,Energy,Total Utilities Expenses > Energy,S9.total_utilities_expenses,FALSE,,
+Utilities,S9.water_and_sewer,Water and Sewer,Total Utilities Expenses > Water and Sewer,S9.total_utilities_expenses,FALSE,,
+Utilities,S9.waste_removal,Waste Removal,Total Utilities Expenses > Waste Removal,S9.total_utilities_expenses,FALSE,Waste presented in Utilities.,trash removal|garbage collection|waste hauling
+Utilities,S9.utilities_all_other,Utilities All Other,Total Utilities Expenses > Utilities All Other,S9.total_utilities_expenses,TRUE,"Residual Utilities expense bucket. First map identifiable energy, water and sewer, and waste removal detail; use this only for remaining Utilities expenses needed to reconcile to Total Utilities Expenses.",utilities all other|other utilities|other utility expense|miscellaneous utilities|utility services|contract services
+Utilities,S9.total_utilities_expenses,Total Utilities Expenses,,,FALSE,,
+Mgmt Fees,S10.base_fee,Base Fee,Total Management Fees > Base Fee,S10.total_management_fees,FALSE,Hotel-operator management fee only. No franchise fees,base management fee|operator base fee
+Mgmt Fees,S10.incentive_and_other_fees,Incentive and Other Fees,Total Management Fees > Incentive and Other Fees,S10.total_management_fees,FALSE,Hotel-operator management fee only. No franchise fees,incentive management fee|other management fees
+Mgmt Fees,S10.total_management_fees,Total Management Fees,,,FALSE,,
+Non-Op,S11.rent,Rent,Total Non-Operating Income and Expenses > Rent,S11.total_non_operating_income_and_expenses,FALSE,"Includes storage, land, building and equipment rent.",ground rent|building rent|equipment lease|storage rent
+Non-Op,S11.property_and_other_taxes,Property and Other Taxes,Total Non-Operating Income and Expenses > Property and Other Taxes,S11.total_non_operating_income_and_expenses,FALSE,,
+Non-Op,S11.insurance,Insurance,Total Non-Operating Income and Expenses > Insurance,S11.total_non_operating_income_and_expenses,FALSE,,
+Non-Op,S11.property_insurance,Property Insurance,Total Non-Operating Income and Expenses > Insurance > Property Insurance,S11.insurance,FALSE,,building insurance | casualty insurance | flood insurance
+Non-Op,S11.general_liability_insurance,General Liability Insurance,Total Non-Operating Income and Expenses > Insurance > General Liability Insurance,S11.insurance,FALSE,,liability insurance
+Non-Op,S11.non_operating_income,Non-Operating Income,Total Non-Operating Income and Expenses > Non-Operating Income,S11.total_non_operating_income_and_expenses,FALSE,Normalize as negative expense; negate positive source income.,non-operating income|non operating revenue
+Non-Op,S11.other,Other,Total Non-Operating Income and Expenses > Other,S11.total_non_operating_income_and_expenses,TRUE,,
+Non-Op,S11.total_non_operating_income_and_expenses,Total Non-Operating Income and Expenses,,,FALSE,,
