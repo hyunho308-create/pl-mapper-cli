@@ -150,11 +150,11 @@ class NormalizationResult:
 
 @dataclass
 class SharedWorkbook:
-    """One parsed workbook the structure and mapping stages read once between them.
+    """One parsed workbook shared by discovery, structure and mapping stages.
 
-    Both stages need the same record back to back, and each used to read the file
-    itself -- 26s on CMI, paid twice for the same bytes. Sharing it does not raise
-    the peak, because only one record exists at a time either way.
+    The stages need the same record back to back, and each used to read the file
+    itself. Sharing it avoids repeated parsing and lets an interactive caller keep
+    the record alive while the user selects discovered periods.
 
     Reading is deferred to the first `require`, so a caller that hands this to both
     stages still pays nothing if neither stage gets that far.
@@ -506,8 +506,9 @@ def discover_workbook_periods(
     output_dir: Path,
     requested_period: str = "YTD Actual",
     progress: Callable[[str], None] | None = None,
+    parsed: SharedWorkbook | None = None,
 ) -> StructureRun:
-    """Run only the fast, sheet-level period discovery used before the pause."""
+    """Run only the fast, sheet-level period discovery used before selection."""
     from hotel_pl_normalizer.structure import WorkbookStructureAnalyzer
 
     if progress:
@@ -516,6 +517,8 @@ def discover_workbook_periods(
         workbook,
         requested_period=requested_period,
         output_dir=output_dir,
+        # Borrowed: selection may pause, then later stages reuse this record.
+        workbook_record=parsed.require() if parsed is not None else None,
     )
 
 

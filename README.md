@@ -47,13 +47,19 @@ export OPENAI_API_KEY="paste-your-key-here"
 
 ## Run
 
-Map the recommended validated period:
+Run interactively. After discovery, the CLI lists the validated periods and
+waits for a selection; enter one number, multiple comma-separated numbers, or
+press Enter to accept the recommendation. Enter `q` to cancel:
 
 ```powershell
 .\.venv\Scripts\hotel-pl-normalizer.exe "C:\P&Ls\Hotel.xlsx" "C:\P&Ls\Hotel-normalized"
 ```
 
-Map current and prior annual Actual periods when both are available:
+The workbook is parsed once and kept in memory while you choose. It is reused
+for the remaining analysis and released before the model-mapping session.
+
+For an unattended run, skip the prompt and map current and prior annual Actual
+periods when both are available:
 
 ```powershell
 .\.venv\Scripts\hotel-pl-normalizer.exe "C:\P&Ls\Hotel.xlsx" "C:\P&Ls\Hotel-normalized" --actual-and-prior

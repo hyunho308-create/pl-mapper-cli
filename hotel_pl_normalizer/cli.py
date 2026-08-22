@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import sys
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from pathlib import Path
@@ -35,6 +36,11 @@ def _catalog(run) -> dict:
 # compared between properties; a single month is only useful in context.
 ANNUAL_PERIOD_TYPES = {"full_year", "ytd", "ttm"}
 SUPPORTED_WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+
+
+def _display_period_detail(value: object) -> str:
+    text = str(value).replace("_", " ")
+    return text.upper() if text.lower() in {"ytd", "ttm"} else text.title()
 
 
 def _version() -> str:
@@ -157,6 +163,76 @@ def _choose_period_ids(
     raise RuntimeError("No discovered period passed validation.")
 
 
+def _prompt_for_period_ids(
+    catalog: dict,
+    valid_ids: set[str],
+    *,
+    read: Callable[[str], str] = input,
+) -> list[str]:
+    """Show validated periods and wait for a numbered user selection."""
+    options = [
+        item for item in catalog["options"] if item["period_id"] in valid_ids
+    ]
+    if not options:
+        raise RuntimeError("No discovered period passed validation.")
+
+    recommended = catalog.get("recommended_period_id")
+    default_index = next(
+        (
+            index
+            for index, item in enumerate(options, start=1)
+            if item["period_id"] == recommended
+        ),
+        1,
+    )
+    print("\nAvailable validated periods:", flush=True)
+    for index, item in enumerate(options, start=1):
+        details = " / ".join(
+            _display_period_detail(value)
+            for value in (
+                item.get("scenario"),
+                item.get("period_type"),
+                item.get("start_period"),
+                item.get("end_period"),
+            )
+            if value
+        )
+        marker = " (recommended)" if index == default_index else ""
+        suffix = f" — {details}" if details else ""
+        print(f"  {index}. {item['label']}{suffix}{marker}", flush=True)
+
+    prompt = (
+        "Select period number(s), separated by commas "
+        f"[default {default_index}; q to cancel]: "
+    )
+    while True:
+        try:
+            response = read(prompt).strip()
+        except EOFError as exc:
+            raise SystemExit(
+                "Period selection requires an interactive terminal. Re-run with "
+                "--actual-and-prior, --annual-periods N, or --period-id."
+            ) from exc
+        if not response:
+            indexes = [default_index]
+        elif response.lower() in {"q", "quit", "cancel"}:
+            raise SystemExit("Period selection cancelled.")
+        else:
+            try:
+                indexes = [int(part.strip()) for part in response.split(",")]
+            except ValueError:
+                print("Enter one or more numbers from the list, such as 1 or 1,2.")
+                continue
+        if not indexes or any(
+            index < 1 or index > len(options) for index in indexes
+        ):
+            print(f"Choose number(s) between 1 and {len(options)}.")
+            continue
+        return list(
+            dict.fromkeys(options[index - 1]["period_id"] for index in indexes)
+        )
+
+
 def main() -> None:
     # The progress feed carries typographic characters, and a Windows console
     # defaults to cp1252, which turns them into replacement marks. Nothing is
@@ -179,7 +255,10 @@ def main() -> None:
         "--period-id",
         action="append",
         default=[],
-        help="Period id to map; repeat to map multiple periods. Defaults to the validated recommendation.",
+        help=(
+            "Period id to map; repeat to map multiple periods and skip the "
+            "interactive prompt."
+        ),
     )
     selection.add_argument(
         "--annual-periods",
@@ -216,19 +295,27 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     work_dir = args.output_dir / "work"
+    # Discovery, structure analysis and evidence extraction all borrow this same
+    # parsed record. Mapping releases it as soon as the compact evidence exists.
+    parsed = shared_workbook(args.workbook)
     discovery = discover_workbook_periods(
         args.workbook,
         output_dir=work_dir / "discovery",
         progress=lambda message: print(message, flush=True),
+        parsed=parsed,
     )
     catalog = _catalog(discovery)
-    selected_ids = _choose_period_ids(
-        catalog,
-        validated_period_ids(discovery),
-        args.period_id,
-        annual_periods=args.annual_periods,
-        actual_and_prior=args.actual_and_prior,
-    )
+    valid_ids = validated_period_ids(discovery)
+    if args.period_id or args.annual_periods or args.actual_and_prior:
+        selected_ids = _choose_period_ids(
+            catalog,
+            valid_ids,
+            args.period_id,
+            annual_periods=args.annual_periods,
+            actual_and_prior=args.actual_and_prior,
+        )
+    else:
+        selected_ids = _prompt_for_period_ids(catalog, valid_ids)
     labels = {
         item["period_id"]: item["label"] for item in catalog["options"]
     }
@@ -237,8 +324,6 @@ def main() -> None:
         + ", ".join(f"{labels[item]} [{item}]" for item in selected_ids),
         flush=True,
     )
-    # Read once for both stages; normalize_workbook releases it before mapping.
-    parsed = shared_workbook(args.workbook)
     structure = analyze_workbook_structure(
         args.workbook,
         output_dir=work_dir / "upstream",

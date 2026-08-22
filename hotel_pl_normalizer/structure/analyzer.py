@@ -274,8 +274,9 @@ class WorkbookStructureAnalyzer:
         *,
         requested_period: str = "YTD Actual",
         output_dir: Path,
+        workbook_record: WorkbookRecord | None = None,
     ) -> StructureRun:
-        """Discover selectable periods without running routing or departments."""
+        """Discover periods, optionally borrowing an already parsed workbook."""
         started_at = _utc_now()
         started = time.perf_counter()
         workbook_path = Path(workbook_path)
@@ -284,9 +285,12 @@ class WorkbookStructureAnalyzer:
         stages: list[StageRun] = []
 
         stage_started_at, stage_started = _stage_clock()
-        workbook = read_excel_workbook(
-            workbook_path, source_id=f"pipeline_{workbook_path.stem}"
-        )
+        if workbook_record is None:
+            workbook = read_excel_workbook(
+                workbook_path, source_id=f"pipeline_{workbook_path.stem}"
+            )
+        else:
+            workbook = workbook_record
         stages.append(
             StageRun(
                 stage_name="ingestion",
