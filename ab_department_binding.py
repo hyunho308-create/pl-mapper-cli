@@ -24,6 +24,31 @@ CASES = {
 }
 
 
+def _load_api_key() -> bool:
+    """Load only OPENAI_API_KEY from the parent repository's ignored .env."""
+    if os.environ.get("OPENAI_API_KEY"):
+        return True
+    dotenv = STREAMLINED_ROOT.parents[1] / ".env"
+    if not dotenv.is_file():
+        return False
+    for raw_line in dotenv.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, raw_value = line.partition("=")
+        if separator != "=" or name.strip() != "OPENAI_API_KEY":
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if value:
+            os.environ["OPENAI_API_KEY"] = value
+            return True
+    return False
+
+
 def _run_one(workflow: str, source_root: Path, case: str, output_root: Path) -> None:
     workbook = FORMAT_ROOT / CASES[case]
     output = output_root / workflow / case
@@ -176,7 +201,7 @@ def main() -> None:
     args = parser.parse_args()
     output_root = args.output_root.resolve()
     if not args.compare_only:
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not _load_api_key():
             parser.error("OPENAI_API_KEY is not configured; no billable runs were started")
         workflows = (
             (("baseline", BASELINE_ROOT), ("streamlined", STREAMLINED_ROOT))
