@@ -208,8 +208,8 @@ def main() -> None:
             if args.workflow == "both"
             else ((args.workflow, BASELINE_ROOT if args.workflow == "baseline" else STREAMLINED_ROOT),)
         )
-        for workflow, source_root in workflows:
-            for case in CASES:
+        for case in CASES:
+            for workflow, source_root in workflows:
                 _run_one(workflow, source_root, case, output_root)
     if all(
         (output_root / workflow / case / "summary.json").is_file()
