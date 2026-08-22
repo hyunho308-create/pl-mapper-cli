@@ -34,24 +34,12 @@ from __future__ import annotations
 
 from .common import StrictModel
 from .department_location import DepartmentSectionRole
+from .sheet_selection import CANONICAL_DEPARTMENTS
 
 # The canonical department strings, repeated here so the schema can enumerate
 # them. A model that invents `franchise_fees` produces a span nothing downstream
 # recognises, and an enum is a cheaper way to say so than a validator.
-DEPARTMENTS = (
-    "summary",
-    "rooms",
-    "food_and_beverage",
-    "other_operated_departments",
-    "miscellaneous_income",
-    "administrative_and_general",
-    "information_and_telecommunications_systems",
-    "sales_and_marketing",
-    "property_operations_and_maintenance",
-    "utilities",
-    "management_fees",
-    "non_operating_income_and_expense",
-)
+DEPARTMENTS = CANONICAL_DEPARTMENTS
 
 
 class DepartmentSpan(StrictModel):

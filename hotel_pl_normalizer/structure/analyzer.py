@@ -22,7 +22,6 @@ from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers import ModelClient, create_model_client
 from hotel_pl_normalizer.structure.binding import (
     bind_departments,
-    binding_to_location_map,
     binding_to_selection_maps,
 )
 from hotel_pl_normalizer.structure.exploration.adapters import (
@@ -201,11 +200,7 @@ class WorkbookStructureAnalyzer:
             period_labels=labels,
             financial_sheets=routing.selected_sheet_names
             + routing.unsure_sheet_names,
-        )
-        location_map = binding_to_location_map(
-            output.structure,
-            workbook_id=workbook.workbook_id,
-            workbook_layout=routing.workbook_layout.value,
+            locate_departments=False,
         )
         selections = binding_to_selection_maps(
             output.structure,
@@ -214,7 +209,6 @@ class WorkbookStructureAnalyzer:
             period_labels=labels,
         )
         artifacts: dict[str, Any] = {
-            "location_map": location_map,
             "selections": {
                 period_id: item.model_dump(mode="json")
                 for period_id, item in selections.items()
@@ -224,23 +218,16 @@ class WorkbookStructureAnalyzer:
         }
         if output.tool_trace:
             artifacts["tool_trace"] = output.tool_trace
-        located_nothing = output.located_departments and not location_map.locations
         messages = [
-            *(
-                []
-                if output.located_departments
-                else [
-                    "Single-sheet workbook: departments were not located; "
-                    "the mapper will group rows from their labels."
-                ]
-            ),
+            "Department hints were retained from exploration; this stage only "
+            "bound the selected periods to sheet columns.",
             *output.observations,
             *(f"Rejected once: {item}" for item in output.rejections),
         ]
         return self._stage(
             output_dir,
-            "department_id",
-            StageStatus.FAIL if located_nothing else StageStatus.PASS,
+            "period_binding",
+            StageStatus.PASS,
             artifacts,
             stage_started_at,
             stage_started,

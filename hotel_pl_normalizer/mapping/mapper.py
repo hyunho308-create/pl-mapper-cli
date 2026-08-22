@@ -1620,7 +1620,7 @@ def map_workbook(
     *,
     workbook_id: str,
     requested_period: str,
-    locations,
+    sheet_classifications,
     periods,
     period_labels: dict[str, str] | None = None,
     evidence: list[dict],
@@ -1634,7 +1634,7 @@ def map_workbook(
     prompt = _primary_prompt(
         workbook_id,
         requested_period,
-        locations,
+        sheet_classifications,
         periods,
         period_labels,
         evidence,
@@ -1646,12 +1646,7 @@ def map_workbook(
         evidence,
         coa,
         period_labels=period_labels,
-        routed_departments={
-            location.department
-            for location in getattr(locations, "locations", ())
-            if str(getattr(location.section_role, "value", location.section_role))
-            not in {"kpi", "unknown"}
-        },
+        routed_departments=set(),
     )
     exhausted = False
     repair_truncated = False
@@ -1879,7 +1874,7 @@ def _validation_checkpoint_summary(attempt, result, plan, validator):
 def _primary_prompt(
     workbook_id,
     requested_period,
-    locations,
+    sheet_classifications,
     periods,
     period_labels,
     evidence,
@@ -1888,9 +1883,22 @@ def _primary_prompt(
 ) -> str:
     rows = _group_rows(evidence, period_labels)
     coa_lines = _coa_lines(coa)
-    location_lines = [
-        f"{x.department}|{x.section_role}|{x.sheet_name}!{x.start_row or 1}:{x.end_row or '?'}"
-        for x in locations.locations
+    classifications = [
+        {
+            "sheet_name": item.sheet_name,
+            "decision": item.decision.value,
+            "role_hint": item.role_hint.value,
+            "department_hints": [
+                {
+                    "department": hint.department.value,
+                    "section_role": hint.section_role.value,
+                    "evidence": list(hint.evidence),
+                }
+                for hint in item.department_hints
+            ],
+            "evidence": list(item.evidence),
+        }
+        for item in sheet_classifications
     ]
     period_lines = []
     period_maps = periods if isinstance(periods, dict) else {"selected": periods}
@@ -1910,7 +1918,7 @@ def _primary_prompt(
         "workbook_id": workbook_id,
         "requested_period": requested_period,
         "period_columns": period_lines,
-        "provisional_department_locations": location_lines,
+        "sheet_classifications": classifications,
         "coa": coa_lines,
         "coa_hierarchy_equations": _hierarchy_equations(coa),
         "summary_equations": _summary_equation_lines(),

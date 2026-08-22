@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hotel_pl_normalizer.models.department_location import DepartmentLocationMap
 from hotel_pl_normalizer.models.period_selection import PeriodColumnSelectionMap
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.structure.representation import (
@@ -26,7 +25,6 @@ from hotel_pl_normalizer.structure.representation import (
 def compact_workbook_evidence(
     workbook: WorkbookRecord,
     period_map: PeriodColumnSelectionMap | dict[str, PeriodColumnSelectionMap],
-    location_map: DepartmentLocationMap,
     *,
     include_sheets: set[str],
 ) -> list[dict[str, Any]]:
@@ -56,41 +54,20 @@ def compact_workbook_evidence(
     )
     columns_by_period: dict[str, dict[str, int]] = {}
     defaults_by_period: dict[str, int | None] = {}
-    ranges_by_period: dict[str, dict[str, list[tuple[int, int, int]]]] = {}
     for period_id, selection_map in period_maps.items():
         columns: dict[str, int] = {}
-        department_columns: dict[tuple[str, str], int] = {}
         selections = list(selection_map.sheet_selections)
         if selection_map.default_selection is not None:
             selections.append(selection_map.default_selection)
         for selection in selections:
             if selection.sheet_name and selection.value_column is not None:
                 columns.setdefault(selection.sheet_name, selection.value_column)
-                if selection.department:
-                    department_columns[
-                        (selection.sheet_name, selection.department)
-                    ] = selection.value_column
         columns_by_period[period_id] = columns
         defaults_by_period[period_id] = (
             selection_map.default_selection.value_column
             if selection_map.default_selection is not None
             else None
         )
-        ranged_columns: dict[str, list[tuple[int, int, int]]] = {}
-        for location in location_map.locations:
-            value_column = department_columns.get(
-                (location.sheet_name, location.department)
-            )
-            if value_column is None:
-                continue
-            ranged_columns.setdefault(location.sheet_name, []).append(
-                (
-                    location.start_row or 1,
-                    location.end_row or 2**31 - 1,
-                    value_column,
-                )
-            )
-        ranges_by_period[period_id] = ranged_columns
 
     evidence = []
     for sheet in workbook.sheets:
@@ -101,18 +78,9 @@ def compact_workbook_evidence(
             selected_columns = {}
             selected_values = {}
             for period_id in period_maps:
-                value_column = next(
-                    (
-                        column
-                        for start, end, column in ranges_by_period[period_id].get(
-                            sheet.sheet_name, []
-                        )
-                        if start <= row.row_index <= end
-                    ),
-                    columns_by_period[period_id].get(
-                        sheet.sheet_name,
-                        defaults_by_period[period_id],
-                    ),
+                value_column = columns_by_period[period_id].get(
+                    sheet.sheet_name,
+                    defaults_by_period[period_id],
                 )
                 selected_columns[period_id] = value_column
                 selected_values[period_id] = next(

@@ -137,13 +137,13 @@ def tool_parameter_schema(model: type[BaseModel]) -> dict:
     definitions = schema.pop("$defs", {})
 
     def resolve(node, depth=0):
+        if not isinstance(node, (dict, list)):
+            return node
         # Depth-guarded: a self-referencing model would otherwise inline forever.
         if depth > 12:
             return {"type": "object"}
         if isinstance(node, list):
             return [resolve(item, depth + 1) for item in node]
-        if not isinstance(node, dict):
-            return node
 
         ref = node.get("$ref")
         if isinstance(ref, str) and ref.startswith("#/$defs/"):

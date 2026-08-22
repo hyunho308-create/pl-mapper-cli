@@ -56,6 +56,7 @@ def exploration_to_sheet_selection(
             sheet_name=sheet.sheet_name,
             decision=sheet.decision,
             role_hint=sheet.role_hint,
+            department_hints=list(sheet.department_hints),
             evidence=list(sheet.evidence),
         )
         for sheet in exploration.sheets

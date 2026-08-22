@@ -12,7 +12,6 @@ from typing import Any
 
 from hotel_pl_normalizer.mapping import map_workbook
 from hotel_pl_normalizer.mapping.evidence import compact_workbook_evidence
-from hotel_pl_normalizer.models.department_location import DepartmentLocationMap
 from hotel_pl_normalizer.models.period_selection import (
     PeriodCatalog,
     PeriodColumnSelectionMap,
@@ -117,7 +116,7 @@ def _selected_periods(
     dict[str, str],
     dict[str, str],
 ]:
-    stored = _artifact(prior, "department_id", "selections")
+    stored = _artifact(prior, "period_binding", "selections")
     maps: dict[str, PeriodColumnSelectionMap] = {}
     labels: dict[str, str] = {}
     dropped: dict[str, str] = {}
@@ -184,7 +183,7 @@ def analyze_workbook_structure(
     from hotel_pl_normalizer.structure import WorkbookStructureAnalyzer
 
     if progress:
-        progress("Locating departments and selected period columns")
+        progress("Binding selected periods to sheet columns")
     return WorkbookStructureAnalyzer().run(
         workbook,
         output_dir=output_dir,
@@ -237,9 +236,6 @@ def normalize_workbook(
 
     record = parsed.require()
     parsed.release()
-    location_map = DepartmentLocationMap.model_validate(
-        _artifact(prior_run, "department_id", "location_map")
-    )
     period_maps, period_labels, dropped_periods = _selected_periods(
         prior_run, selected_period_ids
     )
@@ -254,7 +250,6 @@ def normalize_workbook(
     evidence = compact_workbook_evidence(
         record,
         period_maps,
-        location_map,
         include_sheets=included,
     )
     workbook_id = record.workbook_id
@@ -271,7 +266,7 @@ def normalize_workbook(
     mapping = map_workbook(
         workbook_id=workbook_id,
         requested_period=period_labels[primary_period_id],
-        locations=location_map,
+        sheet_classifications=sheet_selection.selections,
         periods=period_maps,
         period_labels=period_labels,
         evidence=evidence,
