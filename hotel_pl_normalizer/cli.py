@@ -278,6 +278,11 @@ def main() -> None:
             "when available."
         ),
     )
+    selection.add_argument(
+        "--recommended",
+        action="store_true",
+        help="Map the validated recommended period without prompting.",
+    )
     args = parser.parse_args()
 
     if args.doctor:
@@ -306,7 +311,7 @@ def main() -> None:
     )
     catalog = _catalog(discovery)
     valid_ids = validated_period_ids(discovery)
-    if args.period_id or args.annual_periods or args.actual_and_prior:
+    if args.period_id or args.annual_periods or args.actual_and_prior or args.recommended:
         selected_ids = _choose_period_ids(
             catalog,
             valid_ids,

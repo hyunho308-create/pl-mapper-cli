@@ -63,9 +63,12 @@ def _run_one(workflow: str, source_root: Path, case: str, output_root: Path) -> 
         "hotel_pl_normalizer.cli",
         str(workbook),
         str(output),
-        "--annual-periods",
-        "1",
     ]
+    command.extend(
+        ["--recommended"]
+        if case == "cmi_conventional"
+        else ["--annual-periods", "1"]
+    )
     print(f"[{workflow}/{case}] starting", flush=True)
     with (output / "console.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
