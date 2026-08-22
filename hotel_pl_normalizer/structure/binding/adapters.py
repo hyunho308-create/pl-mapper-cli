@@ -17,14 +17,10 @@ from __future__ import annotations
 from collections import Counter
 
 from hotel_pl_normalizer.models.binding import DepartmentBinding
-from hotel_pl_normalizer.models.common import ModelInfo
 from hotel_pl_normalizer.models.department_location import (
-    BoundaryConfidence,
     DepartmentLocation,
     DepartmentLocationKind,
     DepartmentLocationMap,
-    DepartmentLocationValidation,
-    ValidationStatus,
 )
 from hotel_pl_normalizer.models.period_selection import (
     PeriodColumnSelection,
@@ -50,7 +46,6 @@ def binding_to_location_map(
     structure: DepartmentBinding,
     *,
     workbook_id: str,
-    model: ModelInfo | None = None,
     workbook_layout: str | None = None,
 ) -> DepartmentLocationMap:
     """The department spans, as the map department ID used to write.
@@ -74,10 +69,6 @@ def binding_to_location_map(
             sheet_name=span.sheet_name,
             start_row=span.start_row,
             end_row=span.end_row,
-            # The session read the rows it is describing, but a boundary is a
-            # hint for the mapper either way, and claiming `exact` would assert
-            # more than anything here established.
-            boundary_confidence=BoundaryConfidence.APPROXIMATE,
             evidence=list(span.evidence),
         )
         for span in structure.departments
@@ -85,10 +76,8 @@ def binding_to_location_map(
     return DepartmentLocationMap(
         department_location_map_id=f"{workbook_id}:department_locations",
         workbook_id=workbook_id,
-        model=model or ModelInfo(),
         workbook_layout=workbook_layout or "",
         locations=locations,
-        validation=DepartmentLocationValidation(status=ValidationStatus.PASS),
         notes=[*structure.notes, *structure.observations],
     )
 
@@ -99,7 +88,6 @@ def binding_to_selection_maps(
     workbook_id: str,
     period_ids: list[str],
     period_labels: dict[str, str] | None = None,
-    model: ModelInfo | None = None,
 ) -> dict[str, PeriodColumnSelectionMap]:
     """One selection map per chosen period, keyed by period id.
 
@@ -136,7 +124,6 @@ def binding_to_selection_maps(
             selection_map_id=f"{workbook_id}:period_columns:{period_id}",
             workbook_id=workbook_id,
             requested_period=label,
-            model=model or ModelInfo(),
             default_selection=_default_selection(selections),
             sheet_selections=selections,
             notes=notes,

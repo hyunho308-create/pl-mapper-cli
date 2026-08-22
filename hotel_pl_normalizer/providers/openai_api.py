@@ -1,4 +1,4 @@
-"""OpenAI adapter for the existing OpenAI-compatible mapping tool loop."""
+"""OpenAI Luna adapter for the supplier-neutral model contract."""
 
 from __future__ import annotations
 
@@ -12,31 +12,23 @@ from pydantic import BaseModel, ValidationError
 
 from hotel_pl_normalizer.activity import describe_round, describe_tool_call
 from hotel_pl_normalizer.providers.base import (
-    ProviderRunCancelled,
+    ModelClient,
+    ModelToolError,
+    ModelToolset,
+    ProviderConfigurationError,
+    ProviderResponseTruncated,
     ProviderToolLoopError,
     elapsed_ms,
     extract_json_object,
     utc_now,
-)
-from hotel_pl_normalizer.providers.fireworks import (
-    FireworksConfigurationError,
-    FireworksJsonClient,
-    FireworksResponseTruncated,
-)
-from hotel_pl_normalizer.providers.workbook_tools import (
-    WorkbookToolError,
-    WorkbookToolset,
 )
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
-OPENAI_MODEL_ENV_VAR = "FRESH_START_OPENAI_MODEL"
-OPENAI_REASONING_EFFORT_ENV_VAR = "FRESH_START_OPENAI_REASONING_EFFORT"
-OPENAI_REPAIR_REASONING_EFFORT_ENV_VAR = (
-    "FRESH_START_OPENAI_REPAIR_REASONING_EFFORT"
-)
+DEFAULT_MAX_OUTPUT_TOKENS = 128_000
+DEFAULT_MAX_PROMPT_CHARS = 3_000_000
 
 
 
@@ -116,34 +108,26 @@ def estimate_openai_cost(
     return round(total, 6)
 
 
-class OpenAIJsonClient(FireworksJsonClient):
-    """Run the unchanged mapper session against an OpenAI model."""
+class OpenAIModelClient(ModelClient):
+    """Run the normalization workflow against OpenAI Luna."""
 
     provider = "openai"
 
     def __init__(
         self,
         *,
-        model_name: str | None = None,
-        reasoning_effort: str | None = None,
-        repair_reasoning_effort: str | None = None,
+        reasoning_effort: str = "medium",
+        repair_reasoning_effort: str = "medium",
     ) -> None:
-        selected_repair_reasoning = repair_reasoning_effort or os.environ.get(
-            OPENAI_REPAIR_REASONING_EFFORT_ENV_VAR, "medium"
-        )
-        super().__init__(
-            model_name=model_name
-            or os.environ.get(OPENAI_MODEL_ENV_VAR, DEFAULT_OPENAI_MODEL),
-            reasoning_effort=reasoning_effort
-            or os.environ.get(OPENAI_REASONING_EFFORT_ENV_VAR, "medium"),
-        )
-        # Kept on this adapter rather than requiring the optional Fireworks
-        # fallback to share Luna's repair settings.
-        self.repair_reasoning_effort = selected_repair_reasoning
-        # Luna supports 128k output. Keep repairs at the same ceiling so a valid
-        # accepted checkpoint is not lost merely because it occurred after turn 1.
-        self.max_output_tokens = min(self.max_output_tokens, 128_000)
+        self.model_name = DEFAULT_OPENAI_MODEL
+        self.reasoning_effort = reasoning_effort
+        self.repair_reasoning_effort = repair_reasoning_effort
+        self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
         self.repair_max_output_tokens = self.max_output_tokens
+        self.usage_history: list[dict] = []
+        self.last_tool_trace: list[dict] | None = None
+        self.last_validation_result: dict | None = None
+        self._client_instance = None
 
     def _client(self):
         if self._client_instance is None:
@@ -165,10 +149,9 @@ class OpenAIJsonClient(FireworksJsonClient):
         prompt: str,
         response_model: type[ModelT],
         *,
-        toolset: WorkbookToolset,
+        toolset: ModelToolset,
         max_iterations: int = 10,
         trace: list[dict] | None = None,
-        cancel: Callable[[], str | None] | None = None,
         on_activity: Callable[[str], None] | None = None,
     ) -> ModelT:
         """Run the existing mapping contract through the Responses API."""
@@ -201,11 +184,6 @@ class OpenAIJsonClient(FireworksJsonClient):
                 pass
 
         for round_number in range(1, max_iterations + 1):
-            if cancel is not None:
-                reason = cancel()
-                if reason:
-                    raise ProviderRunCancelled(reason)
-
             started_at = utc_now()
             started = time.perf_counter()
             request = {
@@ -287,7 +265,7 @@ class OpenAIJsonClient(FireworksJsonClient):
                     error_type="ResponseTruncated",
                     error_message=str(reason),
                 )
-                raise FireworksResponseTruncated(
+                raise ProviderResponseTruncated(
                     f"OpenAI response was incomplete: {reason}."
                 )
 
@@ -311,7 +289,7 @@ class OpenAIJsonClient(FireworksJsonClient):
                             raise ValueError("tool arguments must be an object")
                         try:
                             result = toolset.dispatch(name, arguments)
-                        except WorkbookToolError as exc:
+                        except ModelToolError as exc:
                             result = {
                                 "ok": False,
                                 "error": str(exc),
@@ -387,7 +365,7 @@ class OpenAIJsonClient(FireworksJsonClient):
 
             text = getattr(response, "output_text", "") or ""
             if not text:
-                raise FireworksConfigurationError(
+                raise ProviderConfigurationError(
                     "OpenAI returned neither a tool call nor text."
                 )
             try:
@@ -413,22 +391,27 @@ class OpenAIJsonClient(FireworksJsonClient):
             f"turns after {total_tool_calls} tool calls."
         )
 
-    def _usage_record(self, *args, **kwargs) -> dict:
-        record = super()._usage_record(*args, **kwargs)
-        record["provider"] = self.provider
-        return record
+    def estimate_cost(self, calls: list[dict]) -> float:
+        return estimate_openai_cost(calls)
 
-    def _failure_record(self, *args, **kwargs) -> dict:
-        record = super()._failure_record(*args, **kwargs)
-        record["provider"] = self.provider
-        return record
-
-    def _record_cache_hit(self, *args, **kwargs) -> None:
-        super()._record_cache_hit(*args, **kwargs)
-        self.usage_history[-1]["provider"] = self.provider
+    def pricing_details(self) -> dict[str, float]:
+        rates = openai_model_pricing(self.model_name)
+        return {
+            "input": rates.input_usd_per_mtok,
+            "cached_input": rates.cached_input_usd_per_mtok,
+            "output": rates.output_usd_per_mtok,
+        }
 
     def _validate_environment(self) -> None:
         if not os.environ.get(OPENAI_API_KEY_ENV_VAR):
             raise RuntimeError(
                 f"Set {OPENAI_API_KEY_ENV_VAR} before using the OpenAI provider."
+            )
+
+    @staticmethod
+    def _validate_prompt_size(prompt: str) -> None:
+        if len(prompt) > DEFAULT_MAX_PROMPT_CHARS:
+            raise ProviderConfigurationError(
+                f"Prompt is too large: {len(prompt):,} characters; "
+                f"limit is {DEFAULT_MAX_PROMPT_CHARS:,}."
             )

@@ -365,7 +365,6 @@ def main() -> None:
         "dropped_periods": result.dropped_periods,
         "session_calls": result.session_calls,
         "session_exhausted": result.session_exhausted,
-        "stopped_reason": result.stopped_reason,
     }
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"

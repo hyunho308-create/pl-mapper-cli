@@ -19,13 +19,12 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from hotel_pl_normalizer.models.common import NoNumericConfidenceModel, StrictModel
+from hotel_pl_normalizer.models.common import StrictModel
 from hotel_pl_normalizer.providers.base import (
     ProviderResponseTruncated,
-    ProviderRunCancelled,
     ProviderToolLoopError,
 )
-from hotel_pl_normalizer.providers.workbook_tools import WorkbookToolError
+from hotel_pl_normalizer.providers.base import ModelToolError
 
 
 class SourceOperation(str, Enum):
@@ -92,7 +91,7 @@ GENERIC_VENUE_IDS = tuple(
 RESIDUAL_AUTO_ACCEPT_RATIO = 0.05
 
 
-class AccountSourceDecision(NoNumericConfidenceModel):
+class AccountSourceDecision(StrictModel):
     coa_id: str
     operation: SourceOperation
     source_rows: list[str] = Field(default_factory=list)
@@ -211,7 +210,6 @@ class MappingResult:
     session_call_ms: list[int]
     session_tool_calls: int
     session_exhausted: bool
-    stopped_reason: str | None
     model_calls: list[dict]
     tool_trace: list[dict]
     mapping_selection: dict[str, Any]
@@ -264,19 +262,19 @@ class WorkbookMappingValidator:
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "validate_mapping":
             if self.current_plan is not None:
-                raise WorkbookToolError(
+                raise ModelToolError(
                     "validate_mapping is only for the initial complete plan. "
                     "Use patch_mapping for repairs."
                 )
             try:
                 plan = WorkbookSourcePlan.model_validate(arguments)
             except ValueError as exc:
-                raise WorkbookToolError(f"Draft mapping is not valid: {exc}") from exc
+                raise ModelToolError(f"Draft mapping is not valid: {exc}") from exc
             action = {"tool": name, "submitted_decision_count": len(plan.decisions)}
         elif name == "patch_mapping":
             plan, action = self._apply_patch(arguments)
         else:
-            raise WorkbookToolError(f"Unknown tool {name!r}.")
+            raise ModelToolError(f"Unknown tool {name!r}.")
         self._apply_conditional_strategy(plan)
         plan = _enrich_derived_summary_review_item(
             plan, self.derived_summary_source_rows
@@ -344,12 +342,12 @@ class WorkbookMappingValidator:
         known_rows = {item["row_key"] for item in self.evidence}
         derived_rows = list(dict.fromkeys(plan.strategy.derived_summary_source_rows))
         if plan.strategy.summary_mode == SummaryMode.DERIVED and not derived_rows:
-            raise WorkbookToolError(
+            raise ModelToolError(
                 "summary_mode=derived requires derived_summary_source_rows showing "
                 "the integrated statement or whole-P&L controls"
             )
         if plan.strategy.summary_mode != SummaryMode.DERIVED and derived_rows:
-            raise WorkbookToolError(
+            raise ModelToolError(
                 "derived_summary_source_rows require summary_mode=derived"
             )
         unknown = sorted(set(derived_rows) - known_rows)
@@ -360,7 +358,7 @@ class WorkbookMappingValidator:
         }
         unknown.extend(sorted(scenario_rows - known_rows))
         if unknown:
-            raise WorkbookToolError(
+            raise ModelToolError(
                 "unknown conditional-strategy source rows: "
                 + ", ".join(sorted(set(unknown)))
             )
@@ -381,23 +379,23 @@ class WorkbookMappingValidator:
 
     def _apply_patch(self, arguments):
         if self.current_plan is None:
-            raise WorkbookToolError(
+            raise ModelToolError(
                 "patch_mapping requires an initial validate_mapping submission."
             )
         try:
             patch = WorkbookSourcePatch.model_validate(arguments)
         except ValueError as exc:
-            raise WorkbookToolError(f"Mapping patch is not valid: {exc}") from exc
+            raise ModelToolError(f"Mapping patch is not valid: {exc}") from exc
         if patch.workbook_id != self.workbook_id:
-            raise WorkbookToolError(
+            raise ModelToolError(
                 f"workbook_id must be {self.workbook_id!r}, got {patch.workbook_id!r}"
             )
         replacement_ids = [item.coa_id for item in patch.replacements]
         if len(replacement_ids) != len(set(replacement_ids)):
-            raise WorkbookToolError("patch_mapping contains duplicate replacement COA ids.")
+            raise ModelToolError("patch_mapping contains duplicate replacement COA ids.")
         unknown = sorted(set(replacement_ids) - set(self.coa))
         if unknown:
-            raise WorkbookToolError("unknown replacement COA ids: " + ", ".join(unknown))
+            raise ModelToolError("unknown replacement COA ids: " + ", ".join(unknown))
         existing = {item.coa_id: item for item in self.current_plan.decisions}
         changes_decisions = any(
             coa_id not in existing
@@ -437,7 +435,7 @@ class WorkbookMappingValidator:
             and not changes_strategy
             and not changes_review
         ):
-            raise WorkbookToolError(
+            raise ModelToolError(
                 "patch_mapping must change at least one mapping decision, strategy "
                 "field, or review item."
             )
@@ -1628,8 +1626,6 @@ def map_workbook(
     evidence: list[dict],
     skipped_sheets: list[str],
     client,
-    cancel=None,
-    max_iterations: int | None = None,
     on_activity=None,
 ) -> MappingResult:
     """Map one complete workbook using model decisions and Python validation."""
@@ -1659,13 +1655,8 @@ def map_workbook(
     )
     exhausted = False
     repair_truncated = False
-    stopped_reason: str | None = None
     tool_trace: list[dict] = []
-    repair_iteration_limit = (
-        max_iterations
-        if max_iterations is not None
-        else (10 if len(period_labels) > 1 else 8)
-    )
+    repair_iteration_limit = 10 if len(period_labels) > 1 else 8
     iteration_limit = repair_iteration_limit + 1
     try:
         client.generate_json_model_with_tools(
@@ -1674,11 +1665,8 @@ def map_workbook(
             toolset=validator,
             max_iterations=iteration_limit,
             trace=tool_trace,
-            cancel=cancel,
             on_activity=on_activity,
         )
-    except ProviderRunCancelled as stop:
-        stopped_reason = str(stop)
     except ProviderToolLoopError:
         exhausted = True
     except ProviderResponseTruncated:
@@ -1693,8 +1681,6 @@ def map_workbook(
         plan = validator.current_plan
     elif validator.submissions:
         plan = WorkbookSourcePlan.model_validate(validator.submissions[-1])
-    elif stopped_reason:
-        raise ProviderRunCancelled(stopped_reason)
     else:
         raise RuntimeError("The model never submitted a mapping to validate.")
 
@@ -1789,8 +1775,7 @@ def map_workbook(
             "best completed mapping from an earlier validation attempt."
         )
     accepted = (
-        stopped_reason is None
-        and not execution_issues
+        not execution_issues
         and not any(
             check.startswith("error|")
             for period_checks in checks_by_period.values()
@@ -1820,7 +1805,6 @@ def map_workbook(
             int(call.get("tool_calls") or 0) for call in session_calls
         ),
         session_exhausted=exhausted,
-        stopped_reason=stopped_reason,
         model_calls=model_calls,
         tool_trace=tool_trace,
         mapping_selection={
@@ -2659,10 +2643,6 @@ def _accounts_share_lineage(left, right, coa):
         return output
 
     return left in ancestors(right) or right in ancestors(left)
-
-
-def _has_blocking_checks(checks):
-    return any(item.startswith("error|") for item in checks)
 
 
 def _all_source_supported(by_id, coa_ids):

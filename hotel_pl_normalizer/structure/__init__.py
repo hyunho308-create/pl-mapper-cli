@@ -1,5 +1,5 @@
 """Workbook-structure analysis used by the normalization pipeline."""
 
-from .analyzer import StructureBackends, WorkbookStructureAnalyzer
+from .analyzer import WorkbookStructureAnalyzer
 
-__all__ = ["StructureBackends", "WorkbookStructureAnalyzer"]
+__all__ = ["WorkbookStructureAnalyzer"]

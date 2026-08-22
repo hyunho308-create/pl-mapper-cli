@@ -149,8 +149,8 @@ class WorkbookExplorationToolset:
                 ),
                 # Derived from the model rather than hand-written, so the two
                 # cannot drift. `model_json_schema()` alone is not usable here:
-                # it describes the nested models with `$ref`/`$defs`, which a
-                # Gemini function declaration rejects outright.
+                # it describes nested models with `$ref`/`$defs`. Keep tool
+                # schemas within the portable JSON Schema subset.
                 "parameters": tool_parameter_schema(WorkbookRouting),
             },
             {

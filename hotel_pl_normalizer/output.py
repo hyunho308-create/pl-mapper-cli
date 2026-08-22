@@ -199,18 +199,11 @@ def _assert_template_matches(sheet, canonical: list[str]) -> int:
 
 
 def _periods(result: NormalizationResult) -> list[tuple[str, str, dict]]:
-    """Ordered (period_id, label, values). One entry for a single-period run."""
-    if result.period_values:
-        labels = result.period_labels or {}
-        return [
-            (
-                period_id,
-                labels.get(period_id, period_id),
-                values,
-            )
-            for period_id, values in result.period_values.items()
-        ]
-    return [("selected", result.period_label, result.values)]
+    """Ordered period id, label, and mapped values."""
+    return [
+        (period_id, result.period_labels[period_id], values)
+        for period_id, values in result.period_values.items()
+    ]
 
 
 def _mapped_label_period(
@@ -451,35 +444,6 @@ def _round_feedback_numbers(message: str) -> str:
     return rounded.replace("$", "")
 
 
-def _enrich_rollup_check(check, values: dict, coa: dict[str, dict]) -> str:
-    """Backfill rollup math for older saved runs that predate numeric warnings."""
-    text = str(check)
-    parts = text.split("|")
-    if len(parts) < 3 or parts[1] not in {
-        "hierarchy_complete",
-        "source_detail_incomplete",
-        "hierarchy_partial_with_residual",
-    }:
-        return text
-    if "|parent=" in text and "|children=" in text:
-        return text
-    target = parts[2]
-    child_ids = [
-        coa_id
-        for coa_id, metadata in coa.items()
-        if metadata.get("parent_coa_id") == target
-    ]
-    if target not in values or not child_ids:
-        return text
-    parent = float(values.get(target) or 0.0)
-    children = sum(float(values.get(child) or 0.0) for child in child_ids)
-    variance = parent - children
-    return (
-        f"{text}|parent={parent:.2f}|children={children:.2f}|"
-        f"variance={variance:.2f}"
-    )
-
-
 def _feedback(
     result: NormalizationResult,
     known_ids: set[str],
@@ -491,50 +455,24 @@ def _feedback(
     multi = len(periods) > 1
     labels = {period_id: label for period_id, label, _ in periods}
 
-    def absorb(checks, prefix: str = "", values: dict | None = None) -> None:
-        for check in checks or []:
-            check = _enrich_rollup_check(check, values or {}, result.coa)
+    grouped_checks: dict[tuple[str, str, str], list[str]] = {}
+    for period_id, period_checks in result.checks_by_period.items():
+        for check in period_checks:
             severity, target, rendered = _describe_check(check)
-            line = f"{prefix}{rendered}" if prefix else rendered
-            if target in known_ids:
-                by_account.setdefault(target, []).append(
-                    (SEVERITY_ORDER.get(severity, 2), line)
-                )
-            else:
-                # A check citing a source row rather than an account still has to
-                # reach someone; it goes to Run notes with its target intact.
-                orphans.append(f"{line} [{target}]" if target else line)
-
-    checks_by_period = result.checks_by_period or {}
-    if not checks_by_period:
-        absorb(result.checks, values=result.values)
-    else:
-        grouped_checks: dict[tuple[str, str, str], list[str]] = {}
-        values_by_period = {
-            period_id: values for period_id, _, values in periods
-        }
-        for period_id, period_checks in checks_by_period.items():
-            for check in period_checks or []:
-                check = _enrich_rollup_check(
-                    check,
-                    values_by_period.get(period_id, {}),
-                    result.coa,
-                )
-                severity, target, rendered = _describe_check(check)
-                grouped_checks.setdefault((severity, target, rendered), []).append(
-                    labels.get(period_id, period_id)
-                )
-        for (severity, target, rendered), affected_labels in grouped_checks.items():
-            prefix = ""
-            if multi and len(affected_labels) < len(periods):
-                prefix = f"{', '.join(affected_labels)} — "
-            line = f"{prefix}{rendered}"
-            if target in known_ids:
-                by_account.setdefault(target, []).append(
-                    (SEVERITY_ORDER.get(severity, 2), line)
-                )
-            else:
-                orphans.append(f"{line} [{target}]" if target else line)
+            grouped_checks.setdefault((severity, target, rendered), []).append(
+                labels[period_id]
+            )
+    for (severity, target, rendered), affected_labels in grouped_checks.items():
+        prefix = ""
+        if multi and len(affected_labels) < len(periods):
+            prefix = f"{', '.join(affected_labels)} — "
+        line = f"{prefix}{rendered}"
+        if target in known_ids:
+            by_account.setdefault(target, []).append(
+                (SEVERITY_ORDER.get(severity, 2), line)
+            )
+        else:
+            orphans.append(f"{line} [{target}]" if target else line)
 
     for item in result.review_items or []:
         message = _clean_feedback_message(
@@ -578,20 +516,13 @@ def _validation_findings(
     """Group the final validator findings consistently across selected periods."""
     labels = {period_id: label for period_id, label, _ in periods}
     grouped: dict[tuple[str, str, str], list[str]] = {}
-    checks_by_period = result.checks_by_period or {}
-    if checks_by_period:
-        for period_id, checks in checks_by_period.items():
-            for check in checks or []:
-                severity, target, rendered = _describe_check(check)
-                if severity:
-                    grouped.setdefault((severity, target, rendered), []).append(
-                        labels.get(period_id, period_id)
-                    )
-    else:
-        for check in result.checks or []:
+    for period_id, checks in result.checks_by_period.items():
+        for check in checks:
             severity, target, rendered = _describe_check(check)
             if severity:
-                grouped.setdefault((severity, target, rendered), [])
+                grouped.setdefault((severity, target, rendered), []).append(
+                    labels[period_id]
+                )
     return [(*finding, period_labels) for finding, period_labels in grouped.items()]
 
 
@@ -733,12 +664,7 @@ def _venue_names(by_account: dict, evidence_by_key: dict[str, dict]) -> dict[str
 
 def _run_note_mismatch_counts(result, periods) -> dict[str, int]:
     """Count the three requested final mismatch classes above 10."""
-    checks_by_period = result.checks_by_period or {}
-    period_checks = (
-        list(checks_by_period.items())
-        if checks_by_period
-        else [("", result.checks or [])]
-    )
+    period_checks = list(result.checks_by_period.items())
     values_by_period = {period_id: values for period_id, _, values in periods}
     children_by_parent: dict[str, list[str]] = {}
     for coa_id, metadata in result.coa.items():
@@ -821,9 +747,7 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     warnings = [finding for finding in findings if finding[0] == "warning"]
     human_notes = len(result.review_items or [])
     mismatch_counts = _run_note_mismatch_counts(result, periods)
-    if _field(result, "stopped_reason", None):
-        status = "Stopped"
-    elif errors:
+    if errors:
         status = "Completed with errors"
     elif warnings or human_notes or any(mismatch_counts.values()):
         status = "Completed with warnings"

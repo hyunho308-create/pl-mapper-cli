@@ -7,7 +7,6 @@ prompt, runs the loop, and reports what it cost.
 
 from __future__ import annotations
 
-import inspect
 import time
 from dataclasses import dataclass, field
 from importlib import resources
@@ -17,14 +16,6 @@ from hotel_pl_normalizer.models.binding import DepartmentBinding, WorkbookDepart
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 
 from .toolset import DepartmentBindingToolset
-
-
-def _accepts(func, parameter: str) -> bool:
-    """Does this callable take that keyword? Clients differ in what they report."""
-    try:
-        return parameter in inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 def should_locate_departments(financial_sheets: list[str]) -> bool:
@@ -171,13 +162,8 @@ def bind_departments(
         "toolset": toolset,
         "max_iterations": max_iterations,
         "trace": trace,
+        "on_activity": on_activity,
     }
-    # Only the Fireworks client reports progress mid-session; the Gemini one has
-    # no such parameter. Passed conditionally so this stage runs on either.
-    if on_activity is not None and _accepts(
-        client.generate_json_model_with_tools, "on_activity"
-    ):
-        options["on_activity"] = on_activity
 
     try:
         raw = client.generate_json_model_with_tools(prompt, DepartmentBinding, **options)
@@ -207,24 +193,3 @@ def bind_departments(
         observations=list(toolset.observations),
         tool_trace=trace,
     )
-
-
-def binding_summary(output: BindingOutput) -> dict[str, Any]:
-    """A flat view for benching one run against another."""
-    structure = output.structure
-    return {
-        "departments": len(structure.departments),
-        "department_names": sorted({span.department for span in structure.departments}),
-        "sheets_with_departments": len(
-            {span.sheet_name for span in structure.departments}
-        ),
-        "bindings": len(structure.bindings),
-        "bound_sheets": sorted({binding.sheet_name for binding in structure.bindings}),
-        "unavailable": len(structure.unavailable),
-        "tool_calls": output.tool_calls,
-        "reads": output.reads,
-        "rejections": len(output.rejections),
-        "observations": len(output.observations),
-        "duration_ms": output.duration_ms,
-        "located_departments": output.located_departments,
-    }

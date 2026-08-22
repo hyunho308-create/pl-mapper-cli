@@ -13,13 +13,12 @@ them. Reading rows 13-14 does.
 
 Repair is the session, not a second prompt. When a submission is rejected the
 objection goes back into the same conversation, so the model still has every row
-it read. The stage this replaces re-rendered a fresh prompt for each repair pass
-and made the model rediscover its own context.
+it read. Re-rendering a fresh prompt for each repair pass would make the model
+rediscover its own context.
 """
 
 from __future__ import annotations
 
-import inspect
 import time
 from dataclasses import dataclass, field
 from importlib import resources
@@ -29,14 +28,6 @@ from hotel_pl_normalizer.models.exploration import WorkbookExploration
 
 from .reader import LazyWorkbook
 from .toolset import WorkbookExplorationToolset
-
-
-def _accepts(func, parameter: str) -> bool:
-    """Does this callable take that keyword? Clients differ in what they report."""
-    try:
-        return parameter in inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 @dataclass
@@ -109,14 +100,8 @@ def explore_workbook(
             "toolset": toolset,
             "max_iterations": max_iterations,
             "trace": trace,
+            "on_activity": on_activity,
         }
-        # Only the Fireworks client reports progress mid-session; the Gemini one
-        # has no such parameter. Passed conditionally so this stage runs on
-        # either without the caller caring which.
-        if on_activity is not None and _accepts(
-            client.generate_json_model_with_tools, "on_activity"
-        ):
-            options["on_activity"] = on_activity
         raw = client.generate_json_model_with_tools(
             prompt, WorkbookExploration, **options
         )
@@ -134,19 +119,3 @@ def explore_workbook(
         rejections=list(toolset.rejections),
         tool_trace=trace,
     )
-
-
-def exploration_summary(output: ExplorationOutput) -> dict[str, Any]:
-    """A flat view for benching one run against another."""
-    structure = output.structure
-    return {
-        "layout": structure.workbook_layout.value,
-        "sheets": len(structure.sheets),
-        "financial_sheets": len(structure.financial_sheet_names),
-        "periods": len(structure.periods),
-        "period_labels": [period.label for period in structure.periods],
-        "recommended": structure.recommended_period_id,
-        "tool_calls": output.tool_calls,
-        "rejections": len(output.rejections),
-        "duration_ms": output.duration_ms,
-    }

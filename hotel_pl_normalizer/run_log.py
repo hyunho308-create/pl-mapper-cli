@@ -19,13 +19,8 @@ called these three things and held these three numbers" without opening the sour
 workbook at all. That join is the difference between a log you can audit and a log
 you can only grep.
 
-Retention
----------
-This is deliberately kept after the uploaded workbook is deleted, which means it
-outlives the 24-hour window that applies to the upload itself. It contains the
-extracted line items -- labels and figures -- so it is client financial data and
-should be treated as such. Whatever the demo page tells a visitor about retention
-has to account for this file, not just the upload.
+The log contains extracted line items, labels, and figures. Treat it as client
+financial data and store or delete it under the same policy as the source workbook.
 """
 
 from __future__ import annotations

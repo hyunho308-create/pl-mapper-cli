@@ -7,7 +7,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 
 import openpyxl
 from openpyxl.cell.cell import Cell
@@ -30,11 +29,6 @@ from hotel_pl_normalizer.models.workbook import (
 
 def read_excel_workbook(
     path: str | Path,
-    *,
-    source_id: str | None = None,
-    storage_uri: str | None = None,
-    uploaded_by: str | None = None,
-    uploaded_at: datetime | None = None,
 ) -> WorkbookRecord:
     """Read an Excel workbook into the hotel P&L WorkbookRecord contract.
 
@@ -48,62 +42,18 @@ def read_excel_workbook(
             read_path=source_path,
             source_path=source_path,
             file_type=FileType.XLSM if suffix == ".xlsm" else FileType.XLSX,
-            source_id=source_id,
-            storage_uri=storage_uri,
-            uploaded_by=uploaded_by,
-            uploaded_at=uploaded_at,
             ingestion_warnings=[],
         )
     if suffix == ".xls":
         return _read_xlrd_workbook(
             source_path=source_path,
-            source_id=source_id,
-            storage_uri=storage_uri,
-            uploaded_by=uploaded_by,
-            uploaded_at=uploaded_at,
         )
     raise ValueError(f"read_excel_workbook only supports .xlsx, .xlsm, and .xls files: {source_path}")
-
-
-def read_xlsx_workbook(
-    path: str | Path,
-    *,
-    source_id: str | None = None,
-    storage_uri: str | None = None,
-    uploaded_by: str | None = None,
-    uploaded_at: datetime | None = None,
-) -> WorkbookRecord:
-    """Read an `.xlsx` workbook into the hotel P&L WorkbookRecord contract.
-
-    This first ingestion slice is intentionally narrow:
-    - `.xlsx` only;
-    - used rectangle only, based on cells with values;
-    - no formula text extraction;
-    - no structural classification or mapping logic.
-    """
-    workbook_path = Path(path)
-    if workbook_path.suffix.lower() != ".xlsx":
-        raise ValueError(f"read_xlsx_workbook only supports .xlsx files: {workbook_path}")
-
-    return _read_openpyxl_workbook(
-        read_path=workbook_path,
-        source_path=workbook_path,
-        file_type=FileType.XLSX,
-        source_id=source_id,
-        storage_uri=storage_uri,
-        uploaded_by=uploaded_by,
-        uploaded_at=uploaded_at,
-        ingestion_warnings=[],
-    )
 
 
 def _read_xlrd_workbook(
     *,
     source_path: Path,
-    source_id: str | None,
-    storage_uri: str | None,
-    uploaded_by: str | None,
-    uploaded_at: datetime | None,
 ) -> WorkbookRecord:
     xlrd = _load_xlrd()
     warnings: list[IngestionWarning] = []
@@ -142,10 +92,6 @@ def _read_xlrd_workbook(
     source = _source_record(
         source_path=source_path,
         file_type=FileType.XLS,
-        source_id=source_id,
-        storage_uri=storage_uri,
-        uploaded_by=uploaded_by,
-        uploaded_at=uploaded_at,
     )
     return WorkbookRecord(
         workbook_id=_workbook_id(_parsed_content_hash(sheets)),
@@ -161,10 +107,6 @@ def _read_openpyxl_workbook(
     read_path: Path,
     source_path: Path,
     file_type: FileType,
-    source_id: str | None,
-    storage_uri: str | None,
-    uploaded_by: str | None,
-    uploaded_at: datetime | None,
     ingestion_warnings: list[IngestionWarning],
 ) -> WorkbookRecord:
     warnings = list(ingestion_warnings)
@@ -198,10 +140,6 @@ def _read_openpyxl_workbook(
     source = _source_record(
         source_path=source_path,
         file_type=file_type,
-        source_id=source_id,
-        storage_uri=storage_uri,
-        uploaded_by=uploaded_by,
-        uploaded_at=uploaded_at,
     )
     return WorkbookRecord(
         workbook_id=_workbook_id(_parsed_content_hash(sheets)),
@@ -387,55 +325,14 @@ def _source_record(
     *,
     source_path: Path,
     file_type: FileType,
-    source_id: str | None,
-    storage_uri: str | None,
-    uploaded_by: str | None,
-    uploaded_at: datetime | None,
 ) -> WorkbookSource:
     return WorkbookSource(
-        source_id=source_id or f"src_{uuid4().hex}",
+        source_id=f"primary:{source_path.stem}",
         original_filename=source_path.name,
         file_type=file_type,
-        storage_uri=storage_uri,
         local_path=str(source_path),
         file_hash=_sha256(source_path),
-        uploaded_by=uploaded_by,
-        uploaded_at=uploaded_at,
         ingested_at=datetime.now(timezone.utc),
-    )
-
-
-def _read_sheet(worksheet, sheet_index: int) -> WorkbookSheet:
-    max_row, max_col = _used_bounds(worksheet)
-    merged_ranges = [_merged_range_record(worksheet, merged) for merged in worksheet.merged_cells.ranges]
-    merged_parent_by_cell = _merged_parent_lookup(worksheet)
-    rows: list[WorkbookRow] = []
-
-    for row_idx in range(1, max_row + 1):
-        cells = [
-            _cell_record(
-                worksheet.cell(row=row_idx, column=col_idx),
-                merged_parent_by_cell,
-            )
-            for col_idx in range(1, max_col + 1)
-        ]
-        rows.append(
-            WorkbookRow(
-                row_index=row_idx,
-                height=worksheet.row_dimensions[row_idx].height,
-                hidden=bool(worksheet.row_dimensions[row_idx].hidden),
-                cells=cells,
-            )
-        )
-
-    return WorkbookSheet(
-        sheet_id=f"sheet_{sheet_index}",
-        sheet_name=worksheet.title,
-        visible=worksheet.sheet_state == "visible",
-        max_row=max_row,
-        max_column=max_col,
-        merged_ranges=merged_ranges,
-        rows=rows,
     )
 
 
@@ -483,26 +380,6 @@ def _read_xlrd_sheet(
     )
 
 
-def _used_bounds(worksheet) -> tuple[int, int]:
-    max_row = 0
-    max_col = 0
-    for row in worksheet.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
-            max_row = max(max_row, cell.row)
-            max_col = max(max_col, cell.column)
-
-    for merged in worksheet.merged_cells.ranges:
-        top_left = worksheet.cell(row=merged.min_row, column=merged.min_col)
-        if top_left.value is None:
-            continue
-        max_row = max(max_row, merged.max_row)
-        max_col = max(max_col, merged.max_col)
-
-    return max_row, max_col
-
-
 def _xlrd_used_bounds(xlrd, workbook, worksheet) -> tuple[int, int]:
     max_row = 0
     max_col = 0
@@ -524,16 +401,6 @@ def _xlrd_used_bounds(xlrd, workbook, worksheet) -> tuple[int, int]:
     return max_row, max_col
 
 
-def _merged_range_record(worksheet, merged) -> MergedRange:
-    top_left = worksheet.cell(row=merged.min_row, column=merged.min_col)
-    return MergedRange(
-        range=str(merged),
-        top_left_row=merged.min_row,
-        top_left_column=merged.min_col,
-        value=_serializable_value(top_left.value),
-    )
-
-
 def _xlrd_merged_range_record(xlrd, workbook, worksheet, merged) -> MergedRange:
     row_start, row_end, col_start, col_end = merged
     top_left = worksheet.cell(row_start, col_start)
@@ -542,21 +409,6 @@ def _xlrd_merged_range_record(xlrd, workbook, worksheet, merged) -> MergedRange:
         top_left_row=row_start + 1,
         top_left_column=col_start + 1,
         value=_serializable_value(_xlrd_cell_value(xlrd, workbook, top_left)),
-    )
-
-
-def _cell_record(cell: Cell, merged_parent_by_cell: dict[str, str]) -> CellRecord:
-    merged_parent = merged_parent_by_cell.get(cell.coordinate)
-    return CellRecord(
-        row=cell.row,
-        column=cell.column,
-        address=cell.coordinate,
-        raw_value=_serializable_value(cell.value),
-        display_value=_display_value(cell.value),
-        number_format=cell.number_format,
-        is_merged=merged_parent is not None,
-        merged_parent=merged_parent,
-        style=_cell_style(cell),
     )
 
 
@@ -679,16 +531,6 @@ def _build_xlrd_cell_style(workbook, cell) -> CellStyle:
             f"xlrd:{border.bottom_line_style}" if border is not None and getattr(border, "bottom_line_style", None) else None
         ),
     )
-
-
-def _merged_parent_lookup(worksheet) -> dict[str, str]:
-    lookup: dict[str, str] = {}
-    for merged in worksheet.merged_cells.ranges:
-        parent = worksheet.cell(row=merged.min_row, column=merged.min_col).coordinate
-        for row_idx in range(merged.min_row, merged.max_row + 1):
-            for col_idx in range(merged.min_col, merged.max_col + 1):
-                lookup[worksheet.cell(row=row_idx, column=col_idx).coordinate] = parent
-    return lookup
 
 
 def _xlrd_merged_parent_lookup(worksheet) -> dict[str, str]:

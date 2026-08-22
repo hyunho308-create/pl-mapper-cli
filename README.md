@@ -8,6 +8,17 @@ Maps one hotel P&L workbook to the bundled 269-account Standard COA. It creates:
 
 The source workbook is never overwritten. Models select source rows; Python reads the values, performs the arithmetic, and validates the result before writing the authored output template.
 
+## Architecture
+
+The package has one workflow: ingest once, discover periods, wait for the user's
+selection, bind the selected columns, map with the model, validate, and write the
+result atomically. OpenAI `gpt-5.6-luna` is the only model adapter shipped today.
+
+The workflow depends on the supplier-neutral `ModelClient` contract rather than
+the OpenAI SDK directly. A future Fireworks or Gemini adapter can implement that
+same contract and replace the factory result without adding a parallel mapping
+path or changing period selection, validation, or output generation.
+
 ## Requirements
 
 - Windows, macOS, or Linux

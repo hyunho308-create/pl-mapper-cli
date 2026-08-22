@@ -1,47 +1,22 @@
-"""What every JSON-returning model client shares, independent of the provider.
+"""Supplier-neutral contract for the model behind the normalization workflow.
 
-Why this is separate
---------------------
-Two clients call typed models: Gemini for the structure stages, Fireworks for the
-mapping session. They talk to different APIs, but the work either side of the
-network call is the same -- embed the schema in the prompt, ask again when the
-answer will not parse, and cache the result by prompt digest.
-
-That shared half used to live on `GeminiJsonClient`, and Fireworks reached in for
-it: `GeminiJsonClient._prompt_with_schema(...)`, `._read_cache(...)`,
-`._write_cache(...)`, `._json_repair_prompt(...)`, all called on another class's
-privates. It worked, but it made the Gemini client a dependency of the Fireworks
-one for reasons that had nothing to do with Gemini.
-
-The exception names carried the same problem further. Fireworks raised
-`GeminiRunCancelled`, and because Fireworks is the production mapper, the demo
-server's cancellation handler was catching a Gemini-named exception for a failure
-Gemini had no part in. Anyone reading that handler would conclude the wrong thing
-about which provider was involved.
-
-So: the shared behaviour is a base class, the exceptions are named for what
-happened rather than for who was being called, and each provider module keeps only
-what is genuinely its own -- auth, request shape, response parsing, pricing.
-
-Configuration errors stay per-provider (`GeminiConfigurationError`,
-`FireworksConfigurationError`) because they name a specific API key or setting,
-and both derive from `ProviderConfigurationError` so a caller that does not care
-which provider failed can still catch one thing.
+The workflow depends on typed tool calls, usage telemetry and cost estimation;
+it does not depend on a supplier's request or response shape. OpenAI Luna is the
+only adapter currently shipped. A future Fireworks or Gemini adapter implements
+this same contract and can replace Luna without adding another pipeline.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import TypeVar
+from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel
-
-from hotel_pl_normalizer.atomic import replace_atomically
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -66,14 +41,8 @@ class ProviderToolLoopError(RuntimeError):
     """A tool-calling session ended without producing its typed result."""
 
 
-class ProviderRunCancelled(RuntimeError):
-    """A session was stopped between rounds by its caller.
-
-    Distinct from `ProviderToolLoopError`: running out of turns is the model
-    failing to converge, while this is a deadline, a spend cap or a person
-    deciding the run should end. The caller keeps whatever was submitted before
-    the stop.
-    """
+class ModelToolError(ValueError):
+    """A model supplied arguments that do not describe a valid tool call."""
 
 
 def extract_json_object(text: str) -> str:
@@ -96,13 +65,22 @@ def extract_json_object(text: str) -> str:
     raise ProviderConfigurationError("Model response did not contain a JSON object.")
 
 
-class JsonModelClient:
-    """The provider-independent half of a typed model client.
+class ModelToolset(Protocol):
+    """Tools exposed to one model session."""
 
-    Subclasses own the network call and everything provider-shaped around it.
-    Everything here is a pure function of its arguments, which is what lets both
-    providers share it without sharing any state.
-    """
+    def declarations(self) -> list[dict[str, Any]]: ...
+
+    def dispatch(self, name: str, arguments: dict[str, Any]) -> dict: ...
+
+
+class ModelClient(ABC):
+    """The complete model surface required by the current workflow."""
+
+    provider: str
+    model_name: str
+    usage_history: list[dict]
+    last_tool_trace: list[dict] | None
+    last_validation_result: dict | None
 
     @staticmethod
     def _prompt_with_schema(prompt: str, response_model: type[BaseModel]) -> str:
@@ -118,88 +96,29 @@ class JsonModelClient:
             ]
         )
 
-    @staticmethod
-    def _json_repair_prompt(
-        invalid_text: str, response_model: type[BaseModel], error: str
-    ) -> str:
-        schema = response_model.model_json_schema()
-        return "\n\n".join(
-            [
-                "Your previous response was not valid JSON for the required schema.",
-                "Return exactly one corrected JSON object. Do not add markdown or explanatory text.",
-                "## Validation Error",
-                error,
-                "## Required Schema",
-                "```json",
-                json.dumps(schema, indent=2),
-                "```",
-                "## Invalid Response To Correct",
-                "```json",
-                invalid_text,
-                "```",
-            ]
-        )
+    @abstractmethod
+    def generate_json_model_with_tools(
+        self,
+        prompt: str,
+        response_model: type[ModelT],
+        *,
+        toolset: ModelToolset,
+        max_iterations: int,
+        trace: list[dict] | None = None,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> ModelT:
+        """Run a typed tool-calling session."""
 
-    @staticmethod
-    def _write_cache(cache_path: Path | None, result: BaseModel) -> None:
-        """Write a cache entry atomically.
+    @abstractmethod
+    def estimate_cost(self, calls: list[dict]) -> float:
+        """Estimate the cost of supplier-returned usage records."""
 
-        Departments now run concurrently, and the gate can replay several
-        properties at once against one shared cache directory, so two writers can
-        target the same content-addressed path. A direct `write_text` is not
-        atomic: a reader arriving mid-write, or a run killed part way through, sees
-        a truncated file. Writing to a unique temporary name and replacing means a
-        reader sees either the old entry or the whole new one.
-
-        `os.replace` is atomic on Windows and POSIX alike. The temp name carries
-        the pid so two processes never collide on it.
-        """
-        if cache_path is None:
-            return
-        temp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
-        try:
-            # Inside the try: creating the directory can fail too, and a cache
-            # write must never fail the call it was meant to accelerate.
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-            replace_atomically(temp_path, cache_path)
-        except OSError:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    @staticmethod
-    def _read_cache(
-        cache_path: Path | None, response_model: type[ModelT]
-    ) -> ModelT | None:
-        """Return a cached response, or None to mean "call the model".
-
-        An entry that cannot be read or does not validate is treated as a miss
-        rather than raising. Cache writes are not atomic, so killing a run mid
-        flight can leave a truncated file, and the cache is now load-bearing --
-        without this, a corrupt entry surfaces later as an unrelated crash in
-        whatever stage happened to hit it.
-
-        The response schema is already part of the key: the digest is taken over
-        `full_prompt`, which `_prompt_with_schema` builds with the model's JSON
-        schema embedded. So a contract change invalidates its own entries and
-        cannot land here as a stale-shape mismatch.
-        """
-        if cache_path is None or not cache_path.exists():
-            return None
-        try:
-            return response_model.model_validate_json(
-                cache_path.read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            # ValueError covers pydantic's ValidationError and JSON decode errors.
-            return None
+    @abstractmethod
+    def pricing_details(self) -> dict[str, Any]:
+        """Describe the rates used by :meth:`estimate_cost`."""
 
 
-# Keys pydantic emits that a Gemini function declaration rejects. Stripped rather
-# than translated: they are documentation or JSON Schema bookkeeping, and none of
-# them changes what shape of object the model should return.
+# Documentation and JSON Schema bookkeeping that tool APIs do not need.
 _SCHEMA_KEYS_TO_DROP = frozenset(
     {"title", "default", "additionalProperties", "$schema", "discriminator"}
 )
@@ -210,12 +129,9 @@ def tool_parameter_schema(model: type[BaseModel]) -> dict:
 
     `model_json_schema()` describes nested models with `$ref` and collects them
     under `$defs`, and optional fields as `anyOf: [{...}, {"type": "null"}]`.
-    Gemini's `types.Tool` refuses all three, which is why the mapping validator
-    hand-writes its declarations instead of deriving them.
-
-    Hand-writing means the schema and the model drift apart silently, so this
-    converts instead: definitions are inlined, nullable unions collapse to the
-    non-null branch, and bookkeeping keys are dropped.
+    Definitions are inlined, nullable unions collapse to the non-null branch,
+    and bookkeeping keys are dropped so adapters can translate one stable form
+    into their supplier's declaration format.
     """
     schema = model.model_json_schema()
     definitions = schema.pop("$defs", {})

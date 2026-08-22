@@ -2,13 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from .common import (
-    ModelInfo,
-    NoNumericConfidenceModel,
-    Severity,
-    StrictModel,
-    ValidationStatus,
-)
+from .common import StrictModel
 
 
 class SheetNameDecision(str, Enum):
@@ -33,38 +27,15 @@ class WorkbookSheetLayout(str, Enum):
     MIXED_OR_UNKNOWN = "mixed_or_unknown"
 
 
-class SheetNameCandidate(StrictModel):
-    sheet_name: str
-    sheet_index: int
-    visible: bool = True
-    header_cells: list[str] = []
-
-
-class SheetNameTriagePacket(StrictModel):
-    workbook_id: str
-    source_filename: str
-    sheet_count: int
-    sheets: list[SheetNameCandidate]
-
-
-class DepartmentCandidate(NoNumericConfidenceModel):
-    department: str
-    evidence: list[str] = []
-
-
-class SheetNameSelection(NoNumericConfidenceModel):
+class SheetNameSelection(StrictModel):
     sheet_name: str
     decision: SheetNameDecision
     role_hint: SheetNameRoleHint = SheetNameRoleHint.UNKNOWN
-    department_candidates: list[DepartmentCandidate] = []
-    needs_sheet_enrichment: bool = False
     evidence: list[str] = []
-    defer_reason: str | None = None
 
 
-class SheetNameSelectionResult(NoNumericConfidenceModel):
+class SheetNameSelectionResult(StrictModel):
     workbook_id: str
-    model: ModelInfo = ModelInfo()
     workbook_layout: WorkbookSheetLayout = WorkbookSheetLayout.MIXED_OR_UNKNOWN
     layout_evidence: list[str] = []
     selections: list[SheetNameSelection]
@@ -73,14 +44,3 @@ class SheetNameSelectionResult(NoNumericConfidenceModel):
     skipped_sheet_names: list[str] = []
     unsure_sheet_names: list[str] = []
     notes: list[str] = []
-
-
-class SheetNameSelectionValidationIssue(StrictModel):
-    severity: Severity
-    message: str
-    sheet_names: list[str] = []
-
-
-class SheetNameSelectionValidation(StrictModel):
-    status: ValidationStatus
-    issues: list[SheetNameSelectionValidationIssue] = []
