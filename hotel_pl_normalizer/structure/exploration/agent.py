@@ -43,27 +43,15 @@ class ExplorationOutput:
 
 
 def render_exploration_prompt(source_filename: str) -> str:
-    """The session's opening prompt.
-
-    The routing skill is appended verbatim rather than summarised. It is the
-    accumulated knowledge of which hotel sheets matter -- which duplicate summary
-    to prefer, why plain Laundry differs from Guest Laundry -- and paraphrasing
-    it here would fork it.
-    """
+    """The session's opening prompt, including sheet-routing guidance."""
     skill = (
         resources.files("hotel_pl_normalizer.prompts")
         .joinpath("workbook_exploration.md")
         .read_text(encoding="utf-8")
     )
-    routing = (
-        resources.files("hotel_pl_normalizer.prompts")
-        .joinpath("sheet_name_triage.md")
-        .read_text(encoding="utf-8")
-    )
     return "\n\n".join(
         [
             skill,
-            routing,
             "## This workbook",
             f"Filename: {source_filename}",
             "Call `list_sheets` to begin.",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from pydantic import ValidationError
@@ -31,6 +32,10 @@ from hotel_pl_normalizer.structure.binding.toolset import PeriodBindingToolset
 from hotel_pl_normalizer.structure.binding import (
     bind_periods,
     binding_to_selection_maps,
+)
+from hotel_pl_normalizer.structure.exploration.agent import render_exploration_prompt
+from hotel_pl_normalizer.structure.exploration.toolset import (
+    WorkbookExplorationToolset,
 )
 
 
@@ -79,6 +84,46 @@ def _record() -> WorkbookRecord:
 
 
 class StreamlinedDesignTests(unittest.TestCase):
+    def test_exploration_uses_one_current_prompt(self) -> None:
+        prompt = render_exploration_prompt("test.xlsx")
+        self.assertIn("two phases, in order", prompt)
+        self.assertIn("submit_routing", prompt)
+        self.assertIn("submit_periods", prompt)
+        self.assertIn("Guest Laundry", prompt)
+        self.assertNotIn("Sheet Name Triage Skill appended", prompt)
+        self.assertNotIn("department_candidates", prompt)
+        self.assertNotIn("needs_sheet_enrichment", prompt)
+        self.assertNotIn("SheetNameSelectionResult", prompt)
+
+    def test_exploration_keeps_routing_as_a_phase_gate(self) -> None:
+        workbook = SimpleNamespace(
+            path=Path("test.xlsx"),
+            sheets=lambda: [SimpleNamespace(sheet_name="P&L")],
+        )
+        toolset = WorkbookExplorationToolset(workbook)
+
+        premature = toolset.dispatch("submit_periods", {"periods": []})
+        self.assertFalse(premature["ok"])
+        self.assertIn("Routing has not been submitted", premature["error"])
+
+        routed = toolset.dispatch(
+            "submit_routing",
+            {
+                "workbook_layout": "single_tab_p_and_l",
+                "sheets": [
+                    {
+                        "sheet_name": "P&L",
+                        "decision": "triage",
+                        "role_hint": "summary_p_and_l",
+                        "evidence": ["Statement of income title"],
+                    }
+                ],
+            },
+        )
+        self.assertTrue(routed["accepted"])
+        self.assertIn("next_phase", routed)
+        self.assertIn("Phase two", routed["next_phase"])
+
     def test_binding_schema_has_no_department_contract(self) -> None:
         schema = json.dumps(WorkbookBindings.model_json_schema()).lower()
         self.assertNotIn("department", schema)
