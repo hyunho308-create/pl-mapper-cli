@@ -289,8 +289,11 @@ Use `review_items` to prevent silent guessing and flag material oddities:
   unusual enough that a human should know;
 - `source_discrepancy`: only after the same Summary-to-department mismatch has
   survived one structural repair pass and both independently reported source
-  layers remain supported. Cite both COA accounts and every source row from both
-  layers. Python decides whether the discrepancy qualifies and calculates it.
+  layers remain supported. Review any proposed offset rows using their labels and
+  surrounding structure; do not use a numerical near-match from another
+  department. Cite both COA accounts and every source row from both layers, and
+  explain why any proposed offsets do not apply. Python decides whether the
+  discrepancy otherwise qualifies and calculates it.
 
 Do not create a review item merely to restate a deterministic validation error.
 For a Summary-to-department difference, add one only when it identifies the

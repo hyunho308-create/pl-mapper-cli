@@ -1367,8 +1367,6 @@ def _qualified_source_discrepancy_warning(
     )
     if review is None:
         return None
-    if _offset_candidates(finding, plan, evidence, coa):
-        return None
     if _related_hierarchy_is_blocking(checks, detail_ids, coa):
         return None
     return (

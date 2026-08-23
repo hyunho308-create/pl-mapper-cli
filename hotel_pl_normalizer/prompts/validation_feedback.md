@@ -149,10 +149,14 @@ Resolution: Validate the Summary revenue-to-EBITDA structure first. Look for
 missing or duplicated schedules, summary-only lines, separately presented
 expenses, or department expenses that must be derived from revenue less profit.
 
-If the same mismatch remains after this structural repair, both source layers are
-independently supported and disjoint, and no offset candidate remains, add one
-`source_discrepancy` review item citing both COA IDs and all rows from both layers.
-Python will keep the finding blocking unless every qualification check passes.
+If the same mismatch remains after this structural repair and both source layers
+are independently supported and disjoint, review every offset candidate supplied
+in the validation feedback. Apply a candidate only when its label and surrounding
+structure support the affected department. Otherwise preserve both reported
+layers and add one `source_discrepancy` review item citing both COA IDs and all
+rows from both layers. Explain briefly why the candidates do not resolve the
+difference. Python will keep the finding blocking unless every other
+qualification check passes.
 
 ### `source_discrepancy`
 
