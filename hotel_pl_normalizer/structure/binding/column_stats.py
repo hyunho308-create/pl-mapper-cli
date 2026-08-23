@@ -1,43 +1,9 @@
-"""What the numbers in a row span look like, column by column.
+"""Summarize numeric columns over a caller-selected row range.
 
-Why this is a tool and not a check
-----------------------------------
-The stage this belongs to decides which column holds each chosen period. Most of
-that judgement comes from headers; this tool supplies the one useful numerical
-cross-check and is precise about its limits.
-
-`_candidate_looks_like_ratio_values` decides whether a column holds ratios rather
-than amounts, and it will not conclude anything from a small sample: at least
-five numeric values and three non-zeros before it calls a column ratio-scale.
-Hotel Seattle's Management Fees location has *three* numeric rows, so that
-function would never have fired on it. The model fired anyway -- one percentage
-row among three was enough for it to declare column S ratio-scale, which ended
-an otherwise-correct binding run.
-
-So on that failure the rule was right and the model was wrong, and it was right
-precisely because it refused to conclude anything from three values. Deleting it
-would lose that. Keeping it as a veto puts a rule back in front of a judgement
-the model is otherwise better at.
-
-The resolution is to return the counts *with the sample size*, and to say in the
-tool's own words when the sample is too thin to characterise anything. "3 values,
-1 percentage" has to read as thin evidence rather than as a finding.
-
-What this deliberately does not do
-----------------------------------
-**It does not read headers.** The session reads rows itself, with coordinates and
-the sheet's merged ranges, so it has already seen the header block in its raw
-form -- better than any extraction of it. The header context the old packet
-builder assembled exists because that stage could not look; this one can. What a
-header means, including a bare `Total` sitting after twelve Jan-Dec columns, is
-prose and the model's call.
-
-**It does not guess where the data starts.** `_first_business_row` exists because
-a packet covered a whole sheet and had to find the schedule inside it. Here the
-caller states the span it means, having read it.
-
-**It does not decide anything.** Every note below states what the numbers are or
-what they cannot support. None of them says a column is or is not a period.
+The tool reports counts, samples, percentage formats, and ratio-like values so
+the binding model can distinguish amount columns from percentages. It does not
+read headers, choose row boundaries, or decide which column holds a period.
+Small samples are reported as inconclusive rather than classified.
 """
 
 from __future__ import annotations

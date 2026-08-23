@@ -1,14 +1,7 @@
-"""Parsed workbook structures.
+"""Memory-efficient parsed workbook structures.
 
-Why these are dataclasses and not pydantic models
--------------------------------------------------
-These are the only models in the system built hundreds of thousands of times: one
-`CellRecord` and one `CellStyle` per cell. As pydantic models that cost about
-1,719 bytes per cell, which turned a 1.36 MB workbook (GRY, 218,879 cells) into
-791 MB of peak memory and an out-of-memory kill on a 512 MB instance.
-
-The same fields as `slots` dataclasses cost 296 bytes. The saving is entirely the
-per-instance overhead of validating data that openpyxl and xlrd already parsed.
+Cells and styles use slotted dataclasses because a workbook can contain hundreds
+of thousands of them and the Excel readers have already parsed their values.
 """
 
 from __future__ import annotations

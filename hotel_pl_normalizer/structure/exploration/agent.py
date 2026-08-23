@@ -1,21 +1,4 @@
-"""One stateful session that routes sheets and discovers periods together.
-
-Replaces two stages. Both asked questions about sheet names and header text, and
-asking them separately let them disagree -- discovery chose its five sheets with
-a cheap score that picked a Table of Contents and a payroll register on one
-workbook, while routing already knew better. One session makes one decision.
-
-It is also the first stage that reads the workbook itself rather than being
-handed a packet built from a full parse. That is the point: the stage this
-replaces failed on East Miami because a fixed four-row header window sat one row
-above the month headers, and nothing inside that window could have recovered
-them. Reading rows 13-14 does.
-
-Repair is the session, not a second prompt. When a submission is rejected the
-objection goes back into the same conversation, so the model still has every row
-it read. Re-rendering a fresh prompt for each repair pass would make the model
-rediscover its own context.
-"""
+"""Run one stateful session that routes sheets and discovers periods."""
 
 from __future__ import annotations
 

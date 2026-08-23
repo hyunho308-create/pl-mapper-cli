@@ -1,27 +1,8 @@
-"""The tools one exploration session can call.
+"""Workbook readers and ordered submissions for exploration.
 
-Three readers and two submissions, one per phase. The readers are thin -- they
-hand back what is in the cells, with coordinates, and leave the judgement to the
-model. That is deliberate: the stage this replaces failed on a workbook because a
-fixed four-row header window sat one row above the month headers, and no amount
-of cleverness in the window would have found them. A model that can look at rows
-13-14 does.
-
-The two submissions are ordered, and the ordering is the only control here.
-`submit_routing` takes a decision for every sheet; `submit_periods` is refused
-until it has been accepted, and phase two's instructions are returned *by*
-`submit_routing` rather than stated up front. A single session told about both
-jobs at once optimised for the periods and let routing fall out of them -- on one
-workbook it marked 65 real departmental schedules `skip` with the reason "not
-opened this session". Sequencing fixed that without anything inspecting the
-decisions.
-
-Validation is otherwise just the schema, plus the one check the old sheet routing
-also needed: a sheet name that is not in the workbook cannot be routed to. What
-makes a good routing decision, and which periods a workbook offers, are the
-model's calls. Every rule added here is a rule that has to generalise to the next
-operator's layout, and a rejection is fed back into the same session so the model
-can look again with everything it has already read.
+The model must submit routing before it receives the period-detection
+instructions. Mechanical checks enforce real sheet names and minimum financial
+sheet coverage; workbook interpretation remains the model's responsibility.
 """
 
 from __future__ import annotations

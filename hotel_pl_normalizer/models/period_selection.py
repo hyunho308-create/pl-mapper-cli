@@ -29,7 +29,6 @@ class PeriodColumnSelection(StrictModel):
     excel_column: str
     period_label: str
     evidence: list[str] = []
-    warnings: list[str] = []
 
 
 class PeriodColumnSelectionMap(StrictModel):

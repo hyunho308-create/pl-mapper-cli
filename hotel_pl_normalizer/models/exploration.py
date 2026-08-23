@@ -1,26 +1,9 @@
-"""What one exploration session returns.
-
-This replaces two stages with one answer. Sheet routing and period discovery both
-ask questions about sheet names and header text, and asking them separately let
-them disagree: discovery picked its five sheets with a cheap score that chose a
-Table of Contents and a payroll register on one workbook, while routing already
-had the vocabulary to know better.
-
-Everything here reuses the enums those two stages already speak, so the result
-can stand in for both without a translation layer.
-"""
+"""Structured answers from the combined routing and period-discovery session."""
 
 from __future__ import annotations
 
 from .common import StrictModel
 
-# `PeriodType` from `period_selection`, not from `common`. There are two enums of
-# that name and they are not interchangeable: `common.PeriodType` is
-# YTD/MTD/TTM/Budget/Forecast, while period discovery and period selection speak
-# month/current_period/ytd/full_year/ttm. Importing the wrong one left every
-# full-year column typed `Unknown`, because `full_year` is not one of its members
-# -- and this result is meant to stand in for discovery without a translation
-# layer, so it has to use discovery's vocabulary.
 from .period_selection import PeriodScenario, PeriodType
 from .sheet_selection import (
     SheetNameDecision,
@@ -44,9 +27,8 @@ class ExploredSheet(StrictModel):
 class DiscoveredPeriod(StrictModel):
     """A period the workbook offers.
 
-    No column bindings. Discovery answers *which periods exist*; committing one
-    to a column on each tab is `period_selection`'s job and needs the department
-    locations that do not exist yet at this point.
+    Discovery answers which periods exist. The user chooses from this list
+    before the binding stage locates the selected columns on each routed sheet.
     """
 
     period_id: str
@@ -63,15 +45,7 @@ class DiscoveredPeriod(StrictModel):
 
 
 class WorkbookRouting(StrictModel):
-    """Phase one: what this workbook is, and which sheets matter.
-
-    Submitted on its own, before any period work. Routing every sheet is the
-    whole job here, and mixing it with period detection made it a side effect of
-    that: a session that had read five sheets marked the other sixty-five `skip`
-    with the reason "not opened this session". Deciding the sheets first, and
-    only then being told to look for periods, removes that failure by
-    construction.
-    """
+    """Phase one: what this workbook is, and which sheets matter."""
 
     workbook_layout: WorkbookSheetLayout = WorkbookSheetLayout.MIXED_OR_UNKNOWN
     layout_evidence: list[str] = []
@@ -114,12 +88,3 @@ class WorkbookExploration(StrictModel):
     periods: list[DiscoveredPeriod] = []
     recommended_period_id: str | None = None
     notes: list[str] = []
-
-    @property
-    def financial_sheet_names(self) -> list[str]:
-        """Sheets worth reading, in the order the model returned them."""
-        return [
-            sheet.sheet_name
-            for sheet in self.sheets
-            if sheet.decision in {SheetNameDecision.TRIAGE, SheetNameDecision.UNSURE}
-        ]

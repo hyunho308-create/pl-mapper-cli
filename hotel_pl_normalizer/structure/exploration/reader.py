@@ -1,29 +1,8 @@
-"""Read parts of a workbook without parsing all of it.
+"""Read bounded structural slices directly from an Excel workbook.
 
-Why this exists alongside `structure/ingestion`
------------------------------------------------
-Ingestion builds the whole `WorkbookRecord`, which is the right thing when
-figures are about to be read from it. It is the wrong thing for deciding *which
-sheets matter* and *which periods a workbook offers*, because that question is
-answered from sheet names and header rows.
-
-Measured on this corpus, ingesting to answer it costs 1.1-34 s and roughly 580 MB
-for a 1.4 MB workbook; opening the same file and reading the first forty rows of
-three sheets costs 0.08-1.1 s. Across 27 properties, ingestion was 224 s against
-277 s of actual model work in that phase -- and on some workbooks 94 % of the
-phase was parsing.
-
-    CMI 2.1 MB      33.81 s parsed      0.71 s read     47x
-    W Aspen         30.66 s             0.62 s          50x
-    MIN .xls         3.13 s             0.26 s          12x
-
-Scope, deliberately
--------------------
-This reads *structure*: names, header text, coordinates. It must never be the
-source of a figure that reaches the output. `providers/workbook_tools.py`
-explains why the mapper reads the ingested record instead of the file -- two
-readers of the same workbook can disagree -- and that reasoning still holds. The
-exception is safe only because nothing here is arithmetic.
+Exploration uses this reader for sheet names, header text, merged ranges, and
+coordinates. Values written to the normalized output always come from the
+separately ingested `WorkbookRecord`; this reader is never an arithmetic source.
 
 Format differences worth knowing
 --------------------------------

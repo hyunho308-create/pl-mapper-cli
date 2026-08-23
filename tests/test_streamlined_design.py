@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from hotel_pl_normalizer.cli import main as cli_main
 from hotel_pl_normalizer.mapping.mapper import (
     SourceOperation,
     _detail_collapse_issue,
@@ -15,6 +20,7 @@ from hotel_pl_normalizer.mapping.mapper import (
     _primary_prompt,
 )
 from hotel_pl_normalizer.models.binding import WorkbookBindings
+from hotel_pl_normalizer.models.exploration import WorkbookExploration
 from hotel_pl_normalizer.models.period_selection import (
     PeriodColumnSelection,
     PeriodColumnSelectionMap,
@@ -84,6 +90,21 @@ def _record() -> WorkbookRecord:
 
 
 class StreamlinedDesignTests(unittest.TestCase):
+    def test_cli_has_no_evaluation_only_routes(self) -> None:
+        stdout = StringIO()
+        with patch.object(sys, "argv", ["hotel-pl-normalizer", "--help"]):
+            with redirect_stdout(stdout), self.assertRaises(SystemExit) as stopped:
+                cli_main()
+        self.assertEqual(stopped.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertNotIn("--discovery-run", help_text)
+        self.assertNotIn("--discover-only", help_text)
+
+    def test_removed_model_members_stay_removed(self) -> None:
+        selection_schema = PeriodColumnSelection.model_json_schema()
+        self.assertNotIn("warnings", selection_schema["properties"])
+        self.assertFalse(hasattr(WorkbookExploration, "financial_sheet_names"))
+
     def test_exploration_uses_one_current_prompt(self) -> None:
         prompt = render_exploration_prompt("test.xlsx")
         self.assertIn("two phases, in order", prompt)
