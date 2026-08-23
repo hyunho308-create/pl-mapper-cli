@@ -226,15 +226,11 @@ class WorkbookMappingValidator:
         evidence,
         coa,
         period_labels=None,
-        routed_departments=None,
-        sheet_classifications=None,
     ):
         self.workbook_id = workbook_id
         self.evidence = evidence
         self.coa = coa
         self.period_labels = period_labels or {"selected": "Selected period"}
-        self.routed_departments = frozenset(routed_departments or ())
-        self.sheet_classifications = tuple(sheet_classifications or ())
         self.preserve_blanks = len(self.period_labels) > 1
         self.history: list[dict[str, Any]] = []
         self.submissions: list[dict[str, Any]] = []
@@ -534,9 +530,7 @@ class WorkbookMappingValidator:
                 + ", ".join(unknown_review_rows)
             )
         errors = list(execution_issues)
-        collapse_issue = _department_collapse_issue(
-            plan, self.evidence, self.sheet_classifications
-        )
+        collapse_issue = _detail_collapse_issue(plan, self.evidence)
         if collapse_issue:
             errors.append(collapse_issue)
         missing_venue_names = sorted(
@@ -573,7 +567,6 @@ class WorkbookMappingValidator:
                 plan.decisions,
                 plan.strategy,
                 plan.review_items,
-                self.routed_departments,
                 self.summary_only_pushdown_rows,
             )
             checks = _qualify_source_discrepancies(
@@ -1003,7 +996,6 @@ def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
             "coverage_inconsistent",
             "coverage_unspecified",
             "parent_no_value_with_children",
-            "routed_department_not_present",
         }
         for rule in errors
     )
@@ -1229,7 +1221,6 @@ SOURCE_DISCREPANCY_BLOCKING_RULES = {
     "hierarchy_partial_with_residual",
     "coverage_inconsistent",
     "parent_no_value_with_children",
-    "routed_department_not_present",
 }
 
 
@@ -1555,21 +1546,21 @@ SUMMARY_EQUATIONS = {
 }
 
 
-DEPARTMENT_ROOT_ROUTES = {
-    "S1.total_rooms_revenue": "rooms",
-    "S1.total_rooms_expenses": "rooms",
-    "S2.total_food_and_beverage_revenue": "food_and_beverage",
-    "S2.total_food_and_beverage_expenses": "food_and_beverage",
-    "S3.total_other_operated_departments_revenue": "other_operated_departments",
-    "S3.total_other_operated_departments_expenses": "other_operated_departments",
-    "S4.total_miscellaneous_income": "miscellaneous_income",
-    "S5.total_administrative_and_general_expenses": "administrative_and_general",
-    "S6.total_information_and_telecommunications_systems_expenses": "information_and_telecommunications_systems",
-    "S7.total_sales_and_marketing_expenses": "sales_and_marketing",
-    "S8.total_property_operation_and_maintenance_expenses": "property_operations_and_maintenance",
-    "S9.total_utilities_expenses": "utilities",
-    "S10.total_management_fees": "management_fees",
-    "S11.total_non_operating_income_and_expenses": "non_operating_income_and_expense",
+DEPARTMENT_ROOT_IDS = {
+    "S1.total_rooms_revenue",
+    "S1.total_rooms_expenses",
+    "S2.total_food_and_beverage_revenue",
+    "S2.total_food_and_beverage_expenses",
+    "S3.total_other_operated_departments_revenue",
+    "S3.total_other_operated_departments_expenses",
+    "S4.total_miscellaneous_income",
+    "S5.total_administrative_and_general_expenses",
+    "S6.total_information_and_telecommunications_systems_expenses",
+    "S7.total_sales_and_marketing_expenses",
+    "S8.total_property_operation_and_maintenance_expenses",
+    "S9.total_utilities_expenses",
+    "S10.total_management_fees",
+    "S11.total_non_operating_income_and_expenses",
 }
 
 SUMMARY_DERIVED_ROW_REUSE = {
@@ -1625,7 +1616,6 @@ def map_workbook(
     *,
     workbook_id: str,
     requested_period: str,
-    sheet_classifications,
     periods,
     period_labels: dict[str, str] | None = None,
     evidence: list[dict],
@@ -1639,7 +1629,6 @@ def map_workbook(
     prompt = _primary_prompt(
         workbook_id,
         requested_period,
-        sheet_classifications,
         periods,
         period_labels,
         evidence,
@@ -1651,13 +1640,6 @@ def map_workbook(
         evidence,
         coa,
         period_labels=period_labels,
-        routed_departments={
-            hint.department.value
-            for item in sheet_classifications
-            for hint in item.department_hints
-            if hint.section_role.value not in {"kpi", "unknown"}
-        },
-        sheet_classifications=sheet_classifications,
     )
     exhausted = False
     repair_truncated = False
@@ -1740,7 +1722,6 @@ def map_workbook(
             decisions,
             plan.strategy,
             plan.review_items,
-            validator.routed_departments,
             validator.summary_only_pushdown_rows,
         )
         checks_by_period[period_id] = _qualify_source_discrepancies(
@@ -1885,7 +1866,6 @@ def _validation_checkpoint_summary(attempt, result, plan, validator):
 def _primary_prompt(
     workbook_id,
     requested_period,
-    sheet_classifications,
     periods,
     period_labels,
     evidence,
@@ -1894,21 +1874,6 @@ def _primary_prompt(
 ) -> str:
     rows = _group_rows(evidence, period_labels)
     coa_lines = _coa_lines(coa)
-    classifications = [
-        {
-            "sheet_name": item.sheet_name,
-            "department_hints": [
-                {
-                    "department": hint.department.value,
-                    "section_role": hint.section_role.value,
-                    "evidence": list(hint.evidence),
-                }
-                for hint in item.department_hints
-            ],
-            "evidence": list(item.evidence),
-        }
-        for item in sheet_classifications
-    ]
     period_lines = []
     period_maps = periods if isinstance(periods, dict) else {"selected": periods}
     multi_period = len(period_maps) > 1
@@ -1920,14 +1885,12 @@ def _primary_prompt(
             prefix = f"{period_id}|" if multi_period else ""
             period_lines.append(
                 f"{prefix}{selection.sheet_name or '*'}|"
-                f"department={selection.department or '-'}|"
                 f"column={selection.value_column}|{period_labels[period_id]}"
             )
     payload = {
         "workbook_id": workbook_id,
         "requested_period": requested_period,
         "period_columns": period_lines,
-        "period_binding_department_hints": classifications,
         "coa": coa_lines,
         "coa_hierarchy_equations": _hierarchy_equations(coa),
         "summary_equations": _summary_equation_lines(),
@@ -2165,37 +2128,16 @@ def _validation_values(values):
     }
 
 
-def _department_collapse_issue(plan, evidence, sheet_classifications):
-    """Reject a suspicious parent-only plan when binding found rich detail tabs.
+def _detail_collapse_issue(plan, evidence):
+    """Reject a suspicious parent-only plan for a substantively rich workbook.
 
-    This is deliberately a coarse safety net, not a completeness quota. It only
-    activates for a genuinely large body of unambiguous department-sheet
-    evidence, then asks whether the plan cited a plausible number of detailed
-    COA accounts from those same sheets.
+    This coarse safeguard uses only the rows already routed to mapping. It does
+    not need to know which department owns a sheet or where a section begins.
     """
-    department_prefixes: dict[str, set[str]] = {}
-    for coa_id, department in DEPARTMENT_ROOT_ROUTES.items():
-        department_prefixes.setdefault(department, set()).add(
-            coa_id.split(".", 1)[0] + "."
-        )
-    confident: dict[str, str] = {}
-    for item in sheet_classifications:
-        useful = [
-            hint
-            for hint in item.department_hints
-            if hint.department.value != "summary"
-            and hint.section_role.value in {"primary", "summary", "detail"}
-        ]
-        if len(useful) == 1:
-            confident[item.sheet_name] = useful[0].department.value
-    if not confident:
-        return None
-
     rich_rows = [
         row
         for row in evidence
-        if row["row_key"].rsplit("!", 1)[0] in confident
-        and str(row.get("label") or "").strip()
+        if str(row.get("label") or "").strip()
         and any(
             isinstance(value, (int, float))
             and not isinstance(value, bool)
@@ -2203,39 +2145,30 @@ def _department_collapse_issue(plan, evidence, sheet_classifications):
             for value in (row.get("selected_values") or {}).values()
         )
     ]
-    rich_sheets = {
-        row["row_key"].rsplit("!", 1)[0] for row in rich_rows
-    }
+    rich_sheets = {row["row_key"].rsplit("!", 1)[0] for row in rich_rows}
     if len(rich_rows) < 120 and len(rich_sheets) < 8:
         return None
 
-    active_detail = set()
-    for decision in plan.decisions:
-        department = next(
-            (
-                confident[sheet]
-                for row_key in decision.source_rows
-                for sheet in [row_key.rsplit("!", 1)[0]]
-                if sheet in rich_sheets
-            ),
-            None,
+    active_detail = {
+        decision.coa_id
+        for decision in plan.decisions
+        if decision.operation != SourceOperation.NO_VALUE
+        and not decision.coa_id.startswith("S12.")
+        and decision.coa_id not in DEPARTMENT_ROOT_IDS
+        and any(
+            row_key.rsplit("!", 1)[0] in rich_sheets
+            for row_key in decision.source_rows
         )
-        if department is None:
-            continue
-        if any(
-            decision.coa_id.startswith(prefix)
-            for prefix in department_prefixes.get(department, ())
-        ) and decision.coa_id not in DEPARTMENT_ROOT_ROUTES:
-            active_detail.add(decision.coa_id)
+    }
 
     minimum = max(12, 2 * len(rich_sheets))
     if len(active_detail) >= minimum or len(active_detail) >= len(rich_rows) * 0.12:
         return None
     return (
-        "department_detail_collapsed: period binding identified "
-        f"{len(rich_sheets)} unambiguous department sheet(s) with "
+        "detail_mapping_collapsed: routing supplied "
+        f"{len(rich_sheets)} substantive sheet(s) with "
         f"{len(rich_rows)} non-zero labelled rows, but the plan cites only "
-        f"{len(active_detail)} detailed department COA account(s) from them; "
+        f"{len(active_detail)} detailed COA account(s) from them; "
         "map identifiable child accounts instead of collapsing the workbook "
         "mostly to parents/no_value"
     )
@@ -2247,7 +2180,6 @@ def _validate(
     decisions,
     strategy,
     review_items=None,
-    routed_departments=None,
     summary_only_pushdown_rows=None,
 ):
     issues = _source_row_reuse_issues(
@@ -2257,20 +2189,6 @@ def _validate(
         summary_only_pushdown_rows or set(),
     )
     by_id = {item.coa_id: item for item in decisions}
-    routed_departments = frozenset(routed_departments or ())
-    for department_id, routed_department in DEPARTMENT_ROOT_ROUTES.items():
-        decision = by_id.get(department_id)
-        if (
-            routed_department in routed_departments
-            and decision is not None
-            and decision.operation == SourceOperation.NO_VALUE
-            and decision.child_coverage == ChildCoverage.NOT_PRESENT
-        ):
-            issues.append(
-                f"error|routed_department_not_present|{department_id}|"
-                f"department={routed_department}|a routed department cannot be "
-                "marked no_value/not_present"
-            )
     children = _children_by_parent(coa)
     for parent, child_ids in children.items():
         decision = by_id.get(parent)

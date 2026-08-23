@@ -25,7 +25,6 @@ class PeriodType(str, Enum):
 
 class PeriodColumnSelection(StrictModel):
     sheet_name: str | None = None
-    department: str | None = None
     value_column: int
     excel_column: str
     period_label: str

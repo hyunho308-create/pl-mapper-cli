@@ -16,7 +16,6 @@ from hotel_pl_normalizer.models.period_selection import (
     PeriodCatalog,
     PeriodColumnSelectionMap,
 )
-from hotel_pl_normalizer.models.binding import DepartmentBinding
 from hotel_pl_normalizer.models.run import StructureRun
 from hotel_pl_normalizer.models.sheet_selection import SheetNameSelectionResult
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
@@ -243,9 +242,6 @@ def normalize_workbook(
     sheet_selection = SheetNameSelectionResult.model_validate(
         _artifact(prior_run, "sheet_routing", "selection")
     )
-    binding = DepartmentBinding.model_validate(
-        _artifact(prior_run, "period_binding", "binding")
-    )
     skipped = set(sheet_selection.skipped_sheet_names)
     included = {sheet.sheet_name for sheet in record.sheets if sheet.sheet_name not in skipped}
 
@@ -270,7 +266,6 @@ def normalize_workbook(
     mapping = map_workbook(
         workbook_id=workbook_id,
         requested_period=period_labels[primary_period_id],
-        sheet_classifications=binding.sheet_classifications,
         periods=period_maps,
         period_labels=period_labels,
         evidence=evidence,

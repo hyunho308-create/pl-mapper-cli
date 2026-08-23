@@ -26,11 +26,8 @@ Before assigning detailed COA accounts:
    require an adjustment.
 7. Only then assign detailed COA children.
 
-The supplied sheet roles and department classifications are provisional hints.
-Multiple department hints mean the sheet is mixed or ambiguous; no hints mean
-its department is unknown. Determine conditional structures from the workbook
-evidence itself and do not treat a hint as a row boundary. Record each applicable
-condition
+Determine conditional structures from the workbook evidence itself. Record each
+applicable condition
 in `strategy`, with concise reasons and supporting source rows. Use an empty list
 when none applies.
 

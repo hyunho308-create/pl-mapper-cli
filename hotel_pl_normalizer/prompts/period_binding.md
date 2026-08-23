@@ -1,4 +1,4 @@
-# Binding each chosen period to a column
+# Period Column Binding
 
 Find, for **each sheet** and **each chosen period**, the one column that holds
 that period's figures.
@@ -24,8 +24,8 @@ mark that **sheet** unavailable for that period. Do not drop the period.
 Two obligations, both enforced. A submission missing either is refused.
 
 1. **Every routed sheet needs an answer for every chosen period** — a column, or
-   an `unavailable` note saying what you saw instead. The list comes back with
-   this phase's instructions. Routing already decided these sheets hold P&L
+   an `unavailable` note saying what you saw instead. The list is in the workbook
+   context. Routing already decided these sheets hold P&L
    content, so silence about one is not an answer, and leaving it out does not
    make it safe: it falls back to another sheet's column, which is the same guess
    you would have made, only harder to see.
@@ -122,7 +122,7 @@ Two ways to confirm you are in the right block:
 
 - **Compare magnitudes.** A year-to-date figure is a sum of months, so on any
   schedule past January it is visibly larger than the same account's current
-  month. `column_stats` on a real department span shows you both. If your "YTD"
+  month. `column_stats` on a substantive row range shows you both. If your "YTD"
   column and the month column hold similar figures, you are probably in the month
   block.
 - **Count the blocks.** If the sheet has two Actual columns, two Budget columns
@@ -132,8 +132,8 @@ Two ways to confirm you are in the right block:
 ## Check the column carries money
 
 `column_stats` tells you what a column actually holds over a row range you name.
-Use it on a real department span before binding — the header can say `Actual` over
-a column of percentages.
+Use it on a substantive row range before binding — the header can say `Actual`
+over a column of percentages.
 
 Read its answer as evidence, not as a verdict:
 
@@ -142,7 +142,7 @@ Read its answer as evidence, not as a verdict:
   tool will say so. When the sample is thin, judge from the header instead.
 - Percent-formatted counts, magnitudes and sample values are facts about the
   span. What they mean is your call.
-- A column that is entirely zero across a real department span is worth a second
+- A column that is entirely zero across a substantive row range is worth a second
   look. Some budget columns genuinely are empty; if it is empty everywhere, say
   so and mark it unavailable rather than binding to something else.
 
@@ -157,11 +157,3 @@ to the workbook's usual column, and your reason is recorded. **One sheet lacking
 one period is never a reason to abandon the others.**
 
 Then call `submit_bindings`.
-
-In the same submission, include exactly one `sheet_classifications` entry for
-every routed financial sheet you opened. Each entry has the exact `sheet_name`,
-zero or more `department_hints`, and short `evidence`. Each hint uses a canonical
-department and one of `primary`, `summary`, `detail`, `supporting_detail`, `kpi`,
-or `unknown`. Use multiple hints for a genuinely mixed sheet and an empty list
-when the department is ambiguous or unknown. These are provisional sheet-level
-hints only: do not infer or return row boundaries.

@@ -2,10 +2,9 @@
 
 Why this is a tool and not a check
 ----------------------------------
-The stage this belongs to decides two things a model is better at than a rule --
-where a department sits, and which column holds which period -- so almost every
-list of words in the stages it replaces becomes prose. This is the exception, and
-it is worth being precise about why.
+The stage this belongs to decides which column holds each chosen period. Most of
+that judgement comes from headers; this tool supplies the one useful numerical
+cross-check and is precise about its limits.
 
 `_candidate_looks_like_ratio_values` decides whether a column holds ratios rather
 than amounts, and it will not conclude anything from a small sample: at least
@@ -13,7 +12,7 @@ five numeric values and three non-zeros before it calls a column ratio-scale.
 Hotel Seattle's Management Fees location has *three* numeric rows, so that
 function would never have fired on it. The model fired anyway -- one percentage
 row among three was enough for it to declare column S ratio-scale, which ended
-the run for ten departments that had bound correctly.
+an otherwise-correct binding run.
 
 So on that failure the rule was right and the model was wrong, and it was right
 precisely because it refused to conclude anything from three values. Deleting it
@@ -129,9 +128,8 @@ class SpanFigures:
     """The span itself, before any column is considered.
 
     Reported because it answers a different question from the columns: whether
-    this range is a schedule at all. A span with two labelled rows is not a
-    department however clean its columns look, and a span with three is a
-    perfectly ordinary Management Fees section.
+    this range is substantive enough to characterize at all. A span with two
+    labelled rows is weak evidence however clean its columns look.
     """
 
     sheet_name: str
@@ -269,7 +267,7 @@ def _column_notes(figures: ColumnFigures) -> list[str]:
     """What these counts do, and do not, support.
 
     Every note is either a restatement of the numbers or a refusal. None of them
-    concludes that a column is a percentage, a period, or a department total --
+    concludes that a column is a percentage or a period --
     those are the reader's to decide, with the sheet in front of it.
     """
     notes: list[str] = []

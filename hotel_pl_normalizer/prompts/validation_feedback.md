@@ -166,15 +166,6 @@ after a structural repair pass, and deterministic qualification checks passed.
 Resolution: Preserve both reported source layers and present the computed
 difference for human review. Do not alter either value merely to force agreement.
 
-### `routed_department_not_present`
-
-Description: Upstream routing found usable source coverage for a department, but
-the department root was marked `no_value` with `not_present` child coverage.
-
-Resolution: Inspect the routed primary, summary, and detail locations and map the
-department root from the best supported total. Do not use `not_present` to bypass
-a routed department.
-
 ### `summary_combined_ood_misc`
 
 Description: The selected combined OOD and miscellaneous-income presentation

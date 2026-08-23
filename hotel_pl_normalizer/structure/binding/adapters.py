@@ -1,27 +1,10 @@
-"""Present one binding session in the shapes the pipeline already speaks.
-
-`mapping/evidence.py` asks for a `DepartmentLocationMap` and a
-`PeriodColumnSelectionMap` per period, and neither it nor the mapper needs to
-learn that two stages became one.
-
-The one asymmetry worth knowing: `evidence.py` resolves a row's column as
-department-span, then sheet, then workbook default, and this stage only ever
-populates the second. Selections carry no department, so the span-scoped lookup
-never fires and every row on a sheet takes that sheet's column -- which is what a
-hotel P&L does. Departments reach the mapper as a grouping hint in the
-`DepartmentLocationMap`, and never as a column selector.
-"""
+"""Adapt one binding session to the pipeline's period-selection maps."""
 
 from __future__ import annotations
 
 from collections import Counter
 
-from hotel_pl_normalizer.models.binding import DepartmentBinding
-from hotel_pl_normalizer.models.department_location import (
-    DepartmentLocation,
-    DepartmentLocationKind,
-    DepartmentLocationMap,
-)
+from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.period_selection import (
     PeriodColumnSelection,
     PeriodColumnSelectionMap,
@@ -35,55 +18,8 @@ def _column_number(excel_column: str) -> int:
     return number
 
 
-def _location_id(workbook_id: str, span) -> str:
-    safe = "".join(c if c.isalnum() else "_" for c in span.sheet_name).strip("_").lower()
-    if span.start_row is None and span.end_row is None:
-        return f"{workbook_id}:{span.department}:{safe}"
-    return f"{workbook_id}:{span.department}:{safe}:{span.start_row or ''}-{span.end_row or ''}"
-
-
-def binding_to_location_map(
-    structure: DepartmentBinding,
-    *,
-    workbook_id: str,
-    workbook_layout: str | None = None,
-) -> DepartmentLocationMap:
-    """The department spans, as the map department ID used to write.
-
-    Validation is recorded as a pass carrying the session's observations. The
-    session already refused anything that could not be true of this workbook, and
-    an observation is by definition something that did not stop it -- writing it
-    as a warning would make every downstream reader treat a normal workbook as
-    suspect.
-    """
-    locations = [
-        DepartmentLocation(
-            location_id=_location_id(workbook_id, span),
-            department=span.department,
-            section_role=span.section_role,
-            location_kind=(
-                DepartmentLocationKind.SHEET
-                if span.start_row is None and span.end_row is None
-                else DepartmentLocationKind.RANGE
-            ),
-            sheet_name=span.sheet_name,
-            start_row=span.start_row,
-            end_row=span.end_row,
-            evidence=list(span.evidence),
-        )
-        for span in structure.departments
-    ]
-    return DepartmentLocationMap(
-        department_location_map_id=f"{workbook_id}:department_locations",
-        workbook_id=workbook_id,
-        workbook_layout=workbook_layout or "",
-        locations=locations,
-        notes=[*structure.notes, *structure.observations],
-    )
-
-
 def binding_to_selection_maps(
-    structure: DepartmentBinding,
+    structure: WorkbookBindings,
     *,
     workbook_id: str,
     period_ids: list[str],
@@ -102,11 +38,6 @@ def binding_to_selection_maps(
         selections = [
             PeriodColumnSelection(
                 sheet_name=binding.sheet_name,
-                # Deliberately unset. A selection carrying a department makes
-                # `evidence.py` build a span-scoped override for that department's
-                # rows; a sheet's columns do not change by department, so there is
-                # nothing for that override to express.
-                department=None,
                 value_column=_column_number(binding.excel_column),
                 excel_column=binding.excel_column.strip().upper(),
                 period_label=label,
@@ -154,7 +85,6 @@ def _default_selection(
     return template.model_copy(
         update={
             "sheet_name": None,
-            "department": None,
             "evidence": [
                 f"Most common bound column across {len(selections)} sheet(s)."
             ],

@@ -21,7 +21,7 @@ from hotel_pl_normalizer.models.sheet_selection import SheetNameSelectionResult
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers import ModelClient, create_model_client
 from hotel_pl_normalizer.structure.binding import (
-    bind_departments,
+    bind_periods,
     binding_to_selection_maps,
 )
 from hotel_pl_normalizer.structure.exploration.adapters import (
@@ -96,7 +96,7 @@ class WorkbookStructureAnalyzer:
         selected_period_ids: list[str],
         workbook_record: WorkbookRecord,
     ) -> StructureRun:
-        """Bind departments and selected periods using discovery's routing."""
+        """Bind selected periods to columns using discovery's routing."""
         if not selected_period_ids:
             raise ValueError("At least one discovered period must be selected.")
         if discovery_run.workbook_id != workbook_record.workbook_id:
@@ -193,14 +193,13 @@ class WorkbookStructureAnalyzer:
         if set(labels) != selected:
             raise ValueError("One or more selected periods are absent from discovery.")
 
-        output = bind_departments(
+        output = bind_periods(
             workbook,
             client=self.client,
             period_ids=selected_period_ids,
             period_labels=labels,
             financial_sheets=routing.selected_sheet_names
             + routing.unsure_sheet_names,
-            locate_departments=False,
         )
         selections = binding_to_selection_maps(
             output.structure,
@@ -219,8 +218,7 @@ class WorkbookStructureAnalyzer:
         if output.tool_trace:
             artifacts["tool_trace"] = output.tool_trace
         messages = [
-            "Selected periods were bound to columns and sheet-level department "
-            "hints were retained without row boundaries.",
+            "Selected periods were bound to columns for every routed sheet.",
             *output.observations,
             *(f"Rejected once: {item}" for item in output.rejections),
         ]

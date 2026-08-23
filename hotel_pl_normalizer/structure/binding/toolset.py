@@ -1,38 +1,14 @@
-"""The tools one department-and-binding session can call.
-
-Four readers and two submissions, one per phase, over the parsed record the
-mapper is about to be given. Reading the same record matters: two readers of one
-workbook can disagree, and every figure downstream comes from this one.
-
-The readers are thin. They hand back what is in the cells, with coordinates, and
-leave the judgement to the model -- except `column_stats`, which counts and then
-says plainly when the counts are too thin to mean anything. That is the one place
-a rule survived, and `column_stats.py` explains why.
-
-The two submissions are ordered, and the ordering is the only control here.
-`submit_bindings` is refused until `submit_departments` has been accepted, and
-phase two's instructions are returned *by* `submit_departments` rather than
-stated up front. Exploration measured what happens otherwise: a session told
-about both jobs at once optimises for the second and lets the first fall out of
-it.
-"""
+"""Reader and submission tools for one period-column binding session."""
 
 from __future__ import annotations
 
-from functools import lru_cache
-from importlib import resources
 from typing import Any
 
-from hotel_pl_normalizer.models.binding import (
-    DEPARTMENTS,
-    DepartmentBinding,
-    WorkbookBindings,
-    WorkbookDepartments,
-)
+from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers.base import tool_parameter_schema
 
-from .checks import check_bindings, check_departments, normalize_spans
+from .checks import check_bindings
 from .column_stats import column_stats
 
 MAX_ROWS_PER_READ = 60
@@ -56,25 +32,15 @@ MAX_HEADER_ROWS = 30
 DEFAULT_HEADER_ROWS = 15
 
 
-@lru_cache(maxsize=1)
-def _period_binding_instructions() -> str:
-    """Phase two's skill, delivered as the result of an accepted phase one."""
-    return (
-        resources.files("hotel_pl_normalizer.prompts")
-        .joinpath("period_binding.md")
-        .read_text(encoding="utf-8")
-    )
-
-
-class DepartmentBindingToolset:
-    """Reader tools plus the two phase submissions, over one parsed workbook."""
+class PeriodBindingToolset:
+    """Reader tools plus one period-binding submission."""
 
     # Tool results are reads of one specific record, and the prompt names the
     # workbook, so a cached session would be safe -- but the periods vary per
     # run and the prompt would have to carry them all. Not worth the subtlety.
     cacheable = False
 
-    # How many times one phase may be refused before its next well-formed
+    # How many times a submission may be refused before its next well-formed
     # submission is taken anyway. A check that keeps refusing is not teaching the
     # model anything, and a session that argues until it runs out of turns
     # returns *nothing* -- which is strictly worse than the imperfect answer it
@@ -92,18 +58,13 @@ class DepartmentBindingToolset:
         workbook: WorkbookRecord,
         *,
         period_ids: list[str],
-        period_labels: dict[str, str] | None = None,
         financial_sheets: list[str] | None = None,
         max_reads: int = 120,
-        locate_departments: bool = True,
     ) -> None:
         self.workbook = workbook
         self.period_ids = list(period_ids)
-        self.period_labels = dict(period_labels or {})
         self.sheets = {sheet.sheet_name: sheet for sheet in workbook.sheets}
-        # Routing's answer, kept as a preference rather than a boundary: a span
-        # on a sheet routing skipped is accepted, because routing is sometimes
-        # wrong and being right about it should not cost a property.
+        # Routing's answer is a preference rather than a hard boundary.
         self.financial_sheets = [
             name for name in (financial_sheets or list(self.sheets)) if name in self.sheets
         ]
@@ -114,22 +75,13 @@ class DepartmentBindingToolset:
         # twenty tabs without the model having seen any of their header blocks,
         # and "which column is December" is a question only the header answers.
         self.opened_sheets: set[str] = set()
-        # Locating departments is where this stage spends -- 208 of 317 tool
-        # calls across the corpus happen before `submit_departments`, and on a
-        # one-sheet P&L it is nearly all of them. With it off there is one job
-        # and one submission, so `departments` starts settled and empty rather
-        # than waiting to be filled.
-        self.locate_departments = locate_departments
-        self.departments: WorkbookDepartments | None = (
-            None if locate_departments else WorkbookDepartments()
-        )
-        self.submission: DepartmentBinding | None = None
+        self.submission: WorkbookBindings | None = None
         self.rejections: list[str] = []
         self.observations: list[str] = []
         self._refusals: dict[str, int] = {}
 
     def signature(self) -> str:
-        return f"department_binding:{self.workbook.workbook_id}"
+        return f"period_binding:{self.workbook.workbook_id}"
 
     # -- declarations -----------------------------------------------------
 
@@ -202,8 +154,8 @@ class DepartmentBindingToolset:
                 "name": "find_rows",
                 "description": (
                     "Where a string appears, case-insensitive, with coordinates "
-                    "and the sheet each hit is on. Use it to locate a department "
-                    "heading or a period label without guessing a row number."
+                    "and the sheet each hit is on. Use it to locate a period "
+                    "label without guessing a row number."
                 ),
                 "parameters": {
                     "type": "object",
@@ -233,32 +185,11 @@ class DepartmentBindingToolset:
                     "required": ["sheet_name", "start_row", "end_row"],
                 },
             },
-            *(
-                [
-                    {
-                        "name": "submit_departments",
-                        "description": (
-                            "Phase one result: where every department sits. "
-                            "Returns the period-binding instructions for phase "
-                            "two."
-                        ),
-                        "parameters": tool_parameter_schema(WorkbookDepartments),
-                    }
-                ]
-                if self.locate_departments
-                else []
-            ),
             {
                 "name": "submit_bindings",
                 "description": (
-                    "Which column holds each chosen period on each sheet. This "
-                    "ends the session."
-                    + (
-                        " Only available after submit_departments has been "
-                        "accepted."
-                        if self.locate_departments
-                        else ""
-                    )
+                    "Which column holds each chosen period on each sheet. "
+                    "This ends the session."
                 ),
                 "parameters": tool_parameter_schema(WorkbookBindings),
             },
@@ -273,7 +204,6 @@ class DepartmentBindingToolset:
             "read_headers": lambda: self._read_headers(arguments),
             "find_rows": lambda: self._find_rows(arguments),
             "column_stats": lambda: self._column_stats(arguments),
-            "submit_departments": lambda: self._submit_departments(arguments),
             "submit_bindings": lambda: self._submit_bindings(arguments),
         }
         handler = handlers.get(name)
@@ -286,7 +216,7 @@ class DepartmentBindingToolset:
         return handler()
 
     def terminal_result(self, name: str, result: dict[str, Any]):
-        """Ends the session only once phase two is accepted."""
+        """End the session once the binding submission is accepted."""
         if name == "submit_bindings" and result.get("accepted"):
             return result.get("structure")
         return None
@@ -384,8 +314,7 @@ class DepartmentBindingToolset:
             "rows": rows,
         }
         if truncated_at is not None:
-            # Said plainly, because a silently short read is how a department
-            # boundary goes missing without anyone noticing.
+            # Said plainly so a silently short read cannot hide a header row.
             result["truncated_before_row"] = truncated_at
             result["instruction"] = (
                 f"This sheet is {sheet.max_column} columns wide, so the read was "
@@ -502,87 +431,13 @@ class DepartmentBindingToolset:
         self.opened_sheets.add(sheet.sheet_name)
         return column_stats(sheet, start, end).as_dict()
 
-    # -- phase one --------------------------------------------------------
-
-    def _submit_departments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        try:
-            submission = WorkbookDepartments.model_validate(arguments)
-        except Exception as exc:  # noqa: BLE001 - the message goes back to the model
-            return self._reject(f"That did not match the schema: {exc}", "submit_departments")
-
-        submission = normalize_spans(submission)
-        result = check_departments(
-            submission,
-            self.sheets,
-            financial_sheets=self.financial_sheets,
-            read_sheets=self.opened_sheets,
-        )
-        if not result.accepted and not self._out_of_patience("submit_departments"):
-            return self._reject(" ".join(result.rejections), "submit_departments")
-
-        self.departments = submission
-        self.observations.extend(result.observations)
-        # A refusal that was overruled is still worth knowing about, so it
-        # travels with the answer instead of disappearing with the argument.
-        self.observations.extend(
-            f"Accepted despite: {message}" for message in result.rejections
-        )
-        return {
-            "ok": True,
-            "accepted": True,
-            "departments_located": len(submission.departments),
-            "observations": result.observations,
-            # Named explicitly so phase two does not have to re-derive them, and
-            # labelled so the model can recognise them in a header.
-            "periods_to_bind": [
-                {"period_id": period_id, "label": self.period_labels.get(period_id, period_id)}
-                for period_id in self.period_ids
-            ],
-            "sheets_to_answer_for": self.financial_sheets,
-            "next_phase": _period_binding_instructions(),
-        }
-
-    # -- phase two --------------------------------------------------------
+    # -- submission -------------------------------------------------------
 
     def _submit_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if self.departments is None:
-            return {
-                "ok": False,
-                "error": "Departments have not been submitted yet.",
-                "instruction": (
-                    "Locate the departments and call submit_departments first. "
-                    "The binding instructions come back in its result."
-                ),
-            }
         try:
             submission = WorkbookBindings.model_validate(arguments)
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
             return self._reject(f"That did not match the schema: {exc}", "submit_bindings")
-
-        classification_names = [
-            item.sheet_name for item in submission.sheet_classifications
-        ]
-        invalid_classifications = sorted(
-            name for name in set(classification_names) if name not in self.financial_sheets
-        )
-        duplicate_classifications = sorted({
-            name for name in classification_names if classification_names.count(name) > 1
-        })
-        classification_errors = []
-        if invalid_classifications:
-            classification_errors.append(
-                "sheet classifications name non-routed sheets: "
-                + ", ".join(invalid_classifications)
-            )
-        if duplicate_classifications:
-            classification_errors.append(
-                "sheet classifications must be unique: "
-                + ", ".join(duplicate_classifications)
-            )
-        if classification_errors and not self._out_of_patience("submit_bindings"):
-            return self._reject(" ".join(classification_errors), "submit_bindings")
-        if classification_errors:
-            submission = _clean_classifications(submission, set(self.financial_sheets))
 
         # Before anything about the columns: did the session actually open the
         # sheets it is making claims about? Asking in the prompt does not carry
@@ -592,11 +447,10 @@ class DepartmentBindingToolset:
         # and got the period block wrong on every one of them.
         unread = self._unopened_claims(submission)
         unanswered = self._unanswered_sheets(submission)
-        unclassified = self._unclassified_sheets(submission)
-        if unread or unanswered or unclassified:
+        if unread or unanswered:
             self._refusals["coverage"] = self._refusals.get("coverage", 0) + 1
             if self._refusals["coverage"] <= self.MAX_COVERAGE_REFUSALS:
-                return self._coverage_refusal(unread, unanswered, unclassified)
+                return self._coverage_refusal(unread, unanswered)
             # Out of patience. An unopened claim is the one case where taking the
             # answer is worse than dropping it -- the sheet falls back to the
             # workbook's usual column, which beats a column nobody looked at.
@@ -627,13 +481,8 @@ class DepartmentBindingToolset:
                 f"Accepted despite: {message}" for message in result.rejections
             )
         self.observations.extend(result.observations)
-        self.submission = DepartmentBinding(
-            departments=self.departments.departments,
-            bindings=submission.bindings,
-            unavailable=submission.unavailable,
-            sheet_classifications=submission.sheet_classifications,
-            notes=[*self.departments.notes, *submission.notes],
-            observations=list(self.observations),
+        self.submission = submission.model_copy(
+            update={"observations": list(self.observations)}
         )
         return {
             "ok": True,
@@ -661,21 +510,12 @@ class DepartmentBindingToolset:
             if (name, period_id) not in answered
         }
 
-    def _unclassified_sheets(self, submission: WorkbookBindings) -> set[str]:
-        """Routed sheets without the sheet-level hint gathered during binding."""
-        classified = {
-            item.sheet_name for item in submission.sheet_classifications
-            if item.sheet_name in self.sheets
-        }
-        return set(self.financial_sheets) - classified
-
     def _coverage_refusal(
         self,
         unread: set[str],
         unanswered: set[str],
-        unclassified: set[str],
     ) -> dict[str, Any]:
-        """One message covering both halves of the obligation."""
+        """One message covering the binding and read obligations."""
         parts: list[str] = []
         if unanswered:
             parts.append(
@@ -690,13 +530,6 @@ class DepartmentBindingToolset:
                 f"{len(unread)} sheet(s) in the submission have not been opened: "
                 f"{', '.join(sorted(unread)[:12])}. Which column holds a period is "
                 "a question only that sheet's header rows answer."
-            )
-        if unclassified:
-            parts.append(
-                f"{len(unclassified)} routed sheet(s) have no sheet classification: "
-                f"{', '.join(sorted(unclassified)[:12])}. Return exactly one "
-                "classification per routed sheet. Use an empty department_hints "
-                "list when the sheet is mixed or unknown; do not invent boundaries."
             )
         parts.append(
             f"Use read_headers to open up to {MAX_SHEETS_PER_HEADER_READ} sheets "
@@ -725,7 +558,7 @@ class DepartmentBindingToolset:
         """
         claimed = {binding.sheet_name for binding in submission.bindings} | {
             item.sheet_name for item in submission.unavailable
-        } | {item.sheet_name for item in submission.sheet_classifications}
+        }
         return {
             name
             for name in claimed
@@ -733,7 +566,7 @@ class DepartmentBindingToolset:
         }
 
     def _out_of_patience(self, tool: str) -> bool:
-        """Has this phase been refused often enough to stop refusing it?"""
+        """Has this submission been refused often enough to stop refusing it?"""
         return self._refusals.get(tool, 0) >= self.MAX_REJECTIONS_PER_PHASE
 
     def _reject(self, message: str, tool: str) -> dict[str, Any]:
@@ -754,26 +587,11 @@ class DepartmentBindingToolset:
             "instruction": instruction,
         }
 
-    def best_effort(self) -> DepartmentBinding | None:
-        """Whatever this session established, for a loop that ran out of turns.
-
-        Departments without bindings is a real answer: every sheet falls back to
-        the workbook's usual column and the mapper still runs. Nothing at all is
-        not.
-        """
+    def best_effort(self) -> WorkbookBindings | None:
+        """Whatever valid submission this session established."""
         if self.submission is not None:
             return self.submission
-        if self.departments is None:
-            return None
-        return DepartmentBinding(
-            departments=self.departments.departments,
-            notes=list(self.departments.notes),
-            observations=[
-                *self.observations,
-                "Session ran out of turns before binding any period; every sheet "
-                "falls back to the workbook default column.",
-            ],
-        )
+        return None
 
 
 def _drop_unopened(
@@ -795,11 +613,6 @@ def _drop_unopened(
             ],
             "unavailable": [
                 item for item in submission.unavailable if item.sheet_name in opened
-            ],
-            "sheet_classifications": [
-                item
-                for item in submission.sheet_classifications
-                if item.sheet_name in opened
             ],
         }
     )
@@ -828,20 +641,6 @@ def _drop_rejected_bindings(
     return submission.model_copy(update={"bindings": kept})
 
 
-def _clean_classifications(
-    submission: WorkbookBindings, allowed: set[str]
-) -> WorkbookBindings:
-    """Keep the first classification for each routed sheet."""
-    seen: set[str] = set()
-    kept = []
-    for item in submission.sheet_classifications:
-        if item.sheet_name not in allowed or item.sheet_name in seen:
-            continue
-        seen.add(item.sheet_name)
-        kept.append(item)
-    return submission.model_copy(update={"sheet_classifications": kept})
-
-
 def _text(cell) -> str | None:
     """One cell as short display text, or None when it holds nothing."""
     value = cell.display_value if cell.display_value is not None else cell.raw_value
@@ -853,4 +652,4 @@ def _text(cell) -> str | None:
     return text[:160] or None
 
 
-__all__ = ["DEPARTMENTS", "DepartmentBindingToolset", "MAX_ROWS_PER_READ"]
+__all__ = ["PeriodBindingToolset", "MAX_ROWS_PER_READ"]
