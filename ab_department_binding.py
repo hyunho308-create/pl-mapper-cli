@@ -104,6 +104,26 @@ def _period_values(log: dict) -> tuple[str, dict]:
     return labels.get(period_id, log["source"].get("period", period_id)), values[period_id]
 
 
+def _period_signature(output_root: Path, workflow: str, case: str, summary: dict) -> dict:
+    catalog_path = (
+        output_root
+        / workflow
+        / case
+        / "work"
+        / "discovery"
+        / "stages"
+        / "period_discovery"
+        / "catalog.json"
+    )
+    catalog = _load(catalog_path)
+    mapped = set(summary.get("mapped_period_ids") or [])
+    option = next(item for item in catalog["options"] if item["period_id"] in mapped)
+    return {
+        key: option.get(key)
+        for key in ("scenario", "period_type", "start_period", "end_period")
+    }
+
+
 def _case_comparison(case: str, output_root: Path) -> dict:
     summaries = {
         name: _load(output_root / name / case / "summary.json")
@@ -115,7 +135,11 @@ def _case_comparison(case: str, output_root: Path) -> dict:
     }
     baseline_label, baseline_values = _period_values(logs["baseline"])
     streamlined_label, streamlined_values = _period_values(logs["streamlined"])
-    comparable = baseline_label == streamlined_label
+    signatures = {
+        workflow: _period_signature(output_root, workflow, case, summaries[workflow])
+        for workflow in ("baseline", "streamlined")
+    }
+    comparable = signatures["baseline"] == signatures["streamlined"]
     differences = []
     if comparable:
         for coa_id in sorted(set(baseline_values) | set(streamlined_values)):
@@ -142,6 +166,8 @@ def _case_comparison(case: str, output_root: Path) -> dict:
         "workbook": CASES[case],
         "baseline_period": baseline_label,
         "streamlined_period": streamlined_label,
+        "baseline_period_signature": signatures["baseline"],
+        "streamlined_period_signature": signatures["streamlined"],
         "periods_comparable": comparable,
         "baseline": summaries["baseline"],
         "streamlined": summaries["streamlined"],
