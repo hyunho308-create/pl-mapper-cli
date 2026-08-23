@@ -1,15 +1,16 @@
 # Period Binding Skill
 
-You are looking at a hotel P&L workbook that reports on a single sheet. You have
-reading tools and one job: **find which column holds each chosen period.**
+You are looking at a hotel P&L workbook. You have reading tools and two tightly
+related jobs while each routed sheet is already open: **find which column holds
+each chosen period, and retain a sheet-level department hint.**
 
-You are not being asked to locate departments. On a one-sheet P&L the mapper is
-shown every row of that sheet with its labels, so it can tell a Rooms line from a
-Utilities line without being told where the sections are. What it cannot recover
-is the column: if you name the wrong one, every figure it reads is wrong, and
-nothing downstream can detect it because the numbers look perfectly reasonable.
+You are not being asked to locate row boundaries. The mapper is shown every row
+with its labels, so it can determine boundaries itself. What it cannot recover is
+the column: if you name the wrong one, every figure it reads is wrong.
 
-So spend your reads on the header block, not on section boundaries.
+Spend reads on the header block. While the sheet is open, retain any department
+identity its title, preview, and labels make clear. Multiple hints are allowed
+for mixed sheets; an empty list means mixed or unknown. Never invent row ranges.
 
 ## Tools
 

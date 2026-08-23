@@ -32,14 +32,50 @@ module does not treat them as one.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from .common import StrictModel
 from .department_location import DepartmentSectionRole
-from .sheet_selection import CANONICAL_DEPARTMENTS
 
 # The canonical department strings, repeated here so the schema can enumerate
 # them. A model that invents `franchise_fees` produces a span nothing downstream
 # recognises, and an enum is a cheaper way to say so than a validator.
-DEPARTMENTS = CANONICAL_DEPARTMENTS
+
+
+class CanonicalDepartment(str, Enum):
+    SUMMARY = "summary"
+    ROOMS = "rooms"
+    FOOD_AND_BEVERAGE = "food_and_beverage"
+    OTHER_OPERATED_DEPARTMENTS = "other_operated_departments"
+    MISCELLANEOUS_INCOME = "miscellaneous_income"
+    ADMINISTRATIVE_AND_GENERAL = "administrative_and_general"
+    INFORMATION_AND_TELECOMMUNICATIONS_SYSTEMS = (
+        "information_and_telecommunications_systems"
+    )
+    SALES_AND_MARKETING = "sales_and_marketing"
+    PROPERTY_OPERATIONS_AND_MAINTENANCE = "property_operations_and_maintenance"
+    UTILITIES = "utilities"
+    MANAGEMENT_FEES = "management_fees"
+    NON_OPERATING_INCOME_AND_EXPENSE = "non_operating_income_and_expense"
+
+
+DEPARTMENTS = tuple(item.value for item in CanonicalDepartment)
+
+
+class SheetDepartmentHint(StrictModel):
+    """A sheet-level department hypothesis, never a row boundary."""
+
+    department: CanonicalDepartment
+    section_role: DepartmentSectionRole = DepartmentSectionRole.PRIMARY
+    evidence: list[str] = []
+
+
+class BoundSheetClassification(StrictModel):
+    """Department evidence gathered while binding one routed sheet."""
+
+    sheet_name: str
+    department_hints: list[SheetDepartmentHint] = []
+    evidence: list[str] = []
 
 
 class DepartmentSpan(StrictModel):
@@ -95,6 +131,7 @@ class WorkbookBindings(StrictModel):
 
     bindings: list[PeriodBinding] = []
     unavailable: list[UnavailablePeriod] = []
+    sheet_classifications: list[BoundSheetClassification] = []
     notes: list[str] = []
 
 
@@ -104,6 +141,7 @@ class DepartmentBinding(StrictModel):
     departments: list[DepartmentSpan] = []
     bindings: list[PeriodBinding] = []
     unavailable: list[UnavailablePeriod] = []
+    sheet_classifications: list[BoundSheetClassification] = []
     notes: list[str] = []
     # What the checks observed but did not enforce. Carried so a reader of the
     # run log can see what was odd about a workbook without rerunning it.

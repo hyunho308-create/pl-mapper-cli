@@ -21,7 +21,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-.ab-results/
+.ab-results*/
 
 # Editor and OS files.
 .vscode/

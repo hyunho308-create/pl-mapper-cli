@@ -559,6 +559,31 @@ class DepartmentBindingToolset:
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
             return self._reject(f"That did not match the schema: {exc}", "submit_bindings")
 
+        classification_names = [
+            item.sheet_name for item in submission.sheet_classifications
+        ]
+        invalid_classifications = sorted(
+            name for name in set(classification_names) if name not in self.financial_sheets
+        )
+        duplicate_classifications = sorted({
+            name for name in classification_names if classification_names.count(name) > 1
+        })
+        classification_errors = []
+        if invalid_classifications:
+            classification_errors.append(
+                "sheet classifications name non-routed sheets: "
+                + ", ".join(invalid_classifications)
+            )
+        if duplicate_classifications:
+            classification_errors.append(
+                "sheet classifications must be unique: "
+                + ", ".join(duplicate_classifications)
+            )
+        if classification_errors and not self._out_of_patience("submit_bindings"):
+            return self._reject(" ".join(classification_errors), "submit_bindings")
+        if classification_errors:
+            submission = _clean_classifications(submission, set(self.financial_sheets))
+
         # Before anything about the columns: did the session actually open the
         # sheets it is making claims about? Asking in the prompt does not carry
         # this. Exploration measured it -- 24 of 29 sessions read exactly one
@@ -567,10 +592,11 @@ class DepartmentBindingToolset:
         # and got the period block wrong on every one of them.
         unread = self._unopened_claims(submission)
         unanswered = self._unanswered_sheets(submission)
-        if unread or unanswered:
+        unclassified = self._unclassified_sheets(submission)
+        if unread or unanswered or unclassified:
             self._refusals["coverage"] = self._refusals.get("coverage", 0) + 1
             if self._refusals["coverage"] <= self.MAX_COVERAGE_REFUSALS:
-                return self._coverage_refusal(unread, unanswered)
+                return self._coverage_refusal(unread, unanswered, unclassified)
             # Out of patience. An unopened claim is the one case where taking the
             # answer is worse than dropping it -- the sheet falls back to the
             # workbook's usual column, which beats a column nobody looked at.
@@ -605,6 +631,7 @@ class DepartmentBindingToolset:
             departments=self.departments.departments,
             bindings=submission.bindings,
             unavailable=submission.unavailable,
+            sheet_classifications=submission.sheet_classifications,
             notes=[*self.departments.notes, *submission.notes],
             observations=list(self.observations),
         )
@@ -634,8 +661,19 @@ class DepartmentBindingToolset:
             if (name, period_id) not in answered
         }
 
+    def _unclassified_sheets(self, submission: WorkbookBindings) -> set[str]:
+        """Routed sheets without the sheet-level hint gathered during binding."""
+        classified = {
+            item.sheet_name for item in submission.sheet_classifications
+            if item.sheet_name in self.sheets
+        }
+        return set(self.financial_sheets) - classified
+
     def _coverage_refusal(
-        self, unread: set[str], unanswered: set[str]
+        self,
+        unread: set[str],
+        unanswered: set[str],
+        unclassified: set[str],
     ) -> dict[str, Any]:
         """One message covering both halves of the obligation."""
         parts: list[str] = []
@@ -652,6 +690,13 @@ class DepartmentBindingToolset:
                 f"{len(unread)} sheet(s) in the submission have not been opened: "
                 f"{', '.join(sorted(unread)[:12])}. Which column holds a period is "
                 "a question only that sheet's header rows answer."
+            )
+        if unclassified:
+            parts.append(
+                f"{len(unclassified)} routed sheet(s) have no sheet classification: "
+                f"{', '.join(sorted(unclassified)[:12])}. Return exactly one "
+                "classification per routed sheet. Use an empty department_hints "
+                "list when the sheet is mixed or unknown; do not invent boundaries."
             )
         parts.append(
             f"Use read_headers to open up to {MAX_SHEETS_PER_HEADER_READ} sheets "
@@ -680,7 +725,7 @@ class DepartmentBindingToolset:
         """
         claimed = {binding.sheet_name for binding in submission.bindings} | {
             item.sheet_name for item in submission.unavailable
-        }
+        } | {item.sheet_name for item in submission.sheet_classifications}
         return {
             name
             for name in claimed
@@ -751,6 +796,11 @@ def _drop_unopened(
             "unavailable": [
                 item for item in submission.unavailable if item.sheet_name in opened
             ],
+            "sheet_classifications": [
+                item
+                for item in submission.sheet_classifications
+                if item.sheet_name in opened
+            ],
         }
     )
 
@@ -776,6 +826,20 @@ def _drop_rejected_bindings(
             continue
         kept.append(binding)
     return submission.model_copy(update={"bindings": kept})
+
+
+def _clean_classifications(
+    submission: WorkbookBindings, allowed: set[str]
+) -> WorkbookBindings:
+    """Keep the first classification for each routed sheet."""
+    seen: set[str] = set()
+    kept = []
+    for item in submission.sheet_classifications:
+        if item.sheet_name not in allowed or item.sheet_name in seen:
+            continue
+        seen.add(item.sheet_name)
+        kept.append(item)
+    return submission.model_copy(update={"sheet_classifications": kept})
 
 
 def _text(cell) -> str | None:

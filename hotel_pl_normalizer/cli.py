@@ -13,6 +13,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from hotel_pl_normalizer.output import mapped_output_name, write_normalized_workbook
+from hotel_pl_normalizer.models.run import StructureRun
 from hotel_pl_normalizer.pipeline import (
     analyze_workbook_structure,
     discover_workbook_periods,
@@ -250,6 +251,16 @@ def main() -> None:
     parser.add_argument("output_dir", type=Path, nargs="?")
     parser.add_argument("--doctor", action="store_true", help="Check setup and exit without making an API call.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
+    parser.add_argument(
+        "--discovery-run",
+        type=Path,
+        help="Reuse a prior discovery run.json (controlled evaluation support).",
+    )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Write discovery artifacts and stop before period selection.",
+    )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
         "--period-id",
@@ -303,12 +314,25 @@ def main() -> None:
     # Discovery, structure analysis and evidence extraction all borrow this same
     # parsed record. Mapping releases it as soon as the compact evidence exists.
     parsed = shared_workbook(args.workbook)
-    discovery = discover_workbook_periods(
-        args.workbook,
-        output_dir=work_dir / "discovery",
-        progress=lambda message: print(message, flush=True),
-        parsed=parsed,
-    )
+    if args.discovery_run:
+        discovery_path = args.discovery_run.expanduser().resolve()
+        if not discovery_path.is_file():
+            parser.error(f"discovery run does not exist: {discovery_path}")
+        discovery = StructureRun.model_validate_json(
+            discovery_path.read_text(encoding="utf-8")
+        )
+    else:
+        discovery = discover_workbook_periods(
+            args.workbook,
+            output_dir=work_dir / "discovery",
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed,
+        )
+    if args.discover_only:
+        if args.discovery_run:
+            parser.error("--discover-only cannot be combined with --discovery-run")
+        print(discovery.artifact_paths["run"], flush=True)
+        return
     catalog = _catalog(discovery)
     valid_ids = validated_period_ids(discovery)
     if args.period_id or args.annual_periods or args.actual_and_prior or args.recommended:

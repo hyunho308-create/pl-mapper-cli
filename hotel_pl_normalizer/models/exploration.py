@@ -23,7 +23,6 @@ from .common import StrictModel
 # layer, so it has to use discovery's vocabulary.
 from .period_selection import PeriodScenario, PeriodType
 from .sheet_selection import (
-    SheetDepartmentHint,
     SheetNameDecision,
     SheetNameRoleHint,
     WorkbookSheetLayout,
@@ -36,7 +35,6 @@ class ExploredSheet(StrictModel):
     sheet_name: str
     decision: SheetNameDecision
     role_hint: SheetNameRoleHint = SheetNameRoleHint.UNKNOWN
-    department_hints: list[SheetDepartmentHint] = []
     # Free text, in the model's words: which rows it read and what convinced it.
     # Kept because a wrong routing decision is far easier to argue with when the
     # reason is on the record.

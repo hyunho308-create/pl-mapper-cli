@@ -219,8 +219,8 @@ class WorkbookStructureAnalyzer:
         if output.tool_trace:
             artifacts["tool_trace"] = output.tool_trace
         messages = [
-            "Department hints were retained from exploration; this stage only "
-            "bound the selected periods to sheet columns.",
+            "Selected periods were bound to columns and sheet-level department "
+            "hints were retained without row boundaries.",
             *output.observations,
             *(f"Rejected once: {item}" for item in output.rejections),
         ]

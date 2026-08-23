@@ -227,12 +227,14 @@ class WorkbookMappingValidator:
         coa,
         period_labels=None,
         routed_departments=None,
+        sheet_classifications=None,
     ):
         self.workbook_id = workbook_id
         self.evidence = evidence
         self.coa = coa
         self.period_labels = period_labels or {"selected": "Selected period"}
         self.routed_departments = frozenset(routed_departments or ())
+        self.sheet_classifications = tuple(sheet_classifications or ())
         self.preserve_blanks = len(self.period_labels) > 1
         self.history: list[dict[str, Any]] = []
         self.submissions: list[dict[str, Any]] = []
@@ -532,6 +534,11 @@ class WorkbookMappingValidator:
                 + ", ".join(unknown_review_rows)
             )
         errors = list(execution_issues)
+        collapse_issue = _department_collapse_issue(
+            plan, self.evidence, self.sheet_classifications
+        )
+        if collapse_issue:
+            errors.append(collapse_issue)
         missing_venue_names = sorted(
             decision.coa_id
             for decision in plan.decisions
@@ -1646,7 +1653,13 @@ def map_workbook(
         evidence,
         coa,
         period_labels=period_labels,
-        routed_departments=set(),
+        routed_departments={
+            hint.department.value
+            for item in sheet_classifications
+            for hint in item.department_hints
+            if hint.section_role.value not in {"kpi", "unknown"}
+        },
+        sheet_classifications=sheet_classifications,
     )
     exhausted = False
     repair_truncated = False
@@ -1886,8 +1899,6 @@ def _primary_prompt(
     classifications = [
         {
             "sheet_name": item.sheet_name,
-            "decision": item.decision.value,
-            "role_hint": item.role_hint.value,
             "department_hints": [
                 {
                     "department": hint.department.value,
@@ -1918,7 +1929,7 @@ def _primary_prompt(
         "workbook_id": workbook_id,
         "requested_period": requested_period,
         "period_columns": period_lines,
-        "sheet_classifications": classifications,
+        "period_binding_department_hints": classifications,
         "coa": coa_lines,
         "coa_hierarchy_equations": _hierarchy_equations(coa),
         "summary_equations": _summary_equation_lines(),
@@ -2154,6 +2165,82 @@ def _validation_values(values):
         coa_id: (0.0 if value is None else float(value))
         for coa_id, value in values.items()
     }
+
+
+def _department_collapse_issue(plan, evidence, sheet_classifications):
+    """Reject a suspicious parent-only plan when binding found rich detail tabs.
+
+    This is deliberately a coarse safety net, not a completeness quota. It only
+    activates for a genuinely large body of unambiguous department-sheet
+    evidence, then asks whether the plan cited a plausible number of detailed
+    COA accounts from those same sheets.
+    """
+    department_prefixes: dict[str, set[str]] = {}
+    for coa_id, department in DEPARTMENT_ROOT_ROUTES.items():
+        department_prefixes.setdefault(department, set()).add(
+            coa_id.split(".", 1)[0] + "."
+        )
+    confident: dict[str, str] = {}
+    for item in sheet_classifications:
+        useful = [
+            hint
+            for hint in item.department_hints
+            if hint.department.value != "summary"
+            and hint.section_role.value in {"primary", "summary", "detail"}
+        ]
+        if len(useful) == 1:
+            confident[item.sheet_name] = useful[0].department.value
+    if not confident:
+        return None
+
+    rich_rows = [
+        row
+        for row in evidence
+        if row["row_key"].rsplit("!", 1)[0] in confident
+        and str(row.get("label") or "").strip()
+        and any(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and abs(float(value)) > 0.005
+            for value in (row.get("selected_values") or {}).values()
+        )
+    ]
+    rich_sheets = {
+        row["row_key"].rsplit("!", 1)[0] for row in rich_rows
+    }
+    if len(rich_rows) < 120 and len(rich_sheets) < 8:
+        return None
+
+    active_detail = set()
+    for decision in plan.decisions:
+        department = next(
+            (
+                confident[sheet]
+                for row_key in decision.source_rows
+                for sheet in [row_key.rsplit("!", 1)[0]]
+                if sheet in rich_sheets
+            ),
+            None,
+        )
+        if department is None:
+            continue
+        if any(
+            decision.coa_id.startswith(prefix)
+            for prefix in department_prefixes.get(department, ())
+        ) and decision.coa_id not in DEPARTMENT_ROOT_ROUTES:
+            active_detail.add(decision.coa_id)
+
+    minimum = max(12, 2 * len(rich_sheets))
+    if len(active_detail) >= minimum or len(active_detail) >= len(rich_rows) * 0.12:
+        return None
+    return (
+        "department_detail_collapsed: period binding identified "
+        f"{len(rich_sheets)} unambiguous department sheet(s) with "
+        f"{len(rich_rows)} non-zero labelled rows, but the plan cites only "
+        f"{len(active_detail)} detailed department COA account(s) from them; "
+        "map identifiable child accounts instead of collapsing the workbook "
+        "mostly to parents/no_value"
+    )
 
 
 def _validate(

@@ -118,8 +118,10 @@ Populate:
 - `sheet_name`
 - `decision`
 - `role_hint`
-- `department_hints`
+- `department_candidates`
+- `needs_sheet_enrichment`
 - `evidence`
+- `defer_reason`, when the decision is `defer`
 
 Also populate:
 
@@ -130,8 +132,7 @@ Also populate:
 
 Do not invent sheet names.
 
-For each `department_hints` item, return `department`, `section_role`, and
-`evidence`. Use only these canonical department strings:
+For `department_candidates`, use canonical department strings when possible:
 
 - `summary`
 - `rooms`
@@ -146,29 +147,22 @@ For each `department_hints` item, return `department`, `section_role`, and
 - `management_fees`
 - `non_operating_income_and_expense`
 
-Use these section roles exactly:
-
-- `primary` — the department's main schedule;
-- `summary` — a consolidated block or department rollup;
-- `detail` — an outlet, venue, or child schedule;
-- `supporting_detail` — a schedule supporting a department reported elsewhere;
-- `kpi` — statistics or productivity rather than the financial schedule;
-- `unknown` — the role cannot yet be established.
-
-Use multiple department hints when a sheet is ambiguous or contains several
-departments. Leave the list empty when the sheet should be skipped or its
-department cannot be established. Do not invent `mixed` or `unknown` as
-departments and do not invent row boundaries.
+Use multiple department candidates when the sheet name is ambiguous. Leave the
+list empty when the sheet clearly should be skipped or when the name has no
+useful department evidence.
 
 A generic Fees, Fee Departments, Shared Fees, or similar sheet is not safe to
 defer solely because its name is broad. Triage it with both `management_fees`
-and `sales_and_marketing` as candidates and read enough content to distinguish
-them when possible. Such sheets
+and `sales_and_marketing` as candidates and request enrichment. Such sheets
 commonly contain management fees, franchise/royalty/brand fees, or bounded
 ranges for both.
+
+Set `needs_sheet_enrichment=true` when a kept or unsure sheet needs labels,
+sample rows, or structure facts before the decision can be trusted.
 
 Short acronyms are weak evidence and may have different meanings across
 operators. For example, `RM` can mean Revenue Management, Repairs and
 Maintenance, or another operator-defined schedule. Do not resolve an ambiguous
-acronym from the sheet name alone. Return every plausible department hint,
-and use `unsure` or `triage` until sheet labels establish the department.
+acronym from the sheet name alone. Return every plausible department candidate,
+set `needs_sheet_enrichment=true`, and use `unsure` or `triage`
+until sheet labels establish the department.

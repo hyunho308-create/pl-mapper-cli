@@ -49,7 +49,52 @@ def _load_api_key() -> bool:
     return False
 
 
-def _run_one(workflow: str, source_root: Path, case: str, output_root: Path) -> None:
+def _shared_discovery_path(output_root: Path, case: str) -> Path:
+    return output_root / "shared_discovery" / case / "work" / "discovery" / "run.json"
+
+
+def _discover_one(case: str, output_root: Path) -> Path:
+    run_path = _shared_discovery_path(output_root, case)
+    if run_path.is_file():
+        print(f"[discovery/{case}] already complete; reusing", flush=True)
+        return run_path
+    workbook = FORMAT_ROOT / CASES[case]
+    output = output_root / "shared_discovery" / case
+    output.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "hotel_pl_normalizer.cli",
+        str(workbook),
+        str(output),
+        "--discover-only",
+    ]
+    print(f"[discovery/{case}] starting from locked baseline routing", flush=True)
+    with (output / "console.log").open("w", encoding="utf-8") as log:
+        process = subprocess.run(
+            command,
+            cwd=BASELINE_ROOT,
+            env=os.environ.copy(),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    if process.returncode:
+        raise RuntimeError(f"discovery/{case} exited with status {process.returncode}")
+    if not run_path.is_file():
+        raise RuntimeError(f"discovery/{case} did not write {run_path}")
+    return run_path
+
+
+def _run_one(
+    workflow: str,
+    source_root: Path,
+    case: str,
+    output_root: Path,
+    discovery_run: Path,
+) -> None:
     workbook = FORMAT_ROOT / CASES[case]
     output = output_root / workflow / case
     summary = output / "summary.json"
@@ -63,6 +108,8 @@ def _run_one(workflow: str, source_root: Path, case: str, output_root: Path) -> 
         "hotel_pl_normalizer.cli",
         str(workbook),
         str(output),
+        "--discovery-run",
+        str(discovery_run),
     ]
     command.extend(
         ["--recommended"]
@@ -107,7 +154,7 @@ def _period_values(log: dict) -> tuple[str, dict]:
 def _period_signature(output_root: Path, workflow: str, case: str, summary: dict) -> dict:
     catalog_path = (
         output_root
-        / workflow
+        / "shared_discovery"
         / case
         / "work"
         / "discovery"
@@ -224,7 +271,7 @@ def _write_report(output_root: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-root", type=Path, default=STREAMLINED_ROOT / ".ab-results")
+    parser.add_argument("--output-root", type=Path, default=STREAMLINED_ROOT / ".ab-results-v2")
     parser.add_argument("--workflow", choices=("baseline", "streamlined", "both"), default="both")
     parser.add_argument("--case", action="append", choices=tuple(CASES))
     parser.add_argument("--compare-only", action="store_true")
@@ -239,8 +286,9 @@ def main() -> None:
             else ((args.workflow, BASELINE_ROOT if args.workflow == "baseline" else STREAMLINED_ROOT),)
         )
         for case in args.case or CASES:
+            discovery_run = _discover_one(case, output_root)
             for workflow, source_root in workflows:
-                _run_one(workflow, source_root, case, output_root)
+                _run_one(workflow, source_root, case, output_root, discovery_run)
     if all(
         (output_root / workflow / case / "summary.json").is_file()
         for workflow in ("baseline", "streamlined")

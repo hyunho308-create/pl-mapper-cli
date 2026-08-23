@@ -157,3 +157,11 @@ to the workbook's usual column, and your reason is recorded. **One sheet lacking
 one period is never a reason to abandon the others.**
 
 Then call `submit_bindings`.
+
+In the same submission, include exactly one `sheet_classifications` entry for
+every routed financial sheet you opened. Each entry has the exact `sheet_name`,
+zero or more `department_hints`, and short `evidence`. Each hint uses a canonical
+department and one of `primary`, `summary`, `detail`, `supporting_detail`, `kpi`,
+or `unknown`. Use multiple hints for a genuinely mixed sheet and an empty list
+when the department is ambiguous or unknown. These are provisional sheet-level
+hints only: do not infer or return row boundaries.
