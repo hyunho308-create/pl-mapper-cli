@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 760" role="img" aria-labelledby="title description">
+  <title id="title">Hotel P&amp;L Normalizer workflow</title>
+  <desc id="description">A source hotel profit and loss workbook is ingested once, explored for valid reporting periods, paused for the user's choice, mapped to the Standard COA, validated, and written as a new workbook with summary and audit files.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27313a"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .box { fill: #ffffff; stroke: #27313a; stroke-width: 3; rx: 8; }
+      .accent { fill: #eef5ff; stroke: #2f67a8; stroke-width: 4; rx: 8; }
+      .output { fill: #f2f8f1; stroke: #4d7650; stroke-width: 3; rx: 8; }
+      .line { fill: none; stroke: #27313a; stroke-width: 3; marker-end: url(#arrow); }
+      .title { fill: #27313a; font: 42px Calibri, "Segoe UI", Arial, sans-serif; text-anchor: middle; }
+      .heading { fill: #27313a; font: 30px Calibri, "Segoe UI", Arial, sans-serif; font-weight: 600; text-anchor: middle; }
+      .label { fill: #27313a; font: 23px Calibri, "Segoe UI", Arial, sans-serif; text-anchor: middle; }
+      .small { fill: #5e6871; font: 20px Calibri, "Segoe UI", Arial, sans-serif; text-anchor: middle; }
+      .step { fill: #ffffff; stroke: #27313a; stroke-width: 2; }
+      .step-text { fill: #27313a; font: 21px Calibri, "Segoe UI", Arial, sans-serif; font-weight: 600; text-anchor: middle; dominant-baseline: middle; }
+    </style>
+  </defs>
+
+  <rect class="page" width="1500" height="760"/>
+  <text class="title" x="750" y="62">From Operator P&amp;L to Standard COA</text>
+
+  <rect class="box" x="55" y="130" width="250" height="220"/>
+  <circle class="step" cx="82" cy="160" r="18"/>
+  <text class="step-text" x="82" y="161">1</text>
+  <text class="heading" x="180" y="210">Source workbook</text>
+  <text class="label" x="180" y="255">One complete hotel P&amp;L</text>
+  <text class="small" x="180" y="295">Parsed once</text>
+  <text class="small" x="180" y="325">Source preserved</text>
+
+  <rect class="box" x="355" y="130" width="300" height="220"/>
+  <circle class="step" cx="382" cy="160" r="18"/>
+  <text class="step-text" x="382" y="161">2</text>
+  <text class="heading" x="505" y="210">Explore &amp; discover</text>
+  <text class="label" x="505" y="255">Identify useful sheets, layout,</text>
+  <text class="label" x="505" y="287">and validated reporting periods</text>
+
+  <rect class="accent" x="705" y="130" width="300" height="220"/>
+  <circle class="step" cx="732" cy="160" r="18"/>
+  <text class="step-text" x="732" y="161">3</text>
+  <text class="heading" x="855" y="210">User checkpoint</text>
+  <text class="label" x="855" y="255">Codex shows available periods</text>
+  <text class="label" x="855" y="287">and waits for your choice</text>
+  <text class="small" x="855" y="325">The same run resumes afterward</text>
+
+  <rect class="box" x="1055" y="130" width="390" height="220"/>
+  <circle class="step" cx="1082" cy="160" r="18"/>
+  <text class="step-text" x="1082" y="161">4</text>
+  <text class="heading" x="1250" y="210">Bind &amp; map</text>
+  <text class="label" x="1250" y="255">Tie chosen columns to periods</text>
+  <text class="label" x="1250" y="287">and map rows to the 271-account COA</text>
+  <text class="small" x="1250" y="325">Luna reasons • Python reads values</text>
+
+  <path class="line" d="M305 240 H345"/>
+  <path class="line" d="M655 240 H695"/>
+  <path class="line" d="M1005 240 H1045"/>
+  <path class="line" d="M1250 350 V415 H930"/>
+
+  <rect class="box" x="570" y="425" width="360" height="220"/>
+  <circle class="step" cx="597" cy="455" r="18"/>
+  <text class="step-text" x="597" y="456">5</text>
+  <text class="heading" x="750" y="505">Validate &amp; reconcile</text>
+  <text class="label" x="750" y="550">Check values, rollups, coverage,</text>
+  <text class="label" x="750" y="582">consistency, and source discrepancies</text>
+  <text class="small" x="750" y="620">Flag exceptions for human review</text>
+
+  <rect class="output" x="990" y="425" width="455" height="270"/>
+  <circle class="step" cx="1017" cy="455" r="18"/>
+  <text class="step-text" x="1017" y="456">6</text>
+  <text class="heading" x="1217" y="505">Reviewable outputs</text>
+  <text class="label" x="1217" y="550">New [MAPPED].xlsx workbook</text>
+  <text class="label" x="1217" y="590">summary.json • run_log.json</text>
+  <text class="label" x="1217" y="630">work/ diagnostics and model traces</text>
+  <text class="small" x="1217" y="670">Source workbook remains unchanged</text>
+
+  <path class="line" d="M930 535 H980"/>
+</svg>
