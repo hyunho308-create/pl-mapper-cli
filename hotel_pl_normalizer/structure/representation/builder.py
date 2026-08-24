@@ -82,14 +82,32 @@ def label_cell(
         for cell in text_cells
         if (score := _row_label_score(_clean_text(cell.display_value or ""))) > 0
     ]
-    if not candidates:
-        return None
     if preferred_column is not None:
-        return next(
+        preferred_candidate = next(
             (cell for _, cell in candidates if cell.column == preferred_column),
             None,
         )
-    return max(candidates, key=lambda item: (item[0], item[1].column))[1]
+        if preferred_candidate is not None:
+            return preferred_candidate
+
+        # Short all-caps business captions such as SPA, FEES, and AAA WD are
+        # indistinguishable from member codes in isolation. Rescue them only in
+        # the already-inferred label column, where the surrounding rows provide
+        # the missing context, while retaining the strict metadata checks.
+        preferred_cell = next(
+            (cell for cell in text_cells if cell.column == preferred_column),
+            None,
+        )
+        if preferred_cell is not None and _is_plausible_uppercase_caption(
+            _clean_text(preferred_cell.display_value or "")
+        ):
+            return preferred_cell
+
+    # The dominant column is a preference, not a requirement. Multi-block
+    # sheets can place a valid account caption in another column.
+    if candidates:
+        return max(candidates, key=lambda item: (item[0], item[1].column))[1]
+    return None
 
 
 def dominant_label_column(rows: Iterable[WorkbookRow]) -> int | None:
@@ -144,7 +162,8 @@ def _looks_like_control_or_member_code(text: str, normalized: str) -> bool:
         return False
     compact = re.sub(r"[^A-Za-z0-9]+", "", text)
     return bool(
-        re.fullmatch(r"[A-Z]{1,6}\d{0,4}", compact)
+        re.fullmatch(r"[A-Z]{1,6}", compact)
+        or re.fullmatch(r"[A-Z]{1,6}\d+", compact)
         or re.fullmatch(r"[A-Z]+(?:_[A-Z0-9]+)+", text)
         or re.fullmatch(r"[A-Z]\d", text)
         or normalized.startswith("account style")
@@ -156,13 +175,25 @@ def _looks_like_technical_metadata_text(text: str) -> bool:
     stripped = text.strip()
     normalized = re.sub(r"[^a-z0-9]+", " ", stripped.lower()).strip()
     return bool(
-        "fontbold" in normalized
+        stripped.startswith("%,")
+        or "fontbold" in normalized
         or "indentlevel" in normalized
         or re.search(r"\[[^\]]+\]\s*\.\s*\[[^\]]+\]", stripped)
         or (stripped.startswith("<<") and "[" in stripped and "]" in stripped)
         or ("!" in stripped and "$" in stripped)
         or "dep(" in stripped.lower()
     )
+
+
+def _is_plausible_uppercase_caption(text: str) -> bool:
+    """Allow a human-readable all-caps caption in the inferred label column."""
+    if not text or _looks_like_technical_metadata_text(text):
+        return False
+    if _normalize_label(text) in _CONTROL_LABELS:
+        return False
+    if re.search(r"\d|[_|!$,%\[\]<>]", text):
+        return False
+    return bool(re.fullmatch(r"[A-Z][A-Z &'()/\-]{2,}", text))
 
 
 def _is_text_cell(cell: CellRecord) -> bool:

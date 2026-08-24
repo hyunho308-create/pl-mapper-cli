@@ -171,6 +171,15 @@ Summary may omit department expenses, combine OOD and miscellaneous income, or
 show ordinary department or undistributed expenses separately or below GOP.
 Reconcile the full Summary structure and cite supported adjustments instead of
 moving individual accounts merely to eliminate a variance.
+`ood_misc_summary_mode` describes the operator's Summary presentation; it does
+not change the Standard COA categories or waive the separate S12-to-S3 OOD and
+S12-to-S4 Misc comparisons. Map each source layer as reported. If a combined
+Summary remains after one structural repair pass, preserve it and add one
+`source_discrepancy` review item citing both S12 category accounts, both linked
+detail accounts, the combined Summary row, and the separate S3 and S4 rows.
+Python accepts the presentation only when the combined amount and inactive
+bucket prove the treatment, the detailed schedules remain separate, and all
+cited evidence is disjoint; the final result remains explicitly flagged.
 Prefer the department or section where the P&L presents an expense over a
 classification inferred only from its label. A separate expense schedule does
 not by itself make the category an operated department. Reclassify it only when
@@ -264,18 +273,23 @@ Repair feedback contains only the applicable rule guidance, implicated COA IDs,
 and relevant cited source rows. Use `patch_mapping` only for omitted or
 implicated decisions; never retransmit the full plan or unchanged decisions.
 For blocking incomplete-child findings, keep the parent fixed and use the repair
-to add or correct positively supported children. There is no repair or enrichment
-turn after a plan passes validation, so provide all supported detail in the first
-complete plan. If no usable child evidence exists,
-explicitly change the parent to `not_present`. Each patch must include a concise
-`repair_hypothesis` and `expected_fix`.
+to add or correct positively supported children. Provide all supported detail in
+the first complete plan. When coverage warnings remain after blocking errors are
+cleared, one focused enrichment response is available; source-exception and
+other non-coverage warnings do not receive an extra repair turn. If no usable
+child evidence exists, explicitly change the parent to `not_present`. Each patch
+must include a concise `repair_hypothesis` and `expected_fix`.
 
 For a failed equation, check for an omitted row, subtotal-and-child duplication,
 incorrect sign, sibling misclassification, offset, non-contiguous source, or bad
 source subtotal. Never move money merely to force a variance to zero. Continue
-until `accepted=true` or human judgment is required. After acceptance, return
-only the requested compact completion object with the same `review_items`; the
-validator retains the authoritative plan.
+until `accepted=true` or the validator reports that human judgment is required.
+After acceptance, return only the requested compact completion object with
+`status=accepted`, the outcome reported by the validator, and the latest
+`validation_attempt`; do not retransmit review items because the validator
+retains the authoritative plan. When the
+validator stops a repeated quantified conflict or a human decision item, return
+the corresponding `status=rejected` completion unchanged.
 
 ## Human Review Items
 
@@ -284,14 +298,39 @@ Use `review_items` to prevent silent guessing and flag material oddities:
 - `ambiguity`: two materially different mappings remain plausible;
 - `unusual_convention`: the mapping is supported, but the presentation is
   unusual enough that a human should know;
-- `source_discrepancy`: only after the same Summary-to-department mismatch has
-  survived one structural repair pass and both independently reported source
-  layers remain supported. Review any proposed offset rows using their labels and
+- `scope_exception`: the source presents a material item whose inclusion or
+  exclusion requires an operator decision outside the Standard COA mapping;
+- `source_discrepancy`: for a numeric conflict between independently reported
+  source layers. A Summary-to-department mismatch must first survive one
+  structural repair pass with both layers supported. A chosen component rollup
+  that conflicts with a separately reported subtotal must put the selected COA
+  target first in `coa_ids` and cite all rows in `source_rows`, then put the rows
+  used by the mapping in
+  `selected_source_rows` and every row in the unused comparison layer in
+  `alternate_source_rows` so Python can calculate and report both values.
+  Review any proposed offset rows
+  using their labels and
   surrounding structure; do not use a numerical near-match from another
   department. Cite both COA accounts and every source row from both layers, and
-  explain why any proposed offsets do not apply. Python decides whether the
+  explain why any proposed offsets do not apply. For a combined OOD/Misc
+  Summary, cite both S12 category accounts, both linked detail accounts, and all
+  three independently reported source layers. Python decides whether the
   discrepancy otherwise qualifies and calculates it.
 
+Treat the workbook's source basis as one decision, not as unrelated exceptions.
+Several material Summary/detail conflicts spanning different departments may
+mean the layers use incompatible scope, allocations, or reporting bases. Before
+adding a series of `source_discrepancy` items, confirm from cited headings,
+periods, and controls that the layers are independently valid on one consistent
+basis. If no consistent controlling hierarchy can be supported, add one
+`ambiguity` item describing the competing bases; do not use multiple exception
+items to make an unstable workbook look accepted.
+
+`ambiguity` and `scope_exception` are blocking outcomes: use them only when the
+mapping cannot be resolved from available evidence and a person must decide.
+Do not label a quantified conflict between a chosen source layer and an
+alternative reported subtotal as merely `unusual_convention`; use
+`source_discrepancy` even when the chosen layer reconciles the final mapping.
 Do not create a review item merely to restate a deterministic validation error.
 For a Summary-to-department difference, add one only when it identifies the
 likely cause, a specific source adjustment, a nonstandard mapping decision, or
@@ -304,7 +343,9 @@ decision needed. The message may identify source labels, calculations used, and
 validation findings when they help explain the decision. Write for a hotel
 analyst and avoid implementation jargon or unnecessary detail. Put COA IDs and
 source-row references in their structured fields. Use an empty list for routine
-mappings. IT departments commonly have no labor; do not flag absent IT labor.
+mappings and for both source-layer row lists unless a selected-versus-alternate
+numeric conflict is being reported. IT departments commonly have no labor; do
+not flag absent IT labor.
 
 ## Venue Names
 

@@ -58,6 +58,16 @@ class SummaryMode(str, Enum):
     DERIVED = "derived"
 
 
+class MappingOutcome(str, Enum):
+    """The operator-facing disposition of a completed mapping attempt."""
+
+    CLEAN = "clean"
+    SOURCE_EXCEPTION = "source_exception"
+    COVERAGE_GAP = "coverage_gap"
+    SCOPE_EXCEPTION = "scope_exception"
+    REJECTED = "rejected"
+
+
 class StructuralScenario(str, Enum):
     EXTRA_DEPARTMENT = "extra_department"
     SUMMARY_ONLY_DEPARTMENT = "summary_only_department"
@@ -141,10 +151,17 @@ class WorkbookStrategy(StrictModel):
 
 
 class MappingReviewItem(StrictModel):
-    kind: Literal["ambiguity", "unusual_convention", "source_discrepancy"]
+    kind: Literal[
+        "ambiguity",
+        "unusual_convention",
+        "source_discrepancy",
+        "scope_exception",
+    ]
     message: str
     coa_ids: list[str] = Field(default_factory=list)
     source_rows: list[str] = Field(default_factory=list)
+    selected_source_rows: list[str] = Field(default_factory=list)
+    alternate_source_rows: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_context(self):
@@ -152,6 +169,25 @@ class MappingReviewItem(StrictModel):
             raise ValueError("review item message cannot be blank")
         if not self.coa_ids and not self.source_rows:
             raise ValueError("review item must cite a COA id or source row")
+        if bool(self.selected_source_rows) != bool(self.alternate_source_rows):
+            raise ValueError(
+                "selected_source_rows and alternate_source_rows must be supplied together"
+            )
+        if self.selected_source_rows or self.alternate_source_rows:
+            if self.kind != "source_discrepancy":
+                raise ValueError(
+                    "source-layer row sets are only valid for source_discrepancy"
+                )
+            cited = set(self.source_rows)
+            structured = set(self.selected_source_rows) | set(
+                self.alternate_source_rows
+            )
+            if not structured <= cited:
+                raise ValueError(
+                    "source-layer row sets must also appear in source_rows"
+                )
+            if set(self.selected_source_rows) & set(self.alternate_source_rows):
+                raise ValueError("selected and alternate source layers must be disjoint")
         return self
 
 
@@ -186,9 +222,9 @@ class WorkbookSourcePatch(StrictModel):
 
 class WorkbookMappingCompletion(StrictModel):
     workbook_id: str
-    status: Literal["accepted"]
-    accepted_validation_attempt: int
-    review_items: list[MappingReviewItem] = Field(default_factory=list)
+    status: Literal["accepted", "rejected"]
+    outcome: MappingOutcome
+    validation_attempt: int
 
 
 @dataclass(slots=True)
@@ -206,6 +242,9 @@ class MappingResult:
     execution_issues_by_period: dict[str, list[str]]
     review_items: list[MappingReviewItem]
     accepted: bool
+    outcome: MappingOutcome
+    exceptions: list[dict[str, Any]]
+    stopped_reason: str | None
     session_calls: int
     session_call_ms: list[int]
     session_tool_calls: int
@@ -256,6 +295,10 @@ class WorkbookMappingValidator:
         self.warning_cleanup_checkpoint_result: dict[str, Any] | None = None
         self.warning_cleanup_checkpoint_score: tuple[int, ...] | None = None
         self.warning_cleanup_checkpoint_attempt: int | None = None
+        self.stop_repair = False
+        self.stopped_reason: str | None = None
+        self.stopped_validation_attempt: int | None = None
+        self.repeated_findings: list[dict[str, Any]] = []
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "validate_mapping":
@@ -279,6 +322,9 @@ class WorkbookMappingValidator:
         )
         plan = _enrich_adjustment_review_items(plan, self.coa)
         result = self.evaluate(plan)
+        result["outcome"] = _outcome_from_result(
+            result, plan.review_items
+        ).value
         current = {
             item.coa_id: _substantive_decision_digest(item)
             for item in plan.decisions
@@ -312,6 +358,7 @@ class WorkbookMappingValidator:
                 action,
             )
         )
+        self._update_stop_state(previous, result, plan)
         self.current_plan = plan
         self.submissions.append(plan.model_dump(mode="json"))
         self.actions.append(action)
@@ -335,6 +382,25 @@ class WorkbookMappingValidator:
             self.last_accepted_digest = self.digest(plan)
             self.last_accepted_plan = plan
         return result
+
+    def _update_stop_state(self, previous, result, plan) -> None:
+        review_kinds = {item.kind for item in plan.review_items}
+        if "scope_exception" in review_kinds:
+            self.stop_repair = True
+            self.stopped_reason = "scope_decision_required"
+        elif "ambiguity" in review_kinds:
+            self.stop_repair = True
+            self.stopped_reason = "unresolved_semantic_ambiguity"
+        elif (
+            previous
+            and not result.get("accepted")
+            and _same_blocking_conflicts(previous, result)
+        ):
+            self.stop_repair = True
+            self.stopped_reason = "repeated_quantified_conflict"
+            self.repeated_findings = list(result.get("findings") or [])
+        if self.stop_repair:
+            self.stopped_validation_attempt = result["validation_attempt"]
 
     def _apply_conditional_strategy(self, plan: WorkbookSourcePlan) -> None:
         known_rows = {item["row_key"] for item in self.evidence}
@@ -530,6 +596,7 @@ class WorkbookMappingValidator:
                 + ", ".join(unknown_review_rows)
             )
         errors = list(execution_issues)
+        errors.extend(_review_item_blockers(plan.review_items))
         collapse_issue = _detail_collapse_issue(plan, self.evidence)
         if collapse_issue:
             errors.append(collapse_issue)
@@ -578,6 +645,11 @@ class WorkbookMappingValidator:
                 label,
                 calculation_issues,
             )
+            checks.extend(
+                _source_layer_conflict_warnings(
+                    plan, self.evidence, values, period_id
+                )
+            )
             errors.extend(
                 f"{label}: {item}"
                 for item in calculation_issues
@@ -595,12 +667,12 @@ class WorkbookMappingValidator:
             for item, labels in warning_periods.items()
         ]
         accepted = not errors
-        needs_detail_enrichment = any(
-            "warning|source_detail_incomplete|" in item for item in warnings
-        )
+        needs_detail_enrichment = _needs_coverage_review(warnings)
         return {
             "ok": True,
             "accepted": accepted,
+            "submitted_decision_count": len(plan.decisions),
+            "missing_decision_count": len(missing),
             "error_count": len(errors),
             "warning_count": len(warnings),
             "errors": errors,
@@ -620,10 +692,8 @@ class WorkbookMappingValidator:
                 "it reduces warnings without disturbing accepted structure; "
                 "otherwise return completion unchanged."
                 if accepted and needs_detail_enrichment
-                else "The mapping has no blocking errors. One final warning-cleanup "
-                "response is available: make one evidence-supported patch only if "
-                "it reduces warnings without disturbing accepted structure; "
-                "otherwise return the compact completion object unchanged."
+                else "The mapping has no blocking errors. Return the compact "
+                "completion object unchanged."
                 if accepted
                 else "Call patch_mapping with only implicated replacement "
                 "decisions, not the complete plan."
@@ -644,21 +714,35 @@ class WorkbookMappingValidator:
                 f"complete {len(self.coa)}-decision plan before returning a "
                 "completion object."
             )
+        if completion.workbook_id != self.workbook_id:
+            return f"The completion workbook_id must be {self.workbook_id!r}."
+        if completion.validation_attempt != len(self.history):
+            return (
+                "validation_attempt must equal the latest attempt number, "
+                f"{len(self.history)}."
+            )
+        if completion.status == "rejected":
+            if not self.stop_repair:
+                return (
+                    "The validator has not classified this mapping as terminally "
+                    "rejected. Continue with the requested repair."
+                )
+            if completion.outcome != _outcome_from_result(
+                self.history[-1], self.current_plan.review_items
+            ):
+                return "Completion outcome must match the validator outcome."
+            return None
         if self.last_accepted_plan is None:
             return (
                 "The current mapping has not been accepted. Read the latest validator "
                 "errors and call patch_mapping with only the omitted or implicated "
                 "decisions before returning a completion object."
             )
-        if completion.workbook_id != self.workbook_id:
-            return f"The completion workbook_id must be {self.workbook_id!r}."
-        if completion.accepted_validation_attempt != len(self.history):
-            return (
-                "accepted_validation_attempt must equal the latest accepted attempt "
-                f"number, {len(self.history)}."
-            )
-        if completion.review_items != self.last_accepted_plan.review_items:
-            return "Completion review_items must match the accepted mapping plan."
+        expected_outcome = _outcome_from_result(
+            self.history[-1], self.last_accepted_plan.review_items
+        )
+        if completion.outcome != expected_outcome:
+            return "Completion outcome must match the validator outcome."
         if self.warning_cleanup_pending:
             self.warning_cleanup_pending = False
             self.warning_cleanup_attempted = True
@@ -669,9 +753,14 @@ class WorkbookMappingValidator:
         """Return a completion payload when another model turn cannot add value."""
         if self.warning_cleanup_pending and name == "patch_mapping":
             return self._finish_warning_cleanup(result)
+        if self.stop_repair:
+            return self._completion_payload(result, accepted=False)
         if not result.get("accepted"):
             return None
-        if result.get("warning_count", 0) and not self.warning_cleanup_attempted:
+        if (
+            _needs_coverage_review(result.get("warnings", []))
+            and not self.warning_cleanup_attempted
+        ):
             self.warning_cleanup_pending = True
             self.warning_cleanup_outcome = "offered"
             self.warning_cleanup_checkpoint_plan = self.current_plan
@@ -681,12 +770,15 @@ class WorkbookMappingValidator:
             return None
         return self._completion_payload(result)
 
-    def _completion_payload(self, result: dict[str, Any]) -> dict[str, Any]:
+    def _completion_payload(
+        self, result: dict[str, Any], *, accepted: bool = True
+    ) -> dict[str, Any]:
         return {
             "workbook_id": self.workbook_id,
-            "status": "accepted",
-            "accepted_validation_attempt": result["validation_attempt"],
-            "review_items": result.get("review_items", []),
+            "status": "accepted" if accepted else "rejected",
+            "outcome": result.get("outcome")
+            or _outcome_from_result(result, result.get("review_items", [])).value,
+            "validation_attempt": result["validation_attempt"],
         }
 
     def _finish_warning_cleanup(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -721,6 +813,10 @@ class WorkbookMappingValidator:
         self.best_result = checkpoint_result
         self.best_score = checkpoint_score
         self.best_validation_attempt = checkpoint_attempt
+        self.stop_repair = False
+        self.stopped_reason = None
+        self.stopped_validation_attempt = None
+        self.repeated_findings = []
         return self._completion_payload(checkpoint_result)
 
     @staticmethod
@@ -753,13 +849,23 @@ class WorkbookMappingValidator:
                         "ambiguity",
                         "unusual_convention",
                         "source_discrepancy",
+                        "scope_exception",
                     ],
                 },
                 "message": {"type": "string"},
                 "coa_ids": coa_id_list,
                 "source_rows": string_list,
+                "selected_source_rows": string_list,
+                "alternate_source_rows": string_list,
             },
-            "required": ["kind", "message", "coa_ids", "source_rows"],
+            "required": [
+                "kind",
+                "message",
+                "coa_ids",
+                "source_rows",
+                "selected_source_rows",
+                "alternate_source_rows",
+            ],
         }
         review_items = {"type": "array", "items": review_item}
         decision = {
@@ -966,6 +1072,254 @@ def _finding_targets(result: dict | None, rule: str) -> set[str]:
     }
 
 
+SOURCE_EXCEPTION_RULES = {
+    "source_discrepancy",
+    "source_layer_conflict",
+    "source_presentation_exception",
+    "small_source_reconciliation_difference",
+}
+
+COVERAGE_GAP_RULES = {
+    "source_detail_incomplete",
+    "coverage_unspecified",
+    "large_residual_plug",
+    "unresolved_negative_residual",
+}
+
+QUANTIFIED_DETAIL_KEYS = {
+    "actual",
+    "expected",
+    "variance",
+    "parent",
+    "children",
+    "plug",
+    "ratio",
+}
+
+
+def _review_kind(item) -> str:
+    return str(
+        item.kind if isinstance(item, MappingReviewItem) else item.get("kind")
+    )
+
+
+def _review_item_blockers(review_items) -> list[str]:
+    blockers = []
+    for item in review_items:
+        kind = _review_kind(item)
+        if kind not in {"ambiguity", "scope_exception"}:
+            continue
+        coa_ids = (
+            item.coa_ids
+            if isinstance(item, MappingReviewItem)
+            else item.get("coa_ids", [])
+        )
+        message = (
+            item.message
+            if isinstance(item, MappingReviewItem)
+            else item.get("message", "")
+        )
+        target = coa_ids[0] if coa_ids else "mapping"
+        rule = "unresolved_ambiguity" if kind == "ambiguity" else "scope_exception"
+        blockers.append(
+            f"error|{rule}|{target}|message={str(message).replace('|', '/')}"
+        )
+    return blockers
+
+
+def _needs_coverage_review(findings) -> bool:
+    return any(_finding_rule(str(item)) in COVERAGE_GAP_RULES for item in findings)
+
+
+def _outcome_from_result(result: dict[str, Any], review_items) -> MappingOutcome:
+    review_kinds = {_review_kind(item) for item in review_items}
+    if "scope_exception" in review_kinds:
+        return MappingOutcome.SCOPE_EXCEPTION
+    if result.get("errors") or result.get("accepted") is False:
+        return MappingOutcome.REJECTED
+    warning_rules = {_finding_rule(item) for item in result.get("warnings", [])}
+    if warning_rules & COVERAGE_GAP_RULES:
+        return MappingOutcome.COVERAGE_GAP
+    if warning_rules & SOURCE_EXCEPTION_RULES:
+        return MappingOutcome.SOURCE_EXCEPTION
+    return MappingOutcome.CLEAN
+
+
+def _blocking_fingerprint(result: dict[str, Any]) -> tuple[tuple, ...]:
+    contexts = result.get("findings") or []
+    fingerprint = []
+    for finding in result.get("errors", []):
+        rule = _finding_rule(finding)
+        target = _finding_target(finding)
+        rows = sorted({
+            row
+            for context in contexts
+            if context.get("rule") == rule
+            and (not target or target in context.get("coa_ids", []))
+            for row in context.get("source_rows", [])
+        })
+        details = tuple(sorted(_finding_details(finding).items()))
+        raw = str(finding) if rule == "execution" else ""
+        fingerprint.append(
+            (_finding_period(finding), rule, target, details, tuple(rows), raw)
+        )
+    return tuple(sorted(fingerprint, key=repr))
+
+
+def _same_blocking_conflicts(previous, current) -> bool:
+    previous_fingerprint = _blocking_fingerprint(previous)
+    current_fingerprint = _blocking_fingerprint(current)
+    if not previous_fingerprint or previous_fingerprint != current_fingerprint:
+        return False
+    return any(
+        QUANTIFIED_DETAIL_KEYS & {key for key, _value in signature[3]}
+        for signature in current_fingerprint
+    )
+
+
+def _numeric_detail(details, key):
+    try:
+        return float(details[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _structured_exceptions(checks_by_period, period_labels, review_items):
+    """Join deterministic exception math to the model's cited treatment."""
+    records = []
+    for period_id, checks in checks_by_period.items():
+        for finding in checks:
+            rule = _finding_rule(finding)
+            if rule not in SOURCE_EXCEPTION_RULES | COVERAGE_GAP_RULES:
+                continue
+            target = _finding_target(finding)
+            details = _finding_details(finding)
+            matching_review = next(
+                (
+                    item
+                    for item in review_items
+                    if _review_kind(item) == "source_discrepancy"
+                    and target in (
+                        item.coa_ids
+                        if isinstance(item, MappingReviewItem)
+                        else item.get("coa_ids", [])
+                    )
+                    and (
+                        rule != "source_layer_conflict"
+                        or (
+                            (
+                                item.selected_source_rows
+                                if isinstance(item, MappingReviewItem)
+                                else item.get("selected_source_rows", [])
+                            )
+                            and (
+                                item.coa_ids[0]
+                                if isinstance(item, MappingReviewItem)
+                                else (item.get("coa_ids") or [None])[0]
+                            )
+                            == target
+                        )
+                    )
+                ),
+                None,
+            )
+            if isinstance(matching_review, MappingReviewItem):
+                treatment = matching_review.message
+                source_rows = list(matching_review.source_rows)
+            elif matching_review:
+                treatment = str(matching_review.get("message") or "")
+                source_rows = list(matching_review.get("source_rows") or [])
+            else:
+                treatment = (
+                    "Preserve both independently reported source values for review."
+                    if rule in SOURCE_EXCEPTION_RULES
+                    else "Preserve supported source detail and flag the incomplete coverage."
+                )
+                source_rows = []
+            records.append(
+                {
+                    "type": (
+                        MappingOutcome.SOURCE_EXCEPTION.value
+                        if rule in SOURCE_EXCEPTION_RULES
+                        else MappingOutcome.COVERAGE_GAP.value
+                    ),
+                    "rule": rule,
+                    "period_id": period_id,
+                    "period_label": period_labels[period_id],
+                    "target": target,
+                    "reported_value": _numeric_detail(details, "actual")
+                    if "actual" in details
+                    else _numeric_detail(details, "parent"),
+                    "comparison_value": _numeric_detail(details, "expected")
+                    if "expected" in details
+                    else _numeric_detail(details, "children"),
+                    "variance": _numeric_detail(details, "variance"),
+                    "equation": details.get("equation"),
+                    "treatment": treatment,
+                    "source_rows": source_rows,
+                }
+            )
+    return records
+
+
+def _source_layer_conflict_warnings(plan, evidence, values, period_id):
+    """Calculate a cited alternate subtotal versus the selected mapped layer."""
+    rows = {item["row_key"]: item for item in evidence}
+    decisions = {item.coa_id: item for item in plan.decisions}
+    warnings = []
+    for review in plan.review_items:
+        if review.kind != "source_discrepancy":
+            continue
+        if not review.selected_source_rows or not review.alternate_source_rows:
+            continue
+        cited_decisions = [
+            decisions[coa_id]
+            for coa_id in review.coa_ids
+            if coa_id in decisions
+        ]
+        selected_rows = {
+            row
+            for decision in cited_decisions
+            for row in [*decision.source_rows, *decision.excluded_rows]
+        }
+        if not set(review.selected_source_rows) <= selected_rows:
+            continue
+        alternate_rows = list(review.alternate_source_rows)
+        target = next(
+            (
+                coa_id
+                for coa_id in review.coa_ids
+                if coa_id in decisions and values.get(coa_id) is not None
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        try:
+            alternate_values = [
+                _row_value(rows, row, period_id=period_id)
+                for row in alternate_rows
+            ]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not alternate_values or any(value is None for value in alternate_values):
+            continue
+        alternate = sum(float(value) for value in alternate_values)
+        selected = values.get(target)
+        if selected is None or alternate is None:
+            continue
+        variance = float(selected) - float(alternate)
+        if abs(variance) <= _tolerance(float(selected)):
+            continue
+        warnings.append(
+            f"warning|source_layer_conflict|{target}|"
+            f"actual={float(selected):.4f}|expected={float(alternate):.4f}|"
+            f"variance={variance:.4f}|equation=selected mapped layer versus "
+            f"alternate cited layer {' + '.join(alternate_rows)}"
+        )
+    return warnings
+
+
 def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
     """Rank executable plans by the accounting priorities used by the mapper."""
     errors = [
@@ -1000,6 +1354,7 @@ def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
         for rule in errors
     )
     return (
+        int(result.get("missing_decision_count") or 0),
         summary_math,
         summary_department,
         source_or_execution,
@@ -1244,6 +1599,10 @@ def _qualify_source_discrepancies(
     ):
         return checks
 
+    checks = _qualify_combined_ood_misc_presentation(
+        checks, plan, coa, history, period_label
+    )
+
     qualified = {}
     unqualified_expense_targets = set()
     output = []
@@ -1302,6 +1661,130 @@ def _qualify_source_discrepancies(
                 + "|component source discrepancies explain the aggregate difference"
             )
     return output
+
+
+OOD_MISC_SUMMARY_LINKS = {
+    "S12.total_other_operated_departments_revenue": (
+        "S3.total_other_operated_departments_revenue"
+    ),
+    "S12.total_miscellaneous_income": "S4.total_miscellaneous_income",
+}
+
+
+def _qualify_combined_ood_misc_presentation(
+    checks, plan, coa, history, period_label
+):
+    """Flag, but do not silently accept, a proven combined source Summary."""
+    mode = plan.strategy.ood_misc_summary_mode
+    if mode not in {
+        OodMiscSummaryMode.COMBINED_IN_OOD,
+        OodMiscSummaryMode.COMBINED_IN_MISC,
+    }:
+        return checks
+    if any(
+        item.startswith("error|summary_combined_ood_misc|")
+        or item.startswith("error|summary_combined_ood_misc_inactive_bucket|")
+        for item in checks
+    ):
+        return checks
+
+    findings = {
+        _finding_target(item): item
+        for item in checks
+        if item.startswith("error|summary_department|")
+        and _finding_target(item) in OOD_MISC_SUMMARY_LINKS
+    }
+    if set(findings) != set(OOD_MISC_SUMMARY_LINKS):
+        return checks
+
+    details = {target: _finding_details(item) for target, item in findings.items()}
+    try:
+        summary_values = {
+            target: float(item["actual"]) for target, item in details.items()
+        }
+        detail_values = {
+            target: float(item["expected"]) for target, item in details.items()
+        }
+        variances = {
+            target: float(item["variance"]) for target, item in details.items()
+        }
+    except (KeyError, ValueError):
+        return checks
+
+    active_target = (
+        "S12.total_other_operated_departments_revenue"
+        if mode == OodMiscSummaryMode.COMBINED_IN_OOD
+        else "S12.total_miscellaneous_income"
+    )
+    inactive_target = next(
+        target for target in OOD_MISC_SUMMARY_LINKS if target != active_target
+    )
+    detail_total = sum(detail_values.values())
+    if (
+        abs(summary_values[active_target] - detail_total)
+        > _tolerance(summary_values[active_target])
+        or abs(summary_values[inactive_target])
+        > _tolerance(summary_values[inactive_target])
+        or abs(sum(variances.values())) > _tolerance(detail_total)
+    ):
+        return checks
+    if not all(
+        _same_discrepancy_was_previously_blocking(
+            history, period_label, target, variances[target]
+        )
+        for target in OOD_MISC_SUMMARY_LINKS
+    ):
+        return checks
+
+    by_id = {decision.coa_id: decision for decision in plan.decisions}
+    active_summary = by_id.get(active_target)
+    detail_decisions = [
+        by_id.get(detail_id) for detail_id in OOD_MISC_SUMMARY_LINKS.values()
+    ]
+    if active_summary is None or any(item is None for item in detail_decisions):
+        return checks
+    summary_rows = _decision_source_set(active_summary)
+    detail_row_sets = [_decision_source_set(item) for item in detail_decisions]
+    if (
+        not summary_rows
+        or any(not rows for rows in detail_row_sets)
+        or any(summary_rows & rows for rows in detail_row_sets)
+        or detail_row_sets[0] & detail_row_sets[1]
+    ):
+        return checks
+    cited_rows = summary_rows | set().union(*detail_row_sets)
+    cited_ids = set(OOD_MISC_SUMMARY_LINKS) | set(OOD_MISC_SUMMARY_LINKS.values())
+    review = next(
+        (
+            item
+            for item in plan.review_items
+            if item.kind == "source_discrepancy"
+            and cited_ids <= set(item.coa_ids)
+            and cited_rows <= set(item.source_rows)
+        ),
+        None,
+    )
+    if review is None:
+        return checks
+    if _related_hierarchy_is_blocking(
+        checks, list(OOD_MISC_SUMMARY_LINKS.values()), coa
+    ):
+        return checks
+
+    return [
+        (
+            item.replace(
+                "error|summary_department|",
+                "warning|source_presentation_exception|",
+                1,
+            )
+            + "|operator Summary combines OOD and Misc while detailed schedules "
+            "report them separately"
+            if item in findings.values()
+            else item
+        )
+        for item in checks
+    ]
 
 
 DEPARTMENTAL_EXPENSE_SUMMARY_TARGETS = {
@@ -1733,6 +2216,11 @@ def map_workbook(
             period_labels[period_id],
             execution_issues,
         )
+        checks_by_period[period_id].extend(
+            _source_layer_conflict_warnings(
+                plan, evidence, values, period_id
+            )
+        )
         checks_by_period[period_id] = _replace_unresolved_negative_errors(
             checks_by_period[period_id], unresolved_negative
         )
@@ -1744,6 +2232,20 @@ def map_workbook(
             )
         )
     primary_period_id = next(iter(period_labels))
+    checks_by_period[primary_period_id].extend(
+        _review_item_blockers(plan.review_items)
+    )
+    has_coverage_gap = any(
+        _needs_coverage_review(period_checks)
+        for period_checks in checks_by_period.values()
+    )
+    if has_coverage_gap and not validator.warning_cleanup_attempted:
+        checks_by_period[primary_period_id].append(
+            "error|coverage_review_not_completed|mapping_session|"
+            "the required focused coverage review did not complete"
+        )
+        if validator.stopped_reason is None:
+            validator.stopped_reason = "coverage_review_not_completed"
     values = values_by_period[primary_period_id]
     execution_issues = [
         f"{period_labels[period_id]}: {issue}"
@@ -1769,6 +2271,25 @@ def map_workbook(
             for check in period_checks
         )
     )
+    final_result = {
+        "accepted": accepted,
+        "errors": [
+            check
+            for period_checks in checks_by_period.values()
+            for check in period_checks
+            if check.startswith("error|")
+        ] + list(execution_issues),
+        "warnings": [
+            check
+            for period_checks in checks_by_period.values()
+            for check in period_checks
+            if check.startswith("warning|")
+        ],
+    }
+    outcome = _outcome_from_result(final_result, plan.review_items)
+    exceptions = _structured_exceptions(
+        checks_by_period, period_labels, plan.review_items
+    )
     model_calls = list(client.usage_history)
     session_calls = [call for call in model_calls if call.get("tool_loop")]
 
@@ -1784,6 +2305,9 @@ def map_workbook(
         execution_issues_by_period=execution_issues_by_period,
         review_items=list(plan.review_items),
         accepted=accepted,
+        outcome=outcome,
+        exceptions=exceptions,
+        stopped_reason=validator.stopped_reason,
         session_calls=len(session_calls),
         session_call_ms=[
             int(call.get("duration_ms") or 0) for call in session_calls
@@ -1833,10 +2357,15 @@ def map_workbook(
                 }),
             },
             "confirmed_source_discrepancy": any(
-                check.startswith("warning|source_discrepancy|")
+                _finding_rule(check) in SOURCE_EXCEPTION_RULES
                 for period_checks in checks_by_period.values()
                 for check in period_checks
             ),
+            "outcome": outcome.value,
+            "exceptions": exceptions,
+            "stopped_reason": validator.stopped_reason,
+            "stopped_validation_attempt": validator.stopped_validation_attempt,
+            "repeated_findings": list(validator.repeated_findings),
             "repair_response_truncated": repair_truncated,
             "warning_cleanup": {
                 "attempted": validator.warning_cleanup_attempted,
@@ -1856,6 +2385,10 @@ def _validation_checkpoint_summary(attempt, result, plan, validator):
     return {
         "validation_attempt": attempt,
         "accepted": bool(result.get("accepted")),
+        "submitted_decision_count": int(
+            result.get("submitted_decision_count") or len(plan.decisions)
+        ),
+        "missing_decision_count": int(result.get("missing_decision_count") or 0),
         "error_count": int(result.get("error_count") or 0),
         "warning_count": int(result.get("warning_count") or 0),
         "score": list(result.get("validation_score") or _validation_score(result)),
@@ -2686,10 +3219,41 @@ def _validate_ood_misc_summary(values, strategy, issues, by_id):
     detail_ood = values.get("S3.total_other_operated_departments_revenue", 0.0)
     detail_misc = values.get("S4.total_miscellaneous_income", 0.0)
     mode = strategy.ood_misc_summary_mode
-    if mode == OodMiscSummaryMode.SEPARATE:
-        _append_equation_issue(issues, "summary_department", "S12.total_other_operated_departments_revenue", summary_ood, detail_ood, "S3.total_other_operated_departments_revenue", source_supported=_all_source_supported(by_id, ["S12.total_other_operated_departments_revenue", "S3.total_other_operated_departments_revenue"]))
-        _append_equation_issue(issues, "summary_department", "S12.total_miscellaneous_income", summary_misc, detail_misc, "S4.total_miscellaneous_income", source_supported=_all_source_supported(by_id, ["S12.total_miscellaneous_income", "S4.total_miscellaneous_income"]))
-    elif mode == OodMiscSummaryMode.COMBINED_IN_OOD:
+    # Standard COA categories must remain comparable even when the operator's
+    # Summary combines them. A combined presentation may later qualify as a
+    # structured source-presentation exception, but the strategy flag alone
+    # must never waive these same-category checks.
+    _append_equation_issue(
+        issues,
+        "summary_department",
+        "S12.total_other_operated_departments_revenue",
+        summary_ood,
+        detail_ood,
+        "S3.total_other_operated_departments_revenue",
+        source_supported=_all_source_supported(
+            by_id,
+            [
+                "S12.total_other_operated_departments_revenue",
+                "S3.total_other_operated_departments_revenue",
+            ],
+        ),
+    )
+    _append_equation_issue(
+        issues,
+        "summary_department",
+        "S12.total_miscellaneous_income",
+        summary_misc,
+        detail_misc,
+        "S4.total_miscellaneous_income",
+        source_supported=_all_source_supported(
+            by_id,
+            [
+                "S12.total_miscellaneous_income",
+                "S4.total_miscellaneous_income",
+            ],
+        ),
+    )
+    if mode == OodMiscSummaryMode.COMBINED_IN_OOD:
         _append_equation_issue(issues, "summary_combined_ood_misc", "S12.total_other_operated_departments_revenue", summary_ood, detail_ood + detail_misc, "S3 OOD + S4 Misc", source_supported=_all_source_supported(by_id, ["S12.total_other_operated_departments_revenue", "S3.total_other_operated_departments_revenue", "S4.total_miscellaneous_income"]))
         _append_equation_issue(
             issues,
@@ -2709,7 +3273,7 @@ def _validate_ood_misc_summary(values, strategy, issues, by_id):
             0.0,
             "0 when Misc contains combined OOD + Misc",
         )
-    else:
+    elif mode == OodMiscSummaryMode.UNKNOWN:
         severity = (
             "error"
             if any(

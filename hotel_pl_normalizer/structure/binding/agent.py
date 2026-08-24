@@ -8,6 +8,7 @@ from importlib import resources
 from typing import Any, Callable
 
 from hotel_pl_normalizer.models.binding import WorkbookBindings
+from hotel_pl_normalizer.models.period_selection import PeriodOption
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 
 from .toolset import PeriodBindingToolset
@@ -30,7 +31,7 @@ class BindingOutput:
 def render_binding_prompt(
     source_filename: str,
     *,
-    periods: list[tuple[str, str]],
+    periods: list[PeriodOption],
     financial_sheets: list[str],
 ) -> str:
     skill = (
@@ -38,7 +39,12 @@ def render_binding_prompt(
         .joinpath("period_binding.md")
         .read_text(encoding="utf-8")
     )
-    chosen = "\n".join(f"- `{period_id}` — {label}" for period_id, label in periods)
+    chosen = "\n".join(
+        f"- `{period.period_id}` — {period.label}; scenario={period.scenario.value}; "
+        f"type={period.period_type.value}; coverage="
+        f"{period.start_period or 'unknown'} through {period.end_period or 'unknown'}"
+        for period in periods
+    )
     routed = ", ".join(financial_sheets) or "none recorded; judge from list_sheets"
     return "\n\n".join(
         [
@@ -61,8 +67,7 @@ def bind_periods(
     workbook: WorkbookRecord,
     *,
     client,
-    period_ids: list[str],
-    period_labels: dict[str, str] | None = None,
+    periods: list[PeriodOption],
     financial_sheets: list[str] | None = None,
     max_iterations: int = 80,
     max_reads: int = 120,
@@ -72,7 +77,7 @@ def bind_periods(
 
     started = time.perf_counter()
     trace: list[dict] = []
-    labels = dict(period_labels or {})
+    period_ids = [period.period_id for period in periods]
     toolset = PeriodBindingToolset(
         workbook,
         period_ids=period_ids,
@@ -81,9 +86,7 @@ def bind_periods(
     )
     prompt = render_binding_prompt(
         workbook.source.original_filename,
-        periods=[
-            (period_id, labels.get(period_id, period_id)) for period_id in period_ids
-        ],
+        periods=periods,
         financial_sheets=toolset.financial_sheets,
     )
     options: dict[str, Any] = {

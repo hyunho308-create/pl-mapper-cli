@@ -1,6 +1,6 @@
 # Hotel P&L Normalizer CLI
 
-Maps one hotel P&L workbook to the bundled 269-account Standard COA. It creates:
+Maps one hotel P&L workbook to the bundled 271-account Standard COA. It creates:
 
 - a separate `[MAPPED].xlsx` workbook;
 - `summary.json` with the run result; and

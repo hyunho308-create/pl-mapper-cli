@@ -19,11 +19,15 @@ from hotel_pl_normalizer.mapping.mapper import (
     _load_coa,
     _primary_prompt,
 )
+from hotel_pl_normalizer.mapping.evidence import compact_workbook_evidence
 from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.exploration import WorkbookExploration
 from hotel_pl_normalizer.models.period_selection import (
     PeriodColumnSelection,
     PeriodColumnSelectionMap,
+    PeriodOption,
+    PeriodScenario,
+    PeriodType,
 )
 from hotel_pl_normalizer.models.workbook import (
     CellRecord,
@@ -144,6 +148,11 @@ class StreamlinedDesignTests(unittest.TestCase):
         self.assertTrue(routed["accepted"])
         self.assertIn("next_phase", routed)
         self.assertIn("Phase two", routed["next_phase"])
+        self.assertIn(
+            "Anchor periods, then record sheet coverage", routed["next_phase"]
+        )
+        self.assertIn("Do not delete a valid", routed["next_phase"])
+        self.assertNotIn("Return the intersection", routed["next_phase"])
 
     def test_binding_schema_has_no_department_contract(self) -> None:
         schema = json.dumps(WorkbookBindings.model_json_schema()).lower()
@@ -202,11 +211,20 @@ class StreamlinedDesignTests(unittest.TestCase):
                 return response_model.model_validate(result["structure"])
 
         client = ScriptedClient()
+        periods = [
+            PeriodOption(
+                period_id="p1",
+                label="2025 Actual",
+                scenario=PeriodScenario.ACTUAL,
+                period_type=PeriodType.FULL_YEAR,
+                start_period="2025-01",
+                end_period="2025-12",
+            )
+        ]
         output = bind_periods(
             _record(),
             client=client,
-            period_ids=["p1"],
-            period_labels={"p1": "2025 Actual"},
+            periods=periods,
             financial_sheets=["P&L"],
         )
         maps = binding_to_selection_maps(
@@ -217,7 +235,79 @@ class StreamlinedDesignTests(unittest.TestCase):
         )
         self.assertTrue(client.assert_accepted)
         self.assertNotIn("department_hints", client.prompt)
+        self.assertIn("scenario=actual", client.prompt)
+        self.assertIn("coverage=2025-01 through 2025-12", client.prompt)
         self.assertEqual(maps["p1"].sheet_selections[0].value_column, 2)
+
+    def test_explicitly_unavailable_sheet_never_uses_default_column(self) -> None:
+        workbook = _record()
+        workbook.sheets.append(
+            WorkbookSheet(
+                sheet_id="sheet_unavailable",
+                sheet_name="Unavailable",
+                max_row=1,
+                max_column=2,
+                rows=[
+                    WorkbookRow(
+                        row_index=1,
+                        cells=[
+                            CellRecord(
+                                row=1,
+                                column=1,
+                                address="A1",
+                                raw_value="Rooms Revenue",
+                                display_value="Rooms Revenue",
+                            ),
+                            CellRecord(
+                                row=1,
+                                column=2,
+                                address="B1",
+                                raw_value=999.0,
+                                display_value="999",
+                            ),
+                        ],
+                    )
+                ],
+            )
+        )
+        structure = WorkbookBindings.model_validate(
+            {
+                "bindings": [
+                    {
+                        "period_id": "p1",
+                        "sheet_name": "P&L",
+                        "excel_column": "B",
+                    }
+                ],
+                "unavailable": [
+                    {
+                        "period_id": "p1",
+                        "sheet_name": "Unavailable",
+                        "reason": "No 2025 annual column",
+                    }
+                ],
+            }
+        )
+        maps = binding_to_selection_maps(
+            structure,
+            workbook_id="wb_test",
+            period_ids=["p1"],
+            period_labels={"p1": "2025 Actual"},
+        )
+
+        self.assertEqual(
+            maps["p1"].unavailable_sheets,
+            {"Unavailable": "No 2025 annual column"},
+        )
+        evidence = compact_workbook_evidence(
+            workbook,
+            maps,
+            include_sheets={"P&L", "Unavailable"},
+        )
+        self.assertTrue(evidence)
+        self.assertFalse(
+            any(item["row_key"].startswith("Unavailable!") for item in evidence)
+        )
 
     def test_mapper_prompt_has_no_department_handoff(self) -> None:
         periods = {

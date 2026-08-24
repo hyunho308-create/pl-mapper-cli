@@ -37,9 +37,9 @@ class DiscoveredPeriod(StrictModel):
     scenario: PeriodScenario = PeriodScenario.UNKNOWN
     start_period: str | None = None
     end_period: str | None = None
-    # Which of the examined sheets carried it. A period on every financial sheet
-    # is safe to offer; one on a single tab usually is not, and saying which
-    # sheets lets a person judge that without rerunning anything.
+    # Which examined sheets carried this canonical period. Coverage can be
+    # uneven: a controlling statement may offer a period that a supporting
+    # schedule does not, and binding handles that sheet independently.
     sheets_present: list[str] = []
     evidence: list[str] = []
 

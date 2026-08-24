@@ -80,73 +80,61 @@ Two columns with the same month label under different scenarios are two periods.
   band. Variance columns are not periods.
 - A sheet can offer twelve monthly columns, a YTD column and a full-year column
   at once. Return all of them.
+- A bare `Total` immediately after twelve Jan–Dec Actual columns is that year's
+  full-year Actual. The scenario is inherited from the monthly run even when
+  the Total cell does not repeat `Actual`.
 
 If the first rows you read show no periods, that is almost always a reading
 mistake rather than a fact about the workbook. Read further down, or use
 `find_text` for a month name, `YTD`, `Actual`, `Budget` or a year.
 
-## Confirm every period against the detail sheets
+## Anchor periods, then record sheet coverage
 
-Work out the periods **for each sheet you read, separately**. Do not pool them as
-you go — one list per sheet, then compare.
+Work out the periods **for each sheet you read, separately**. Do not pool headers
+as you go. First identify the controlling consolidated Summary, Statement of
+Income or annual statement sheet. Its real amount columns establish the
+workbook's canonical periods. If a separate `12Mth`, `Trend`, `Monthly` or `TTM`
+sheet genuinely carries an additional grain, it may anchor those additional
+periods too. If no consolidated sheet exists, use the richest substantive P&L
+sheet as the anchor.
 
-**Return the intersection: only the periods that every financial sheet you read
-offers.** Put those sheets into that period's `sheets_present`, so the list is
-the evidence that the period really is available throughout.
+Return the periods shown on those controlling sheets. **Do not delete a valid
+controlling period merely because another financial sheet lacks it.** The next
+stage binds every chosen period independently on every routed sheet and can mark
+one sheet unavailable without losing the period for the whole workbook.
 
-`sheets_present` lists **only sheets you actually opened in this phase**. Do not
-add the rest of the financial sheets on the assumption they match — the point of
-the list is to record what was checked, and padding it with unread names destroys
-exactly that.
+For each canonical period, compare the other sheets and put into
+`sheets_present` every sheet you actually opened that carries the same economic
+period. This is a coverage record, not an all-sheets admission test. Never add an
+unread sheet on the assumption that it matches.
 
-Summaries routinely advertise more than the schedules behind them. A summary may
-show twelve months while every departmental schedule carries only December and a
-year to date; those ten extra months are not usable, because nothing downstream
-can produce departmental detail for a period the departments do not report. The
-usable periods are the ones present in the full detail.
+Compare economic identity rather than exact wording. Scenario and date coverage
+must match:
 
-So a period on the summary but missing from the schedules is dropped. A period on
-one schedule but missing from the others is dropped too — the test is the same
-for every sheet, and the summary gets no special standing. List what you dropped
-and why in `notes`, so a reader can see what the workbook claimed to offer.
+- A December YTD ending at a December fiscal year-end, a Jan–Dec `Total`, a
+  full-year column and a TTM covering that same January–December are the same
+  annual period when all are Actual.
+- A partial YTD is not a full year. A rolling TTM is not a fiscal year unless its
+  start and end months are the same. A single month is never annual.
+- Actual, Prior Actual, Budget and Forecast remain separate even when their dates
+  match. Never merge or substitute scenarios.
 
-This applies only when the workbook actually has departmental schedules. On a
-single-tab P&L there is nothing to confirm against, so **keep every column that
-sheet shows** — all of them, enumerated one per column as above.
+Keep one canonical entry for equivalent presentations and describe the differing
+headers in its evidence. A detail sheet that lacks the period simply stays out of
+that period's `sheets_present`; mention material coverage gaps in `notes`.
 
-Dropping means removing a period from the list. It never means merging several
-into one. If twelve monthly columns survive, return twelve periods; if they are
-dropped, return none of them. `2025_monthly_actual` standing in for twelve
-separate months is not a period, and is never the right answer.
-
-**Intersect the columns, not the bands.** A scenario is part of a period's
-identity: `Dec 2025 Actual` and `Dec 2025 Budget` are two different periods that
-happen to share a month. Comparing sheets band-by-band and returning one period
-per band collapses that away.
-
-Worked example. Every schedule shows a `Dec 2025` band and a `YTD` band, each
-with `Actual`, `Budget`, `Forecast` and `Prior Year` columns. All eight columns
-appear on all five sheets, so **all eight survive**:
-
-    dec_2025_actual, dec_2025_budget, dec_2025_forecast, dec_2025_prior
-    ytd_2025_actual, ytd_2025_budget, ytd_2025_forecast, ytd_2025_prior
-
-Returning two — one for `Dec 2025` and one for `YTD` — is wrong. Nothing was
-dropped here; the intersection was complete. If your period count is far smaller
-than the number of amount columns each sheet carries, you have merged rather
-than intersected.
+This rule is not permission to promote an isolated, unusual column from an
+arbitrary supporting schedule into a workbook choice. Periods come from the
+controlling statement sheets; departmental schedules confirm coverage and supply
+detail for the later binding stage.
 
 ### The check to run before submitting
 
-For each period, compare its `sheets_present` against the list of sheets you
-read in this phase. **If `sheets_present` does not contain every one of them,
-drop that period.** No exceptions, and it does not matter which sheet is the
-odd one out.
-
-That single test is what "intersection" means here. A period found on the trend
-tab alone, with `sheets_present` naming one sheet out of the eight you read, is
-not available in the detail and does not belong in the answer — however many
-columns it spans, and however real those columns are.
+For each period, confirm that it appears on at least one controlling statement
+sheet you opened. Then verify that `sheets_present` contains only opened sheets
+where you observed either that exact header or a scenario-and-date-equivalent
+column. Uneven coverage is valid and should remain visible rather than causing
+the period to disappear.
 
 ## Never return a period you did not see
 
@@ -173,7 +161,8 @@ human `label`, `period_type`, `scenario`, and `start_period` / `end_period` as
 
 `period_type` is one of `month`, `current_period`, `ytd`, `full_year`, `ttm`,
 `unknown`. A single calendar month is `month`. A column totalling a whole year is
-`full_year`; a cumulative column ending part way through is `ytd`.
+`full_year`; this includes a YTD column ending at that workbook's fiscal
+year-end. A cumulative column ending part way through the fiscal year is `ytd`.
 
 Set `recommended_period_id` to the one a reader would most likely want — normally
 the current year-to-date or full-year actual.

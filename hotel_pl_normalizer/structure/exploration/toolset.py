@@ -443,11 +443,10 @@ class WorkbookExplorationToolset:
     ) -> tuple[list[DiscoveredPeriod], set[str]]:
         """Cut `sheets_present` back to sheets this session actually opened.
 
-        `sheets_present` is the evidence that a period is available across the
-        detail, and the intersection rule is applied against it -- but the model
-        writes both the evidence and the conclusion, and it pads: one run listed
-        26 sheets having opened 7. A padded list makes the rule pass trivially,
-        because every sheet read is trivially "present".
+        `sheets_present` is the evidence of observed per-sheet coverage, but the
+        model writes both the evidence and the conclusion, and it pads: one run
+        listed 26 sheets having opened 7. A padded list falsely reports coverage
+        that the session never checked.
 
         This does not judge which periods are right. It replaces a claim about
         what was read with the toolset's own record of what was read, so a period

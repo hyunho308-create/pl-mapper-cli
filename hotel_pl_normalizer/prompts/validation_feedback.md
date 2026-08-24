@@ -78,6 +78,9 @@ response:
 The conversation already contains prior repair attempts. Do not resend a
 growing repair-history block or repeat source evidence. Persist the structured
 repair fields in telemetry so later review can see what was tried and why.
+If the same quantified blocking findings and relevant cited rows are unchanged
+after one repair, the validator stops the loop and rejects the run. Do not keep
+moving supported values merely to manufacture a different answer.
 
 ## Rule Guidance
 
@@ -157,14 +160,46 @@ layers and add one `source_discrepancy` review item citing both COA IDs and all
 rows from both layers. Explain briefly why the candidates do not resolve the
 difference. Python will keep the finding blocking unless every other
 qualification check passes.
+For paired OOD/Misc category differences caused by one combined operator Summary,
+the review item must cite both S12 accounts, S3 OOD, S4 Misc, the combined Summary
+row, and both separate detail rows. Do not move either detailed category merely
+to reproduce the combined Summary presentation.
+
+When material mismatches span several departments, review them together before
+creating separate exceptions. Confirm that the Summary and detail layers share a
+consistent period, scope, and reporting basis. If the workbook does not support
+one controlling hierarchy, add a blocking `ambiguity` review item for the
+competing source bases instead of qualifying each mismatch independently.
 
 ### `source_discrepancy`
 
 Description: Independently reported Summary and department values still differ
-after a structural repair pass, and deterministic qualification checks passed.
+after a structural repair pass, or a selected component layer conflicts with a
+separately reported alternate subtotal.
 
 Resolution: Preserve both reported source layers and present the computed
 difference for human review. Do not alter either value merely to force agreement.
+This outcome is for a supported source non-tie within an otherwise coherent
+hierarchy; it is not a waiver for incompatible workbook-wide reporting layers.
+
+### `source_layer_conflict`
+
+Description: A selected mapped layer and one separately reported cited subtotal
+contain different values even though the selected layer reconciles the mapping.
+
+Resolution: Preserve the supported selected layer, retain the cited alternate
+subtotal and computed difference in the exception record, and present the
+chosen treatment for human review. Do not make the run appear clean.
+
+### `source_presentation_exception`
+
+Description: After a structural repair pass, Python confirmed that the operator
+Summary combines OOD and miscellaneous income while the detailed schedules
+report the two Standard COA categories separately.
+
+Resolution: Preserve the operator-reported Summary and both detailed categories.
+Keep the structured review item and present both category differences for human
+review; do not treat the combined presentation as category-level agreement.
 
 ### `summary_combined_ood_misc`
 
@@ -172,7 +207,9 @@ Description: The selected combined OOD and miscellaneous-income presentation
 does not reconcile to the detailed schedules.
 
 Resolution: Confirm whether Summary combines or separates OOD and miscellaneous
-income, then check the two detailed sections for omissions or duplication.
+income, then check the two detailed sections for omissions or duplication. This
+rule validates the declared source presentation only; it does not waive the
+separate S12-to-S3 OOD and S12-to-S4 Misc category checks.
 
 ### `summary_combined_ood_misc_inactive_bucket`
 
@@ -182,6 +219,8 @@ combined-in-Misc presentation requires Summary OOD to be zero.
 
 Resolution: Put the combined amount in only the selected Summary bucket. Preserve
 the separate S3 OOD and S4 Misc department totals for the combined reconciliation.
+The same-category checks remain blocking until the mapping is corrected or the
+combined source presentation qualifies for the structured exception.
 
 ### `summary_math`
 
@@ -250,6 +289,30 @@ no usable evidence for this child hierarchy. After validation has no blocking
 errors, use one focused enrichment pass for all such parents, then finish with
 the warnings preserved rather than guessing or repeatedly revisiting unavailable
 detail.
+
+### `unresolved_ambiguity`
+
+Description: The mapping declares that two materially different treatments
+remain plausible from the available evidence.
+
+Resolution: Preserve the cited evidence and reject for a human classification
+decision. Do not guess or move values solely to clear the finding.
+
+### `scope_exception`
+
+Description: A material inclusion or exclusion decision falls outside source
+mapping and requires operator direction.
+
+Resolution: Preserve the cited source treatment and reject until the operator
+decides the intended scope. Do not silently include or exclude the amount.
+
+### `coverage_review_not_completed`
+
+Description: A mapping with incomplete source detail reached the session limit
+before its one focused coverage-review response completed.
+
+Resolution: Reject the run rather than presenting an unreviewed coverage gap as
+accepted. Rerun the mapping if another focused review turn is available.
 
 ### `unresolved_negative_residual`
 

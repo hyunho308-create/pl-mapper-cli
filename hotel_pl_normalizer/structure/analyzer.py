@@ -185,19 +185,20 @@ class WorkbookStructureAnalyzer:
             _read_stage_artifact(discovery_run, "period_discovery", "catalog")
         )
         selected = set(selected_period_ids)
-        labels = {
-            option.period_id: option.label
-            for option in catalog.options
-            if option.period_id in selected
-        }
+        options_by_id = {option.period_id: option for option in catalog.options}
+        selected_options = [
+            options_by_id[period_id]
+            for period_id in selected_period_ids
+            if period_id in options_by_id
+        ]
+        labels = {option.period_id: option.label for option in selected_options}
         if set(labels) != selected:
             raise ValueError("One or more selected periods are absent from discovery.")
 
         output = bind_periods(
             workbook,
             client=self.client,
-            period_ids=selected_period_ids,
-            period_labels=labels,
+            periods=selected_options,
             financial_sheets=routing.selected_sheet_names
             + routing.unsure_sheet_names,
         )
@@ -219,6 +220,14 @@ class WorkbookStructureAnalyzer:
             artifacts["tool_trace"] = output.tool_trace
         messages = [
             "Selected periods were bound to columns for every routed sheet.",
+            *(
+                f"{period_id}: "
+                f"{sum(item.period_id == period_id for item in output.structure.bindings)} "
+                "sheet binding(s), "
+                f"{sum(item.period_id == period_id for item in output.structure.unavailable)} "
+                "sheet(s) unavailable."
+                for period_id in selected_period_ids
+            ),
             *output.observations,
             *(f"Rejected once: {item}" for item in output.rejections),
         ]

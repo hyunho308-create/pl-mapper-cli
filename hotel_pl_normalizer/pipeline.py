@@ -43,6 +43,9 @@ class NormalizationResult:
     execution_issues: list[str] = field(default_factory=list)
     review_items: list[Any] = field(default_factory=list)
     accepted: bool = False
+    outcome: str = "rejected"
+    exceptions: list[dict[str, Any]] = field(default_factory=list)
+    stopped_reason: str | None = None
     duration_ms: int = 0
     session_calls: int = 0
     session_call_ms: list[int] = field(default_factory=list)
@@ -299,6 +302,9 @@ def normalize_workbook(
         execution_issues=mapping.execution_issues,
         review_items=mapping.review_items,
         accepted=mapping.accepted,
+        outcome=mapping.outcome.value,
+        exceptions=mapping.exceptions,
+        stopped_reason=mapping.stopped_reason,
         duration_ms=duration_ms,
         session_calls=mapping.session_calls,
         session_call_ms=mapping.session_call_ms,

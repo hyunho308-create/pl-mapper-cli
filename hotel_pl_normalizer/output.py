@@ -12,7 +12,7 @@ invisible until an analyst hits it. This module opens the template and writes
 values into it; it never authors a model formula.
 
 **Row order is load-bearing.** Every model formula is a hard row reference
-(`=COA!C176+COA!C178`). The COA tab must therefore carry all 269 accounts in
+(`=COA!C178+COA!C180`). The COA tab must therefore carry all 271 accounts in
 `coa_v2.csv` order on every run, including unmapped ones, or every figure on the
 model tab silently shifts by a row. `_assert_template_matches` refuses to write
 rather than let that happen quietly.
@@ -307,6 +307,18 @@ def _describe_check(check) -> tuple[str, str, str]:
             )
         except (KeyError, ValueError):
             rendered = "The Summary total does not match the detailed department schedule."
+    elif rule == "source_layer_conflict":
+        try:
+            variance = float(details["variance"])
+            rendered = (
+                "Source layer conflict: The selected mapped layer differs from "
+                f"an alternate reported subtotal by {abs(variance):,.0f}."
+            )
+        except (KeyError, ValueError):
+            rendered = (
+                "The selected mapped layer differs from an alternate reported "
+                "source subtotal."
+            )
     elif rule == "source_discrepancy":
         try:
             variance = float(details["variance"])
@@ -326,6 +338,28 @@ def _describe_check(check) -> tuple[str, str, str]:
             )
         except (KeyError, ValueError):
             rendered = "The independently reported Summary and department values differ."
+    elif rule == "source_presentation_exception":
+        try:
+            variance = float(details["variance"])
+            subject, schedule, plural = SUMMARY_DEPARTMENT_NAMES.get(
+                target,
+                (target.rsplit(".", 1)[-1].replace("_", " "), "department", False),
+            )
+            comparison = (
+                ("exceed" if plural else "exceeds")
+                if variance > 0
+                else ("are below" if plural else "is below")
+            )
+            rendered = (
+                f"Combined source presentation: Summary {subject} {comparison} "
+                f"the separately reported {schedule} schedule by "
+                f"{abs(variance):,.0f}."
+            )
+        except (KeyError, ValueError):
+            rendered = (
+                "The operator Summary combines Other Operated Departments and "
+                "Miscellaneous Income that detail reports separately."
+            )
     elif rule == "summary_math":
         try:
             variance = float(details["variance"])
@@ -747,12 +781,21 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     warnings = [finding for finding in findings if finding[0] == "warning"]
     human_notes = len(result.review_items or [])
     mismatch_counts = _run_note_mismatch_counts(result, periods)
-    if errors:
-        status = "Completed with errors"
-    elif warnings or human_notes or any(mismatch_counts.values()):
-        status = "Completed with warnings"
-    else:
-        status = "Completed"
+    status_by_outcome = {
+        "clean": "Completed",
+        "source_exception": "Completed — source exception",
+        "coverage_gap": "Completed — coverage gap",
+        "scope_exception": "Rejected — scope decision required",
+        "rejected": "Rejected",
+    }
+    status = status_by_outcome.get(result.outcome)
+    if status is None:
+        if errors:
+            status = "Completed with errors"
+        elif warnings or human_notes or any(mismatch_counts.values()):
+            status = "Completed with warnings"
+        else:
+            status = "Completed"
 
     details = {
         4: result.source_name,

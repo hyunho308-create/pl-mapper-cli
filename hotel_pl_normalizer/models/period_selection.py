@@ -37,6 +37,7 @@ class PeriodColumnSelectionMap(StrictModel):
     requested_period: str
     default_selection: PeriodColumnSelection | None = None
     sheet_selections: list[PeriodColumnSelection] = []
+    unavailable_sheets: dict[str, str] = {}
     notes: list[str] = []
 
 

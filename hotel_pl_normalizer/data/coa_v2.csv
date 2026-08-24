@@ -6,8 +6,8 @@ Summary,S12.adr,ADR,,,FALSE,,
 Summary,S12.revpar,RevPAR,,,FALSE,,
 Summary,S12.total_rooms_revenue,Total Rooms Revenue,,,FALSE,,
 Summary,S12.total_food_and_beverage_revenue,Total Food and Beverage Revenue,,,FALSE,,
-Summary,S12.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,,
-Summary,S12.total_miscellaneous_income,Total Miscellaneous Income,,,FALSE,,
+Summary,S12.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,Follow S3; exclude amounts classified in S4.,
+Summary,S12.total_miscellaneous_income,Total Miscellaneous Income,,,FALSE,"Follow S4, even when Summary combines categories.",
 Summary,S12.total_revenue,Total Revenue,,,FALSE,,
 Summary,S12.total_rooms_expenses,Total Rooms Expenses,,,FALSE,,
 Summary,S12.total_food_and_beverage_expenses,Total Food and Beverage Expenses,,,FALSE,,
@@ -32,23 +32,25 @@ Summary,S12.total_non_operating_income_and_expenses,Total Non-Operating Income a
 Summary,S12.ebitda,EBITDA,,,FALSE,,
 Summary,S12.ffe_reserve,FF&E Reserve,,,FALSE,Do not invent when absent or zero.,replacement reserve|furniture fixtures and equipment reserve
 Summary,S12.noi,EBITDA Less Replacement Reserve (NOI),,,FALSE,Do not invent when absent or zero.,net operating income|EBITDA less replacement reserve
-Rooms,S1.discount,Discount,Total Rooms Revenue > Transient Rooms Revenue > Discount,S1.transient_rooms_revenue,FALSE,Includes package,promotions | opaque | package
-Rooms,S1.negotiated,Negotiated,Total Rooms Revenue > Transient Rooms Revenue > Negotiated,S1.transient_rooms_revenue,FALSE,typically corporate transient rates,LNR
+Rooms,S1.discount,Discount,Total Rooms Revenue > Transient Rooms Revenue > Discount,S1.transient_rooms_revenue,FALSE,Rate segments only; exclude rebates and ancillary revenue.,promotional rate | opaque rate | package rate
+Rooms,S1.negotiated,Negotiated,Total Rooms Revenue > Transient Rooms Revenue > Negotiated,S1.transient_rooms_revenue,FALSE,Requires negotiated or corporate-rate evidence.,LNR | locally negotiated rate | special corporate
 Rooms,S1.qualified,Qualified,Total Rooms Revenue > Transient Rooms Revenue > Qualified,S1.transient_rooms_revenue,FALSE,Government transient maps here; government group maps to Government.,government transient | AAA | loyalty redemptions
 Rooms,S1.retail,Retail,Total Rooms Revenue > Transient Rooms Revenue > Retail,S1.transient_rooms_revenue,FALSE,"Includes consortia like amex, chase, virtuoso and Internet Non-Opaque",best available rate|rack rate|internet non-opaque
 Rooms,S1.wholesale,Wholesale,Total Rooms Revenue > Transient Rooms Revenue > Wholesale,S1.transient_rooms_revenue,FALSE,,transient tour and travel
+Rooms,S1.other_transient_rooms_revenue,Other Transient Rooms Revenue,Total Rooms Revenue > Transient Rooms Revenue > Other Transient Rooms Revenue,S1.transient_rooms_revenue,FALSE,Explicit Other Transient rows only; never use as a plug.,other transient | transient other
 Rooms,S1.transient_rooms_revenue,Transient Rooms Revenue,Total Rooms Revenue > Transient Rooms Revenue,S1.total_rooms_revenue,FALSE,,
 Rooms,S1.association_convention,Association/Convention,Total Rooms Revenue > Group Rooms Revenue > Association/Convention,S1.group_rooms_revenue,FALSE,,
 Rooms,S1.corporate,Corporate,Total Rooms Revenue > Group Rooms Revenue > Corporate,S1.group_rooms_revenue,FALSE,,
 Rooms,S1.government,Government,Total Rooms Revenue > Group Rooms Revenue > Government,S1.group_rooms_revenue,FALSE,,
 Rooms,S1.smerf,SMERF,Total Rooms Revenue > Group Rooms Revenue > SMERF,S1.group_rooms_revenue,FALSE,,social military educational religious fraternal
-Rooms,S1.tour_wholesalers,Tour/Wholesalers,Total Rooms Revenue > Group Rooms Revenue > Tour/Wholesalers,S1.group_rooms_revenue,FALSE,,
-Rooms,S1.group_rooms_revenue,Group Rooms Revenue,Total Rooms Revenue > Group Rooms Revenue,S1.total_rooms_revenue,FALSE,,
+Rooms,S1.tour_wholesalers,Tour/Wholesalers,Total Rooms Revenue > Group Rooms Revenue > Tour/Wholesalers,S1.group_rooms_revenue,FALSE,Requires explicit Group tour or wholesale context.,group tour and travel | group wholesale
+Rooms,S1.other_group_rooms_revenue,Other Group Rooms Revenue,Total Rooms Revenue > Group Rooms Revenue > Other Group Rooms Revenue,S1.group_rooms_revenue,FALSE,Explicit Group Other rows only; never use as a plug.,other group | group other
+Rooms,S1.group_rooms_revenue,Group Rooms Revenue,Total Rooms Revenue > Group Rooms Revenue,S1.total_rooms_revenue,FALSE,Keep Group-labeled revenue within Group.,
 Rooms,S1.contract_rooms_revenue,Contract Rooms Revenue,Total Rooms Revenue > Contract Rooms Revenue,S1.total_rooms_revenue,FALSE,,crew rooms|airline crew
-Rooms,S1.other_rooms_revenue,Other Rooms Revenue,Total Rooms Revenue > Other Rooms Revenue,S1.total_rooms_revenue,TRUE,,
-Rooms,S1.allowances_and_breakage,Allowances and Breakage,Total Rooms Revenue > Allowances and Breakage,S1.total_rooms_revenue,FALSE,,
+Rooms,S1.other_rooms_revenue,Other Rooms Revenue,Total Rooms Revenue > Other Rooms Revenue,S1.total_rooms_revenue,TRUE,"Exclude Group labels, rebates, and unsupported blanks.",part day | no show | early departure
+Rooms,S1.allowances_and_breakage,Allowances and Breakage,Total Rooms Revenue > Allowances and Breakage,S1.total_rooms_revenue,FALSE,Rooms rebates and allowances map here.,rooms rebates | transient rebate | group rebate | rooms allowances
 Rooms,S1.total_rooms_revenue,Total Rooms Revenue,,,FALSE,,
-Rooms,S1.management,Management,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S1.salaries_and_wages,FALSE,Managers only; exclude supervisors.,
+Rooms,S1.management,Management,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S1.salaries_and_wages,FALSE,"Managers only, including non-exempt managers.",management wages | total management wages | non-exempt management
 Rooms,S1.complimentary_f_b,Complimentary F&B,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Complimentary F&B,S1.nonmanagement,FALSE,,
 Rooms,S1.front_office,Front Office,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Front Office,S1.nonmanagement,FALSE,,
 Rooms,S1.guest_services,Guest Services,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Guest Services,S1.nonmanagement,FALSE,,
@@ -56,7 +58,7 @@ Rooms,S1.housekeeping,Housekeeping,Total Rooms Expenses > Labor Costs and Relate
 Rooms,S1.laundry,Laundry,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Laundry,S1.nonmanagement,FALSE,,
 Rooms,S1.reservations_labor,Reservations Labor,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Reservations Labor,S1.nonmanagement,FALSE,,
 Rooms,S1.transportation,Transportation,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Transportation,S1.nonmanagement,FALSE,,
-Rooms,S1.nonmanagement,Nonmanagement,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S1.salaries_and_wages,FALSE,Includes supervisors; excludes managers.,supervisors|hourly staff
+Rooms,S1.nonmanagement,Nonmanagement,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S1.salaries_and_wages,FALSE,Includes supervisors; excludes explicit management captions.,supervisors | hourly staff
 Rooms,S1.salaries_and_wages,Salaries and Wages,Total Rooms Expenses > Labor Costs and Related Expenses > Salaries and Wages,S1.labor_costs_and_related_expenses,FALSE,,
 Rooms,S1.bonuses_and_incentives,Bonuses and Incentives,Total Rooms Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S1.labor_costs_and_related_expenses,FALSE,,
 Rooms,S1.contracted_leased_and_outsourced_labor,"Contracted, Leased and Outsourced Labor","Total Rooms Expenses > Labor Costs and Related Expenses > Contracted, Leased and Outsourced Labor",S1.labor_costs_and_related_expenses,FALSE,,
@@ -92,9 +94,9 @@ F&B,S2.venue9_food_revenue,Venue 9 Food Revenue,Total Food and Beverage Revenue 
 F&B,S2.venue10_food_revenue,Venue 10 Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Venue 10 Food Revenue,S2.food_revenue,FALSE,,
 F&B,S2.banquet_conference_catering_food_revenue,Banquet/Conference/Catering Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Banquet/Conference/Catering Food Revenue,S2.food_revenue,FALSE,Never map to a generic venue.,banquet food|catering food|food - banquets|B&C food
 F&B,S2.in_room_dining_food_revenue,In-Room Dining Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > In-Room Dining Food Revenue,S2.food_revenue,FALSE,Never map to a generic venue.,in-room dining food|room service food|IRD food
-F&B,S2.food_allowances,Food Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Food Allowances,S2.food_revenue,FALSE,Allowances may appear below Total Food Revenue.,food discounts|food comps|food revenue adjustment
+F&B,S2.food_allowances,Food Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Food Allowances,S2.food_revenue,FALSE,Department-wide food/F&B allowances only.,food discounts | food comps | food revenue adjustment | trans discount | F&B rebates
 F&B,S2.food_other,Food Other,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue > Food Other,S2.food_revenue,TRUE,,miscellaneous food revenue
-F&B,S2.food_revenue,Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue,S2.food_and_beverage_revenue,FALSE,Food Allowances is contra-revenue; Food Other is residual; Allowances may appear below Total F&B Revenue.,
+F&B,S2.food_revenue,Food Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Food Revenue,S2.food_and_beverage_revenue,FALSE,Outlet and banquet allowances stay with their revenue.,
 F&B,S2.venue1_beverage_revenue,Venue 1 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 1 Beverage Revenue,S2.beverage_revenue,FALSE,,
 F&B,S2.venue2_beverage_revenue,Venue 2 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 2 Beverage Revenue,S2.beverage_revenue,FALSE,,
 F&B,S2.venue3_beverage_revenue,Venue 3 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 3 Beverage Revenue,S2.beverage_revenue,FALSE,,
@@ -107,9 +109,9 @@ F&B,S2.venue9_beverage_revenue,Venue 9 Beverage Revenue,Total Food and Beverage 
 F&B,S2.venue10_beverage_revenue,Venue 10 Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Venue 10 Beverage Revenue,S2.beverage_revenue,FALSE,,
 F&B,S2.banquet_conference_catering_beverage_revenue,Banquet/Conference/Catering Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Banquet/Conference/Catering Beverage Revenue,S2.beverage_revenue,FALSE,Never map to a generic venue.,banquet beverage|catering beverage|beverage - banquets|B&C beverage
 F&B,S2.in_room_dining_beverage_revenue,In-Room Dining Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > In-Room Dining Beverage Revenue,S2.beverage_revenue,FALSE,Never map to a generic venue.,in-room dining beverage|room service beverage|IRD beverage
-F&B,S2.beverage_allowances,Beverage Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Beverage Allowances,S2.beverage_revenue,FALSE,,beverage discounts|beverage comps|beverage revenue adjustment
+F&B,S2.beverage_allowances,Beverage Allowances,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Beverage Allowances,S2.beverage_revenue,FALSE,Department-wide beverage allowances only.,beverage discounts | beverage comps | beverage revenue adjustment
 F&B,S2.beverage_other,Beverage Other,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue > Beverage Other,S2.beverage_revenue,TRUE,,miscellaneous beverage revenue
-F&B,S2.beverage_revenue,Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue,S2.food_and_beverage_revenue,FALSE,"Beverage Allowances is contra-revenue; Beverage Other is residual, Allowances may appear below Total F&B Revenue.",
+F&B,S2.beverage_revenue,Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue > Beverage Revenue,S2.food_and_beverage_revenue,FALSE,Outlet and banquet allowances stay with their revenue.,
 F&B,S2.food_and_beverage_revenue,Food and Beverage Revenue,Total Food and Beverage Revenue > Food and Beverage Revenue,S2.total_food_and_beverage_revenue,FALSE,Rank generic venues by combined net F&B revenue; use matching venue names.,
 F&B,S2.audiovisual,Audiovisual,Total Food and Beverage Revenue > Other Revenue > Audiovisual,S2.other_revenue,FALSE,,
 F&B,S2.function_room_rental_and_setup_charges,Function Room Rental and Setup Charges,Total Food and Beverage Revenue > Other Revenue > Function Room Rental and Setup Charges,S2.other_revenue,FALSE,Include event fees.,
@@ -123,10 +125,10 @@ F&B,S2.audiovisual_cost,Audiovisual Cost,Total Food and Beverage Expenses > Tota
 F&B,S2.miscellaneous_cost,Miscellaneous Cost,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Other Revenue > Miscellaneous Cost,S2.cost_of_other_revenue,FALSE,,
 F&B,S2.cost_of_other_revenue,Cost of Other Revenue,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue > Cost of Other Revenue,S2.total_cost_of_sales_and_other_revenue,FALSE,,
 F&B,S2.total_cost_of_sales_and_other_revenue,Total Cost of Sales and Other Revenue,Total Food and Beverage Expenses > Total Cost of Sales and Other Revenue,S2.total_food_and_beverage_expenses,FALSE,,
-F&B,S2.management,Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S2.salaries_and_wages,FALSE,,
+F&B,S2.management,Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management,S2.salaries_and_wages,FALSE,"Managers only, including non-exempt managers.",management wages | non-exempt management
 F&B,S2.service_management,Service Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management > Service Management,S2.management,FALSE,,
 F&B,S2.kitchen_management,Kitchen Management,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Management > Kitchen Management,S2.management,FALSE,,
-F&B,S2.nonmanagement,Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S2.salaries_and_wages,FALSE,,
+F&B,S2.nonmanagement,Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement,S2.salaries_and_wages,FALSE,Exclude explicit management captions.,supervisors | hourly staff
 F&B,S2.kitchen_nonmanagement,Kitchen Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Kitchen Nonmanagement,S2.nonmanagement,FALSE,,
 F&B,S2.service_nonmanagement,Service Nonmanagement,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages > Nonmanagement > Service Nonmanagement,S2.nonmanagement,FALSE,,
 F&B,S2.salaries_and_wages,Salaries and Wages,Total Food and Beverage Expenses > Labor Costs and Related Expenses > Salaries and Wages,S2.labor_costs_and_related_expenses,FALSE,,
@@ -165,12 +167,12 @@ OOD,S3.total_golf_course_and_pro_shop_revenue,Total Golf Course and Pro Shop Rev
 OOD,S3.total_golf_course_and_pro_shop_expenses,Total Golf Course and Pro Shop Expenses,Total Other Operated Departments Expenses > Total Golf Course and Pro Shop Expenses,S3.total_other_operated_departments_expenses,FALSE,,
 OOD,S3.other_department_revenue,Other Other Operated Department Revenue,Total Other Operated Departments Revenue > Other Other Operated Department Revenue,S3.total_other_operated_departments_revenue,TRUE,,
 OOD,S3.other_department_expenses,Other Other Operated Department Expenses,Total Other Operated Departments Expenses > Other Other Operated Department Expenses,S3.total_other_operated_departments_expenses,TRUE,"Miscellaneous income expenses, although they should not be present, can be mapped to this account.",
-OOD,S3.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,"Miscellaneous income expenses, although they should not be present, can be mapped to this account.",
+OOD,S3.total_other_operated_departments_revenue,Total Other Operated Departments Revenue,,,FALSE,Requires an operated department; exclude miscellaneous income.,other operating division | OOD revenue
 OOD,S3.total_other_operated_departments_expenses,Total Other Operated Departments Expenses,,,FALSE,,
 Misc Income,S4.attrition_and_cancellation_fees,Attrition and Cancellation Fees,Total Miscellaneous Income > Attrition and Cancellation Fees,S4.total_miscellaneous_income,FALSE,,
 Misc Income,S4.destination_resort_urban_fees,Destination Resort Urban Fees,Total Miscellaneous Income > Destination Resort Urban Fees,S4.total_miscellaneous_income,FALSE,,
 Misc Income,S4.space_rental_and_concessions,Space Rental and Concessions,Total Miscellaneous Income > Space Rental and Concessions,S4.total_miscellaneous_income,FALSE,Space or concession rent; exclude commission revenue.,space rental|concession rent
-Misc Income,S4.other_misc_income,Other Miscellaneous Income,Total Miscellaneous Income > Other Miscellaneous Income,S4.total_miscellaneous_income,TRUE,,commission income|revenue share|other miscellaneous income
+Misc Income,S4.other_misc_income,Other Miscellaneous Income,Total Miscellaneous Income > Other Miscellaneous Income,S4.total_miscellaneous_income,TRUE,Exclude operated-department revenue.,commission income | revenue share | other miscellaneous income | other non-taxable income
 Misc Income,S4.total_miscellaneous_income,Total Miscellaneous Income,,,FALSE,,
 A&G,S5.salaries_and_wages,Salaries and Wages,Total Administrative and General Expenses > Labor Costs and Related Expenses > Salaries and Wages,S5.labor_costs_and_related_expenses,FALSE,,
 A&G,S5.bonuses_and_incentives,Bonuses and Incentives,Total Administrative and General Expenses > Labor Costs and Related Expenses > Bonuses and Incentives,S5.labor_costs_and_related_expenses,FALSE,,
@@ -262,9 +264,9 @@ Mgmt Fees,S10.incentive_and_other_fees,Incentive and Other Fees,Total Management
 Mgmt Fees,S10.total_management_fees,Total Management Fees,,,FALSE,,
 Non-Op,S11.rent,Rent,Total Non-Operating Income and Expenses > Rent,S11.total_non_operating_income_and_expenses,FALSE,"Includes storage, land, building and equipment rent.",ground rent|building rent|equipment lease|storage rent
 Non-Op,S11.property_and_other_taxes,Property and Other Taxes,Total Non-Operating Income and Expenses > Property and Other Taxes,S11.total_non_operating_income_and_expenses,FALSE,,
-Non-Op,S11.insurance,Insurance,Total Non-Operating Income and Expenses > Insurance,S11.total_non_operating_income_and_expenses,FALSE,,
+Non-Op,S11.insurance,Insurance,Total Non-Operating Income and Expenses > Insurance,S11.total_non_operating_income_and_expenses,FALSE,Keep unsplit insurance at this parent.,operator policy insurance | combined property and liability insurance
 Non-Op,S11.property_insurance,Property Insurance,Total Non-Operating Income and Expenses > Insurance > Property Insurance,S11.insurance,FALSE,,building insurance | casualty insurance | flood insurance
 Non-Op,S11.general_liability_insurance,General Liability Insurance,Total Non-Operating Income and Expenses > Insurance > General Liability Insurance,S11.insurance,FALSE,,liability insurance
 Non-Op,S11.non_operating_income,Non-Operating Income,Total Non-Operating Income and Expenses > Non-Operating Income,S11.total_non_operating_income_and_expenses,FALSE,Normalize as negative expense; negate positive source income.,non-operating income|non operating revenue
-Non-Op,S11.other,Other,Total Non-Operating Income and Expenses > Other,S11.total_non_operating_income_and_expenses,TRUE,,
+Non-Op,S11.other,Other,Total Non-Operating Income and Expenses > Other,S11.total_non_operating_income_and_expenses,TRUE,Exclude explicit insurance captions.,
 Non-Op,S11.total_non_operating_income_and_expenses,Total Non-Operating Income and Expenses,,,FALSE,,

@@ -31,7 +31,7 @@ from typing import Any
 
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
-LOG_VERSION = 2
+LOG_VERSION = 3
 
 
 def _plain(value: Any) -> Any:
@@ -150,6 +150,8 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         },
         "outcome": {
             "accepted": result.accepted,
+            "classification": result.outcome,
+            "stopped_reason": result.stopped_reason,
             "accounts_in_chart": len(result.coa),
             "accounts_populated": result.mapped_account_count,
             "accounts_with_a_decision": len(result.decisions),
@@ -195,6 +197,7 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         # be visible: the values below simply would not mention the missing one.
         "dropped_periods": dict(result.dropped_periods),
         "review_items": [_plain(item) for item in result.review_items],
+        "exceptions": list(result.exceptions),
     }
 
 

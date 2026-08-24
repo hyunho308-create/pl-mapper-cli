@@ -355,6 +355,9 @@ def main() -> None:
     write_run_log(result, args.output_dir / "run_log.json")
     summary = {
         "accepted": result.accepted,
+        "outcome": result.outcome,
+        "stopped_reason": result.stopped_reason,
+        "exceptions": result.exceptions,
         "accounts_mapped": result.mapped_account_count,
         "cost_usd": result.cost_usd,
         "duration_ms": result.duration_ms,

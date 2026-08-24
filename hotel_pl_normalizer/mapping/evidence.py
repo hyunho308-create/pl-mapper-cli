@@ -54,6 +54,7 @@ def compact_workbook_evidence(
     )
     columns_by_period: dict[str, dict[str, int]] = {}
     defaults_by_period: dict[str, int | None] = {}
+    unavailable_by_period: dict[str, set[str]] = {}
     for period_id, selection_map in period_maps.items():
         columns: dict[str, int] = {}
         selections = list(selection_map.sheet_selections)
@@ -68,19 +69,29 @@ def compact_workbook_evidence(
             if selection_map.default_selection is not None
             else None
         )
+        unavailable_by_period[period_id] = set(selection_map.unavailable_sheets)
 
     evidence = []
     for sheet in workbook.sheets:
         if sheet.sheet_name not in include_sheets:
+            continue
+        if all(
+            sheet.sheet_name in unavailable_by_period[period_id]
+            for period_id in period_maps
+        ):
             continue
         label_column = dominant_label_column(sheet.rows)
         for row in sheet.rows:
             selected_columns = {}
             selected_values = {}
             for period_id in period_maps:
-                value_column = columns_by_period[period_id].get(
-                    sheet.sheet_name,
-                    defaults_by_period[period_id],
+                value_column = (
+                    None
+                    if sheet.sheet_name in unavailable_by_period[period_id]
+                    else columns_by_period[period_id].get(
+                        sheet.sheet_name,
+                        defaults_by_period[period_id],
+                    )
                 )
                 selected_columns[period_id] = value_column
                 selected_values[period_id] = next(

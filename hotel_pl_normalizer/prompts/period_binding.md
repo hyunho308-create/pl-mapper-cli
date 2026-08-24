@@ -60,6 +60,19 @@ shift between the Summary tab and the department tabs is common. Check each shee
 against its own header block; never assume two tabs share a convention because
 their columns are near each other.
 
+The chosen-period list includes canonical scenario, type and date coverage from
+discovery. Match the economic period, not the exact wording of its header. A
+December YTD column ending at a December fiscal year-end, a Jan–Dec `Total`, an
+FY column and a TTM ending in that same December are equivalent when they cover
+the same twelve months and carry the same scenario. Bind each sheet's equivalent
+column even when one calls it `YTD` and another calls it `Total`.
+
+The equivalence is strict in the facts that matter: scenario and date coverage.
+Never substitute Budget or Forecast for Actual, never substitute a single month
+for an annual period, and never treat a partial YTD as a full year. When exact
+coverage cannot be established from the header block, mark that sheet
+unavailable instead of guessing.
+
 ## What is not a period column
 
 - **Variance columns.** Anything comparing two things: `Variance`, `Var`,

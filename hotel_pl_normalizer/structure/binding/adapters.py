@@ -27,9 +27,9 @@ def binding_to_selection_maps(
 ) -> dict[str, PeriodColumnSelectionMap]:
     """One selection map per chosen period, keyed by period id.
 
-    A sheet with no binding is left out rather than guessed at. Evidence falls
-    back to the default selection for it, which is the workbook's usual column --
-    the right answer far more often than any column this stage could invent.
+    A sheet explicitly marked unavailable is retained as such so evidence never
+    falls back to another sheet's column for it. The workbook default remains
+    only for an unanswered sheet salvaged from an incomplete binding session.
     """
     labels = dict(period_labels or {})
     maps: dict[str, PeriodColumnSelectionMap] = {}
@@ -46,17 +46,19 @@ def binding_to_selection_maps(
             for binding in structure.bindings
             if binding.period_id == period_id
         ]
-        notes = [
-            f"{item.sheet_name}: {item.reason}"
+        unavailable = {
+            item.sheet_name: item.reason
             for item in structure.unavailable
             if item.period_id == period_id
-        ]
+        }
+        notes = [f"{sheet_name}: {reason}" for sheet_name, reason in unavailable.items()]
         maps[period_id] = PeriodColumnSelectionMap(
             selection_map_id=f"{workbook_id}:period_columns:{period_id}",
             workbook_id=workbook_id,
             requested_period=label,
             default_selection=_default_selection(selections),
             sheet_selections=selections,
+            unavailable_sheets=unavailable,
             notes=notes,
         )
     return maps
