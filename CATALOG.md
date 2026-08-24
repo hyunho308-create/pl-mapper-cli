@@ -1,6 +1,6 @@
-# Hotel P&L Normalizer Catalog
+# Hotel P&L Mapper Catalog
 
-This is a short human-readable guide to the main parts of the repository. The code and bundled COA remain authoritative.
+This is a short guide to the main parts of the repository. The code and bundled COA remain authoritative.
 
 ## Workflow
 
