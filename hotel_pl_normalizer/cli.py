@@ -62,7 +62,7 @@ def _doctor() -> int:
         "Standard COA bundled": files("hotel_pl_normalizer.data").joinpath("coa_v2.csv").is_file(),
         "Output template bundled": files("hotel_pl_normalizer.data").joinpath("output_template.xlsx").is_file(),
     }
-    print(f"Hotel P&L Normalizer {_version()}")
+    print(f"Hotel P&L Mapper {_version()}")
     for label, passed in checks.items():
         print(f"[{'OK' if passed else 'MISSING'}] {label}")
     return 0 if all(checks.values()) else 1
@@ -244,7 +244,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="hotel-pl-normalizer",
-        description="Normalize one hotel P&L workbook into the bundled Standard COA.",
+        description="Map one hotel P&L workbook into the bundled Standard COA.",
     )
     parser.add_argument("workbook", type=Path, nargs="?")
     parser.add_argument("output_dir", type=Path, nargs="?")

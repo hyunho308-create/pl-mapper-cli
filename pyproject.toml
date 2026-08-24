@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hotel-pl-normalizer"
 version = "2.0.0"
-description = "Normalize hotel P&L workbooks into the Standard COA from the command line."
+description = "Map hotel P&L workbooks into the Standard COA from the command line."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

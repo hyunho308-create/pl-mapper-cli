@@ -61,16 +61,16 @@ The setup is ready when the doctor check shows `[OK]` for every item. The doctor
 
 ## 4. Add a P&L workbook
 
-Copy the operator workbook into the project folder or attach directly into a codex chat. You may create a folder such as `P&Ls` to keep inputs organized in the project folder. Supported files are `.xlsx`, `.xlsm`, and `.xls`.
+Copy the operator workbook into the project folder or attach it directly to a Codex task. You may create a folder such as `P&Ls` to keep inputs organized in the project folder. Supported files are `.xlsx`, `.xlsm`, and `.xls`.
 
 Keep the original workbook unchanged. The CLI writes results to a separate output folder that Codex can create for you.
 
-## 5. Ask Codex to normalize it
+## 5. Ask Codex to map it
 
 Start with this prompt and replace the file name:
 
 ```text
-Normalize the hotel P&L workbook named Hotel.xlsx using the CLI in this project. Run it interactively in a persistent session. When the CLI discovers the available periods, show them to me in plain English and wait for my choice. Do not choose or restart the run while waiting. After I respond, continue the same run and save the results in a new output folder next to the workbook. Do not change the source workbook.
+Map the hotel P&L workbook named Hotel.xlsx using the CLI in this project. Run it interactively in a persistent session. When the CLI discovers the available periods, show them to me in plain English and wait for my choice. Do not choose or restart the run while waiting. After I respond, continue the same run and save the results in a new output folder next to the workbook. Do not change the source workbook.
 ```
 
 Codex will perform workbook exploration and then return with a numbered list similar to:

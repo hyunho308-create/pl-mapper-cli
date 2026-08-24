@@ -42,7 +42,7 @@ $env:OPENAI_API_KEY = "paste-your-key-here"
 Run interactively:
 
 ```powershell
-.\.venv\Scripts\hotel-pl-normalizer.exe "C:\P&Ls\Hotel.xlsx" "C:\P&Ls\Hotel-normalized"
+.\.venv\Scripts\hotel-pl-normalizer.exe "C:\P&Ls\Hotel.xlsx" "C:\P&Ls\Hotel-mapped"
 ```
 
 The CLI lists validated periods and waits for one number, multiple comma-separated numbers, or Enter to accept its recommendation. Unattended alternatives are available through `--actual-and-prior`, `--annual-periods N`, `--period-id`, and `--recommended`.
