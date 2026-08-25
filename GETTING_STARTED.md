@@ -6,7 +6,7 @@ You need:
 
 - The [Codex desktop app for Windows](https://learn.chatgpt.com/docs/windows/windows-app), installed and signed in.
 - [Python 3.11 or newer](https://www.python.org/downloads/).
-- An OpenAI API account with billing enabled and access to `gpt-5.6-luna`.
+- An OpenAI API key.
 
 To download the mapper:
 
@@ -33,9 +33,9 @@ You do not need to find or install these packages separately. They are listed in
 
 Create a key at the [OpenAI API key page](https://platform.openai.com/api-keys). The API key pays for the model calls made by this mapper; it is separate from signing in to Codex.
 
-> **Note:** The free tier and Tier 1 are subject to 60K and 200K tokens per minute limits, respectively, for the Luna API. Full mapping runs with prior calls appended for context will often exceed this cap. Tier 2 allows up to 2MM tokens per minute and can be activating by loading >$50 into the API to start. Mapping typically costs around $0.10/P&L so $50 should be plenty to start.
+> **Note:** The free tier and Tier 1 are subject to 60K and 200K tokens per minute limits, respectively, for the Luna API. Full mapping runs with prior calls appended for context will often exceed these caps. Tier 2 allows up to 2MM tokens per minute which should comfortably fit multiple parallel runs and can be activating by loading >$50 into the API. Mapping typically costs around $0.10/P&L so $50 should be plenty to start.
 
-Do not paste the key into a Codex chat and do not save it in this project folder. On Windows:
+To follow best practices, do not paste the key into a Codex chat or save it in this project folder. Instead add it as a user variable on Windows:
 
 1. Open the Start menu and search for **Edit environment variables for your account**.
 2. Under **User variables**, select **New**.
@@ -43,11 +43,9 @@ Do not paste the key into a Codex chat and do not save it in this project folder
 4. Paste the API key as the variable value and select **OK** on each open window.
 5. Completely close Codex and reopen it so the new setting is available.
 
-This follows the [official OpenAI API setup](https://developers.openai.com/api/docs/quickstart), which uses `OPENAI_API_KEY` as a system environment variable. The mapper checks that the variable exists but never displays its value.
-
 ## 3. Open the project in Codex
 
-In Codex, choose **Add project** and select the unzipped `Hotel P&L Mapper` folder as a local project.
+In Codex, create a new project and select the unzipped `Hotel P&L Mapper` folder as a local project.
 
 Start a new task in that project and paste:
 
@@ -73,21 +71,14 @@ Start with this prompt and replace the file name:
 Map the hotel P&L workbook named Hotel.xlsx using the CLI in this project. Run it interactively in a persistent session. When the CLI discovers the available periods, show them to me in plain English and wait for my choice. Do not choose or restart the run while waiting. After I respond, continue the same run and save the results in a new output folder next to the workbook. Do not change the source workbook.
 ```
 
-Codex will perform workbook exploration and then return with a numbered list similar to:
+Codex will perform workbook exploration and then ask you which periods you want to map with a numbered list similar to:
 
 ```text
 1. 2025 Actual — Full Year
 2. 2024 Actual — Full Year
 3. 2026 Budget — Full Year
 ```
-
-Reply naturally, for example:
-
-```text
-Map 1 and 2 or map 2026 Budget.
-```
-
-Codex will pass that selection to the waiting CLI and continue the same run. A typical run takes 10–20 minutes and makes paid OpenAI API calls.
+A typical run takes 10–20 minutes and makes paid OpenAI API calls.
 
 ## 6. Review the result
 
