@@ -1044,9 +1044,23 @@ def _restore_template_textbox(path: Path) -> None:
         rels_info = source.getinfo(MODEL_SHEET_RELS)
         rels = source.read(MODEL_SHEET_RELS)
 
+    relationship_ids = re.findall(
+        rb'<Relationship\b(?=[^>]*\bType="[^"]*/drawing")'
+        rb'(?=[^>]*\bTarget="[^"]*drawings/drawing1\.xml")'
+        rb'[^>]*\bId="([^"]+)"[^>]*/?>',
+        rels,
+    )
+    if len(relationship_ids) != 1:
+        raise OutputTemplateError(
+            "The output template must define exactly one relationship for "
+            f"{MODEL_DRAWING_PART}; found {len(relationship_ids)}."
+        )
+    drawing_id = relationship_ids[0]
     drawing_tag = (
         b'<drawing xmlns:r="http://schemas.openxmlformats.org/'
-        b'officeDocument/2006/relationships" r:id="rId1"/>'
+        b'officeDocument/2006/relationships" r:id="'
+        + drawing_id
+        + b'"/>'
     )
     drawing_override = (
         b'<Override PartName="/xl/drawings/drawing1.xml" '
@@ -1060,11 +1074,16 @@ def _restore_template_textbox(path: Path) -> None:
     archive.pop(MODEL_SHEET_RELS, None)
     archive.pop(MODEL_DRAWING_PART, None)
     sheet_info, sheet_xml = archive[MODEL_SHEET_PART]
-    if b"<drawing" not in sheet_xml:
+    drawing_reference = re.compile(
+        rb"<(?:[A-Za-z_][\w.-]*:)?drawing\b[^>]*/>"
+    )
+    if drawing_reference.search(sheet_xml):
+        sheet_xml = drawing_reference.sub(drawing_tag, sheet_xml, count=1)
+    else:
         sheet_xml = sheet_xml.replace(
             b"</worksheet>", drawing_tag + b"</worksheet>"
         )
-        archive[MODEL_SHEET_PART] = (sheet_info, sheet_xml)
+    archive[MODEL_SHEET_PART] = (sheet_info, sheet_xml)
     content_info, content_xml = archive["[Content_Types].xml"]
     if b"/xl/drawings/drawing1.xml" not in content_xml:
         content_xml = content_xml.replace(
