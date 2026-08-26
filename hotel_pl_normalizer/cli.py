@@ -16,6 +16,7 @@ from hotel_pl_normalizer.output import mapped_output_name, write_normalized_work
 from hotel_pl_normalizer.pipeline import (
     analyze_workbook_structure,
     discover_workbook_periods,
+    normalize_pdf,
     normalize_workbook,
     shared_workbook,
     validated_period_ids,
@@ -35,7 +36,7 @@ def _catalog(run) -> dict:
 # Full-year, year-to-date and trailing-twelve periods are the spans normally
 # compared between properties; a single month is only useful in context.
 ANNUAL_PERIOD_TYPES = {"full_year", "ytd", "ttm"}
-SUPPORTED_WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+SUPPORTED_INPUT_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".pdf"}
 
 
 def _display_period_detail(value: object) -> str:
@@ -59,6 +60,8 @@ def _doctor() -> int:
         "openpyxl installed": importlib.util.find_spec("openpyxl") is not None,
         "pydantic installed": importlib.util.find_spec("pydantic") is not None,
         "xlrd installed": importlib.util.find_spec("xlrd") is not None,
+        "pdfplumber installed": importlib.util.find_spec("pdfplumber") is not None,
+        "pypdf installed": importlib.util.find_spec("pypdf") is not None,
         "Standard COA bundled": files("hotel_pl_normalizer.data").joinpath("coa_v2.csv").is_file(),
         "Output template bundled": files("hotel_pl_normalizer.data").joinpath("output_template.xlsx").is_file(),
     }
@@ -244,7 +247,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="hotel-pl-normalizer",
-        description="Map one hotel P&L workbook into the bundled Standard COA.",
+        description="Map one hotel P&L workbook or PDF into the bundled Standard COA.",
     )
     parser.add_argument("workbook", type=Path, nargs="?")
     parser.add_argument("output_dir", type=Path, nargs="?")
@@ -295,62 +298,86 @@ def main() -> None:
     args.output_dir = args.output_dir.expanduser().resolve()
     if not args.workbook.is_file():
         parser.error(f"workbook does not exist: {args.workbook}")
-    if args.workbook.suffix.lower() not in SUPPORTED_WORKBOOK_SUFFIXES:
-        parser.error("workbook must be an .xlsx, .xlsm, or .xls file")
+    if args.workbook.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+        parser.error("input must be an .xlsx, .xlsm, .xls, or .pdf file")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     work_dir = args.output_dir / "work"
-    # Discovery, structure analysis and evidence extraction all borrow this same
-    # parsed record. Mapping releases it as soon as the compact evidence exists.
-    parsed = shared_workbook(args.workbook)
-    discovery = discover_workbook_periods(
-        args.workbook,
-        output_dir=work_dir / "discovery",
-        progress=lambda message: print(message, flush=True),
-        parsed=parsed,
-    )
-    catalog = _catalog(discovery)
-    valid_ids = validated_period_ids(discovery)
-    if args.period_id or args.annual_periods or args.actual_and_prior or args.recommended:
-        selected_ids = _choose_period_ids(
-            catalog,
-            valid_ids,
-            args.period_id,
+    source_path = args.workbook
+    is_pdf = source_path.suffix.lower() == ".pdf"
+    if is_pdf:
+        interactive_selector = None
+        if not (
+            args.period_id
+            or args.annual_periods
+            or args.actual_and_prior
+            or args.recommended
+        ):
+            interactive_selector = lambda catalog, valid: _prompt_for_period_ids(
+                catalog, valid
+            )
+        result = normalize_pdf(
+            source_path,
+            output_dir=work_dir,
+            selected_period_ids=args.period_id,
             annual_periods=args.annual_periods,
             actual_and_prior=args.actual_and_prior,
+            select_periods=interactive_selector,
+            source_name=source_path.name,
+            progress=lambda message: print(message, flush=True),
+            on_activity=lambda message: print(f"  · {message}", flush=True),
         )
+        selected_ids = list(result.period_labels)
     else:
-        selected_ids = _prompt_for_period_ids(catalog, valid_ids)
-    labels = {
-        item["period_id"]: item["label"] for item in catalog["options"]
-    }
-    print(
-        "Selected period(s): "
-        + ", ".join(f"{labels[item]} [{item}]" for item in selected_ids),
-        flush=True,
-    )
-    structure = analyze_workbook_structure(
-        args.workbook,
-        output_dir=work_dir / "upstream",
-        discovery_run=discovery,
-        selected_period_ids=selected_ids,
-        progress=lambda message: print(message, flush=True),
-        parsed=parsed,
-    )
-    result = normalize_workbook(
-        args.workbook,
-        output_dir=work_dir,
-        prior_run=structure,
-        selected_period_ids=selected_ids,
-        source_name=args.workbook.name,
-        progress=lambda message: print(message, flush=True),
-        # `progress` names the current stage; `on_activity` is the live feed of
-        # what the mapper is doing during a long model session.
-        on_activity=lambda message: print(f"  · {message}", flush=True),
-        parsed=parsed,
-    )
+        # Discovery, structure analysis and evidence extraction all borrow this
+        # same parsed record. Mapping releases it once compact evidence exists.
+        parsed = shared_workbook(source_path)
+        discovery = discover_workbook_periods(
+            source_path,
+            output_dir=work_dir / "discovery",
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed,
+        )
+        catalog = _catalog(discovery)
+        valid_ids = validated_period_ids(discovery)
+        if args.period_id or args.annual_periods or args.actual_and_prior or args.recommended:
+            selected_ids = _choose_period_ids(
+                catalog,
+                valid_ids,
+                args.period_id,
+                annual_periods=args.annual_periods,
+                actual_and_prior=args.actual_and_prior,
+            )
+        else:
+            selected_ids = _prompt_for_period_ids(catalog, valid_ids)
+        labels = {
+            item["period_id"]: item["label"] for item in catalog["options"]
+        }
+        print(
+            "Selected period(s): "
+            + ", ".join(f"{labels[item]} [{item}]" for item in selected_ids),
+            flush=True,
+        )
+        structure = analyze_workbook_structure(
+            source_path,
+            output_dir=work_dir / "upstream",
+            discovery_run=discovery,
+            selected_period_ids=selected_ids,
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed,
+        )
+        result = normalize_workbook(
+            source_path,
+            output_dir=work_dir,
+            prior_run=structure,
+            selected_period_ids=selected_ids,
+            source_name=source_path.name,
+            progress=lambda message: print(message, flush=True),
+            on_activity=lambda message: print(f"  · {message}", flush=True),
+            parsed=parsed,
+        )
     write_normalized_workbook(
-        result, args.output_dir / mapped_output_name(args.workbook.name)
+        result, args.output_dir / mapped_output_name(source_path.name)
     )
     write_run_log(result, args.output_dir / "run_log.json")
     summary = {
@@ -374,6 +401,9 @@ def main() -> None:
         "session_calls": result.session_calls,
         "session_exhausted": result.session_exhausted,
     }
+    if is_pdf:
+        summary["source_format"] = "pdf"
+        summary["pdf_structure_dir"] = str(work_dir / "pdf_structure")
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )

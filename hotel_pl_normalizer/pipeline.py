@@ -10,17 +10,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hotel_pl_normalizer.mapping import map_workbook
+from hotel_pl_normalizer.mapping import compact_pdf_evidence, map_workbook
 from hotel_pl_normalizer.mapping.evidence import compact_workbook_evidence
 from hotel_pl_normalizer.models.period_selection import (
     PeriodCatalog,
+    PeriodColumnSelection,
     PeriodColumnSelectionMap,
 )
 from hotel_pl_normalizer.models.run import StructureRun
 from hotel_pl_normalizer.models.sheet_selection import SheetNameSelectionResult
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers import ModelClient, create_model_client
-from hotel_pl_normalizer.structure.ingestion import read_excel_workbook
+from hotel_pl_normalizer.structure.ingestion import read_excel_workbook, read_pdf_document
+from hotel_pl_normalizer.structure.pdf import bind_pdf_periods, explore_pdf
 
 
 @dataclass
@@ -211,6 +213,229 @@ def discover_workbook_periods(
         workbook,
         output_dir=output_dir,
         workbook_record=parsed.require(),
+    )
+
+
+def normalize_pdf(
+    pdf: Path,
+    *,
+    output_dir: Path,
+    selected_period_ids: list[str] | None = None,
+    annual_periods: int = 0,
+    actual_and_prior: bool = False,
+    select_periods: Callable[[dict, set[str]], list[str]] | None = None,
+    source_name: str,
+    progress: Callable[[str], None] | None = None,
+    on_activity: Callable[[str], None] | None = None,
+) -> NormalizationResult:
+    """Normalize a born-digital PDF through direct positioned-text evidence."""
+    started = time.perf_counter()
+    pdf = Path(pdf)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    structure_dir = output_dir / "pdf_structure"
+    structure_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress:
+        progress("Reading positioned text from the PDF")
+    document = read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+    structure_client = create_model_client(
+        reasoning_effort="medium",
+        repair_reasoning_effort="medium",
+    )
+    if progress:
+        progress("Finding financial pages and available periods")
+    exploration = explore_pdf(document, client=structure_client)
+    discovered = {item.period_id: item for item in exploration.structure.periods}
+
+    catalog = {
+        "options": [item.model_dump(mode="json") for item in discovered.values()],
+        "recommended_period_id": exploration.structure.recommended_period_id,
+    }
+    requested_ids = list(dict.fromkeys(selected_period_ids or []))
+    if requested_ids:
+        unknown = [period_id for period_id in requested_ids if period_id not in discovered]
+        if unknown:
+            raise ValueError("Unknown PDF period id(s): " + ", ".join(unknown))
+    elif actual_and_prior:
+        annual = [
+            item
+            for item in exploration.structure.periods
+            if item.period_type.value in {"full_year", "ytd", "ttm"}
+        ]
+        actuals = [item for item in annual if item.scenario.value == "actual"]
+        priors = [item for item in annual if item.scenario.value == "prior_actual"]
+        primary = next(
+            (
+                item
+                for item in (actuals or priors)
+                if item.period_id == exploration.structure.recommended_period_id
+            ),
+            (actuals or priors or [None])[0],
+        )
+        if primary is None:
+            raise RuntimeError("No annual Actual or Prior Actual period was found in the PDF.")
+        prior = next(
+            (
+                item
+                for item in priors
+                if item.period_id != primary.period_id
+                and item.period_type == primary.period_type
+            ),
+            None,
+        )
+        requested_ids = [primary.period_id] + ([prior.period_id] if prior else [])
+    elif annual_periods > 0:
+        annual_ids = [
+            item.period_id
+            for item in exploration.structure.periods
+            if item.period_type.value in {"full_year", "ytd", "ttm"}
+        ]
+        recommended = exploration.structure.recommended_period_id
+        if recommended in annual_ids:
+            annual_ids = [recommended] + [item for item in annual_ids if item != recommended]
+        if not annual_ids:
+            raise RuntimeError("No annual period was found in the PDF.")
+        requested_ids = annual_ids[:annual_periods]
+    elif select_periods is not None:
+        requested_ids = select_periods(catalog, set(discovered))
+    else:
+        recommended = exploration.structure.recommended_period_id
+        requested_ids = [recommended] if recommended else list(discovered)[:1]
+    if not requested_ids:
+        raise RuntimeError("PDF period discovery returned no period to map.")
+
+    if progress:
+        progress("Binding selected periods to displayed PDF amount columns")
+    binding = bind_pdf_periods(
+        document,
+        exploration.structure,
+        client=structure_client,
+        period_ids=requested_ids,
+    )
+    usable_ids = [
+        period_id
+        for period_id in requested_ids
+        if any(item.period_id == period_id for item in binding.structure.bindings)
+    ]
+    dropped_periods = {
+        period_id: "No displayed amount column could be bound on any financial page."
+        for period_id in requested_ids
+        if period_id not in usable_ids
+    }
+    if not usable_ids:
+        raise RuntimeError("No selected PDF period has a usable amount-column binding.")
+
+    evidence = compact_pdf_evidence(
+        document,
+        binding.structure,
+        period_ids=usable_ids,
+    )
+    if not any(item.get("selected_value") is not None for item in evidence):
+        raise RuntimeError("PDF bindings produced no labeled numeric evidence rows.")
+    labels = {period_id: discovered[period_id].label for period_id in usable_ids}
+    period_maps = {}
+    for period_id in usable_ids:
+        period_maps[period_id] = PeriodColumnSelectionMap(
+            selection_map_id=f"pdf:{document.document_id}:{period_id}",
+            workbook_id=document.document_id,
+            requested_period=labels[period_id],
+            sheet_selections=[
+                PeriodColumnSelection(
+                    sheet_name=f"Pages {item.start_page}-{item.end_page}",
+                    value_column=max(1, round(item.right_edge * 1000)),
+                    excel_column=f"x={item.right_edge:.3f}",
+                    period_label=labels[period_id],
+                    evidence=list(item.evidence),
+                )
+                for item in binding.structure.bindings
+                if item.period_id == period_id
+            ],
+            notes=["PDF point anchors; no intermediate Excel workbook was created."],
+        )
+
+    (structure_dir / "exploration.json").write_text(
+        exploration.structure.model_dump_json(indent=2), encoding="utf-8"
+    )
+    (structure_dir / "bindings.json").write_text(
+        binding.structure.model_dump_json(indent=2), encoding="utf-8"
+    )
+    (structure_dir / "evidence.json").write_text(
+        json.dumps(evidence, indent=2), encoding="utf-8"
+    )
+
+    if progress:
+        progress("Mapping the PDF statement")
+    mapping_client = create_model_client(
+        reasoning_effort="max",
+        repair_reasoning_effort="medium",
+    )
+    mapping = map_workbook(
+        workbook_id=document.document_id,
+        requested_period=labels[usable_ids[0]],
+        periods=period_maps,
+        period_labels=labels,
+        evidence=evidence,
+        skipped_sheets=[],
+        client=mapping_client,
+        on_activity=on_activity,
+    )
+    structure_calls = list(structure_client.usage_history)
+    structure_cost = structure_client.estimate_cost(structure_calls)
+    mapping_cost = mapping_client.estimate_cost(mapping.model_calls)
+    cost_usd = round(structure_cost + mapping_cost, 6)
+    return NormalizationResult(
+        workbook_id=document.document_id,
+        source_name=source_name,
+        period_label=labels[usable_ids[0]],
+        values=mapping.values,
+        coa=mapping.coa,
+        period_labels=labels,
+        period_values=mapping.values_by_period,
+        residual_plugs_by_period=mapping.residual_plugs_by_period,
+        checks_by_period=mapping.checks_by_period,
+        execution_issues_by_period=mapping.execution_issues_by_period,
+        dropped_periods=dropped_periods,
+        decisions=mapping.decisions,
+        checks=mapping.checks,
+        execution_issues=mapping.execution_issues,
+        review_items=mapping.review_items,
+        accepted=mapping.accepted,
+        outcome=mapping.outcome.value,
+        exceptions=mapping.exceptions,
+        stopped_reason=mapping.stopped_reason,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        session_calls=mapping.session_calls,
+        session_call_ms=mapping.session_call_ms,
+        session_tool_calls=mapping.session_tool_calls,
+        session_exhausted=mapping.session_exhausted,
+        cost_usd=cost_usd,
+        mapping_provider=mapping_client.provider,
+        mapping_model=mapping_client.model_name,
+        cost_details={
+            "scope": "full_workflow_estimate",
+            "provider": mapping_client.provider,
+            "model": mapping_client.model_name,
+            "rates_usd_per_million_tokens": mapping_client.pricing_details(),
+            "structure_cost_usd": structure_cost,
+            "mapping_cost_usd": mapping_cost,
+        },
+        evidence=evidence,
+        model_calls=[*structure_calls, *mapping.model_calls],
+        tool_trace=[*exploration.tool_trace, *binding.tool_trace, *mapping.tool_trace],
+        mapping_selection=mapping.mapping_selection,
+        structure_stages=[
+            {
+                "stage_name": "pdf_period_discovery",
+                "duration_ms": exploration.duration_ms,
+                "status": "pass",
+            },
+            {
+                "stage_name": "pdf_anchor_binding",
+                "duration_ms": binding.duration_ms,
+                "status": "pass",
+            },
+        ],
     )
 
 

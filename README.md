@@ -1,6 +1,6 @@
 # Hotel P&L Mapper CLI
 
-Map an operator hotel P&L into a bundled 271-account Standard COA while preserving the source workbook and a source-row audit trail.
+Map an operator hotel P&L workbook or born-digital PDF into a bundled 271-account Standard COA while preserving a source-row audit trail.
 
 Follow the [getting started guide](./GETTING_STARTED.md) to begin.
 
@@ -22,5 +22,7 @@ A successful run normally has `"accepted": true` in `summary.json`. Some qualifi
 - Windows, macOS, or Linux
 - Python 3.11 or newer
 - An OpenAI API key with access to `gpt-5.6-luna`
-- A complete hotel P&L workbook
-- Dependencies: `openai>=1.0`, `openpyxl>=3.1`, `pydantic>=2.0`, `xlrd>=2.0`
+- A complete hotel P&L workbook (`.xlsx`, `.xlsm`, or `.xls`) or a born-digital `.pdf` with a usable text layer
+- Dependencies: `openai>=1.0`, `openpyxl>=3.1`, `pdfplumber>=0.11`, `pypdf>=6.0`, `pydantic>=2.0`, `xlrd>=2.0`
+
+PDFs are inspected directly from positioned text and numeric anchors; no intermediate Excel workbook is created. PDF routing, period discovery, and amount-column binding write auditable artifacts under `work/pdf_structure`, then hand compact source rows to the same mapper used by Excel. Scanned/image-only PDFs fail closed instead of being guessed or silently OCRed. The Excel ingestion and structure workflow is unchanged.

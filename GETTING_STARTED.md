@@ -24,6 +24,7 @@ During setup, Codex installs these Python packages automatically:
 
 - `openai`: connects the mapper to the OpenAI API and Luna model.
 - `openpyxl`: reads `.xlsx` and `.xlsm` workbooks and writes the mapped workbook.
+- `pdfplumber` and `pypdf`: inspect born-digital PDFs directly without converting them to Excel.
 - `pydantic`: checks the structured information passed between workflow stages.
 - `xlrd`: reads older `.xls` workbooks.
 
@@ -57,9 +58,9 @@ Codex may ask permission to install the listed Python packages. Approve those se
 
 The setup is ready when the doctor check shows `[OK]` for every item. The doctor check does not make a paid model call.
 
-## 4. Add a P&L workbook
+## 4. Add a P&L workbook or PDF
 
-Copy the operator workbook into the project folder or attach it directly to a Codex task. You may create a folder such as `P&Ls` to keep inputs organized in the project folder. Supported files are `.xlsx`, `.xlsm`, and `.xls`.
+Copy the operator P&L into the project folder or attach it directly to a Codex task. You may create a folder such as `P&Ls` to keep inputs organized in the project folder. Supported files are `.xlsx`, `.xlsm`, `.xls`, and born-digital `.pdf` files with an extractable text layer. Scanned PDFs require OCR and are not accepted automatically.
 
 Keep the original workbook unchanged. The CLI writes results to a separate output folder that Codex can create for you.
 
@@ -68,7 +69,7 @@ Keep the original workbook unchanged. The CLI writes results to a separate outpu
 Start with this prompt and replace the file name:
 
 ```text
-Map the hotel P&L workbook named Hotel.xlsx using the CLI in this project. Run it interactively in a persistent session. When the CLI discovers the available periods, show them to me in plain English and wait for my choice. Do not choose or restart the run while waiting. After I respond, continue the same run and save the results in a new output folder next to the workbook. Do not change the source workbook.
+Map the hotel P&L named Hotel.xlsx using the CLI in this project. Run it interactively in a persistent session. When the CLI discovers the available periods, show them to me in plain English and wait for my choice. Do not choose or restart the run while waiting. After I respond, continue the same run and save the results in a new output folder next to the source. Do not change the source file.
 ```
 
 Codex will perform workbook exploration and then ask you which periods you want to map with a numbered list similar to:
