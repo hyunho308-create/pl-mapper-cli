@@ -1,6 +1,6 @@
 """Current model adapter and the neutral contract future adapters implement."""
 
-from .base import ModelClient, ModelToolset
+from .base import ModelClient, ModelToolset, ProviderRunCancelled
 from .openai_api import OpenAIModelClient
 
 
@@ -20,4 +20,9 @@ def create_model_client(
     )
 
 
-__all__ = ["ModelClient", "ModelToolset", "create_model_client"]
+__all__ = [
+    "ModelClient",
+    "ModelToolset",
+    "ProviderRunCancelled",
+    "create_model_client",
+]

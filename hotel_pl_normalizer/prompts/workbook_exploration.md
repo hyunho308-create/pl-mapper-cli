@@ -28,9 +28,9 @@ arrive in the result of `submit_routing`.
 ## Phase one — route every sheet
 
 Return one entry for **every** sheet `list_sheets` gave you. For each sheet,
-return only its exact `sheet_name`, a `decision`, a `role_hint`, and concise
-`evidence` for the decision. Do not identify departments, subsections, row
-ranges, periods, or COA mappings in this phase.
+return only its exact `sheet_name`, `include_as_financial_evidence`, `role`,
+`confidence`, and concise `evidence`. Do not identify departments, subsections,
+row ranges, periods, or COA mappings in this phase.
 
 ### Ask for more whenever you need it
 
@@ -49,8 +49,9 @@ open it.**
 - `find_text` will locate a word anywhere in the workbook and tell you which
   sheet it was on. Use it when you do not know where to look.
 
-An `unsure` decision should mean you looked and it was genuinely ambiguous — not
-that you did not look.
+Use `confidence=uncertain` only after looking when the classification remains
+genuinely ambiguous. Uncertainty never excludes a sheet: use the included
+`unknown` role conservatively.
 
 ### Judge coded tabs by content
 
@@ -83,47 +84,70 @@ If a combined Banquet/Catering schedule exists, standalone Banquet and Catering
 tabs may be supporting detail. Use the workbook's content and relationships,
 not a fixed name rule, to distinguish them.
 
-### Sheets that are usually supporting-only
+Financial content wins over convenience or duplication. If a sheet contains
+selected-period revenue, payroll/labor, operating expense, or department-total
+amounts, keep it available as financial evidence even when a consolidated P&L
+or another schedule appears to cover the same department. Do not decide that a
+financial schedule is redundant during exploration—the mapper will compare the
+schedules, use detailed subschedules where they support COA children, and
+document which source controls each level. If its role remains genuinely
+uncertain after inspection, include it with `role=unknown` and
+`confidence=uncertain`.
 
-Normally skip sheets that do not supply P&L statement values:
+### Sheets that are not financial evidence
+
+Set `include_as_financial_evidence=false` only when a sheet does not supply P&L
+statement values:
 
 - Balance sheets; check, audit, validation, formula, or reconciliation tabs.
 - Data cubes, raw downloads, exports, parameters, and calculation tabs.
 - Statistics-only, payroll-detail, labor-productivity, overtime, and employee
-  tabs when a core P&L schedule is available.
-- Reservations statistics, market mix, staff/employee dining, and similar
-  support schedules when the core Rooms or F&B schedule is available.
+  tabs that do not themselves report department P&L totals or a usable
+  selected-period revenue, payroll, or operating-expense schedule.
+- Market mix, staff/employee dining, and similar support schedules that contain
+  operating statistics rather than a financial P&L schedule.
 - Plain in-house Laundry schedules. Do not apply this rule to Guest Laundry.
-- Duplicate or shorter summary tabs when a fuller summary reaches further down
-  the P&L.
 
-A monthly, TTM, budget, forecast, or trend tab is not automatically skippable.
+A monthly, TTM, budget, forecast, or trend tab is not automatically excludable.
 Keep it when it contains P&L amount columns or represents a distinct reporting
-grain needed for period discovery; skip it only when it is analysis or support
-and the financial statements provide the usable values.
+grain needed for period discovery; exclude it only when it contains no usable
+financial evidence.
 
-### Routing decisions
+### Inclusion and roles
 
-- `triage`: likely to contain mapped P&L rows or substantive detail that may be
-  needed for mapping or validation.
-- `defer`: a conditional supporting schedule that may become useful if a core
-  statement or summary cannot supply a required value.
-- `skip`: clearly non-P&L, calculation, analysis, duplicate, or supporting-only.
-- `unsure`: genuinely ambiguous after examining the available title/header
-  evidence.
+`include_as_financial_evidence=true` keeps the sheet for period binding,
+mapping, and validation. It requires one of these mutually exclusive roles:
 
-When uncertain between `skip` and `unsure`, choose `unsure`. When uncertain
-between `triage` and `defer`, use `defer` only for conditional support; obvious
-core department and outlet P&Ls belong in `triage`.
+- `summary_p_and_l`: consolidated hotel P&L or statement of income.
+- `department_p_and_l`: a department, outlet, or other operated P&L with usable
+  revenue, labor expense, operating expense, or department totals.
+- `financial_supporting_schedule`: selected-period financial amounts useful for
+  mapping, reconciliation, allocation, or explaining another schedule.
+- `unknown`: potentially financial but still ambiguous after inspection. This
+  role is always included.
 
-Use the role hints exactly as defined by the submission schema:
-`summary_p_and_l`, `department_p_and_l`, `supporting_schedule`,
-`check_or_analysis`, `balance_sheet`, or `unknown`.
+`include_as_financial_evidence=false` excludes the sheet from period binding and
+mapping. It requires one of these roles:
+
+- `topline_operating_statistics`: RN, occupancy, ADR, RevPAR, market mix, or
+  segmentation without P&L amounts.
+- `balance_sheet`: balance-sheet content rather than a hotel P&L.
+- `payroll_statistics`: FTE, staffing, hours, wage rates, productivity, or
+  employee statistics without usable labor or payroll expense amounts.
+- `other`: navigation, configuration, raw metadata, narrative,
+  blank, formula-only, audit-only, or other nonfinancial content.
+
+Do not use `payroll_statistics` merely because a sheet contains labor
+information. A sheet with selected-period wages, payroll expense, benefits,
+taxes, contract labor, or department payroll totals is financial evidence.
+
+The inclusion flag and role are deterministically checked. An included role
+cannot be excluded and an excluded role cannot be included.
 
 Short acronyms are weak evidence. For example, `RM` may mean Revenue Management,
 Repairs and Maintenance, or something operator-specific. Open the sheet and use
-its title or labels; if it remains ambiguous, use `unsure` and `unknown` rather
-than inventing a meaning.
+its title or labels; if it remains ambiguous, include it with `unknown` and
+`confidence=uncertain` rather than inventing a meaning.
 
 Also set `workbook_layout`:
 

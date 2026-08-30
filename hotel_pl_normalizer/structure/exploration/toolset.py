@@ -19,6 +19,10 @@ from hotel_pl_normalizer.models.exploration import (
     WorkbookRouting,
 )
 from hotel_pl_normalizer.providers.base import tool_parameter_schema
+from hotel_pl_normalizer.structure.monthly_spread import (
+    MONTHLY_SPREAD_THRESHOLD,
+    explicit_month_years,
+)
 
 from .reader import MAX_ROWS_PER_READ, LazyWorkbook
 
@@ -45,11 +49,10 @@ class WorkbookExplorationToolset:
     # serve stale structure if the file were replaced under the same name.
     cacheable = False
 
-    # Periods must be confirmed against the detail, so phase two has to open
-    # several of the sheets routing marked as financial -- not just the summary.
-    # This is a floor, not a target: a workbook with fewer financial sheets than
-    # this needs only the ones it has.
-    MIN_FINANCIAL_SHEETS_READ = 5
+    # One controlling summary establishes the catalog. Department sheets only
+    # confirm its periods; auxiliary T12/monthly summaries cannot expand it.
+    MAX_DEPARTMENT_SHEETS_TO_CONFIRM = 4
+    CONTROLLING_HEADER_ROWS = 40
 
     def __init__(self, workbook: LazyWorkbook, *, max_reads: int = 40) -> None:
         self.workbook = workbook
@@ -218,6 +221,9 @@ class WorkbookExplorationToolset:
 
         return {
             "ok": True,
+            "ingestion_warnings": list(
+                getattr(self.workbook, "compatibility_warnings", [])
+            ),
             "sheets": [
                 {
                     "sheet_name": sheet.sheet_name,
@@ -298,17 +304,15 @@ class WorkbookExplorationToolset:
     # -- phase one: routing -----------------------------------------------
 
     def _submit_routing(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Accept the routing decision, and hand back the period instructions.
+        """Accept verified classifications and hand back period instructions.
 
-        The only check beyond the schema is one the old sheet routing needed too:
-        a sheet name that is not in the workbook cannot be routed to. What counts
-        as a good routing decision is the model's call, exactly as it was before.
+        The schema deterministically rejects any inclusion/role contradiction.
+        This layer additionally rejects sheet names that are not in the workbook.
 
         The period instructions are withheld until now. When both jobs were
         described up front the model went straight for the periods and treated
-        routing as whatever fell out of them, marking sixty-five real schedules
-        `skip` with the reason "not opened this session". Ordering the phases
-        fixes that without anything having to inspect the decisions.
+        routing as whatever fell out of them. Ordering the phases keeps sheet
+        classification grounded in inspected content.
         """
         try:
             routing = WorkbookRouting.model_validate(arguments)
@@ -335,6 +339,8 @@ class WorkbookExplorationToolset:
 
         self.routing = routing
         required = self._required_reads()
+        summaries = self._routed_sheets("summary_p_and_l")
+        departments = self._routed_sheets("department_p_and_l")
         return {
             "ok": True,
             "accepted": True,
@@ -343,34 +349,45 @@ class WorkbookExplorationToolset:
             # are the sheets periods must be confirmed against, and the count is
             # the one `submit_periods` will hold it to.
             "financial_sheets": routing.financial_sheet_names,
+            "summary_candidates": summaries,
+            "department_sheets": departments,
+            "required_department_reads": min(
+                self.MAX_DEPARTMENT_SHEETS_TO_CONFIRM,
+                len(departments),
+            ),
             "must_read_at_least": required,
             "already_read": sorted(self.read_sheets & set(routing.financial_sheet_names)),
             "next_phase": _period_detection_instructions(),
         }
 
     def _required_reads(self) -> int:
-        """How many financial sheets phase two owes, given what routing found."""
-        available = len(self.routing.financial_sheet_names) if self.routing else 0
-        return min(self.MIN_FINANCIAL_SHEETS_READ, available)
+        """One summary plus up to four normal department schedules."""
+        if self.routing is None:
+            return 0
+        return 1 + min(
+            self.MAX_DEPARTMENT_SHEETS_TO_CONFIRM,
+            len(self._routed_sheets("department_p_and_l")),
+        )
+
+    def _routed_sheets(self, role: str) -> list[str]:
+        if self.routing is None:
+            return []
+        return [
+            sheet.sheet_name
+            for sheet in self.routing.sheets
+            if sheet.include_as_financial_evidence and sheet.role.value == role
+        ]
 
     # -- phase two: periods -----------------------------------------------
 
     def _submit_periods(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Accept the periods and end the session.
 
-        Two checks, neither about which periods are right.
-
-        The first is coverage: periods have to be confirmed against the detail,
-        so enough of the sheets routing called financial must actually have been
-        opened. The prompt asked for five and did not get them -- across 29
-        workbooks, 24 sessions read exactly one sheet and submitted -- so the
-        count is held here instead. Which sheets, and what they show, stay the
-        model's call; only the number is enforced, and it drops to whatever the
-        workbook has when that is fewer than five.
-
-        The second is the schema. A workbook the model believes has no periods is
-        reported as it stands rather than argued with -- that is a finding, and
-        the run log carries it.
+        The schema is checked first. Then the chosen controlling summary must be
+        an included summary P&L that was opened, up to four included department
+        P&Ls must have been opened, and every submitted period must cite the
+        controlling summary in `sheets_present`. These checks constrain the
+        source of the catalog without interpreting header text in Python.
         """
         if self.routing is None:
             return {
@@ -381,28 +398,6 @@ class WorkbookExplorationToolset:
                     "instructions come back in its result."
                 ),
             }
-        financial = self.routing.financial_sheet_names
-        required = self._required_reads()
-        seen = [name for name in financial if name in self.read_sheets]
-        if len(seen) < required:
-            outstanding = [name for name in financial if name not in self.read_sheets]
-            message = (
-                f"Only {len(seen)} of the {len(financial)} financial sheets have "
-                f"been opened; periods must be confirmed against at least "
-                f"{required}. Read the header rows of some of these first: "
-                f"{', '.join(outstanding[:10])}."
-            )
-            self.rejections.append(message)
-            return {
-                "ok": True,
-                "accepted": False,
-                "error": message,
-                "read_so_far": seen,
-                "instruction": (
-                    "Call read_rows on those sheets, then submit_periods again."
-                ),
-            }
-
         try:
             found = WorkbookPeriods.model_validate(arguments)
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
@@ -414,8 +409,113 @@ class WorkbookExplorationToolset:
                 "instruction": "Correct it and call submit_periods again.",
             }
 
+        summaries = self._routed_sheets("summary_p_and_l")
+        anchor = found.controlling_summary_sheet
+        if anchor not in summaries:
+            message = (
+                f"controlling_summary_sheet must name an included summary_p_and_l; "
+                f"received {anchor!r}. Candidates: {', '.join(summaries) or 'none'}."
+            )
+            self.rejections.append(message)
+            return {
+                "ok": True,
+                "accepted": False,
+                "error": message,
+                "instruction": "Choose the controlling core summary and resubmit.",
+            }
+        if anchor not in self.read_sheets:
+            message = (
+                f"Open the header rows of controlling summary {anchor!r} before "
+                "submitting periods."
+            )
+            self.rejections.append(message)
+            return {
+                "ok": True,
+                "accepted": False,
+                "error": message,
+                "instruction": "Read that sheet's header block and resubmit.",
+            }
+
+        explicit_months = explicit_month_years(
+            cell.value
+            for row in self.workbook.read_rows(
+                anchor, 1, self.CONTROLLING_HEADER_ROWS
+            )
+            for cell in row
+        )
+        if len(explicit_months) >= MONTHLY_SPREAD_THRESHOLD:
+            submitted_months = {
+                period.start_month
+                for period in found.periods
+                if period.start_month == period.end_month
+            }
+            missing_months = sorted(explicit_months - submitted_months)
+            if missing_months:
+                message = (
+                    "The controlling summary has an explicit monthly spread, but the "
+                    "period catalog omits displayed months. Return every monthly amount "
+                    "period and keep any displayed annual/TTM Total as an additional "
+                    f"aggregate. Missing month headers: {missing_months}."
+                )
+                self.rejections.append(message)
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "error": message,
+                    "instruction": "Add the controlling summary's displayed months and resubmit.",
+                }
+
+        departments = self._routed_sheets("department_p_and_l")
+        required_departments = min(
+            self.MAX_DEPARTMENT_SHEETS_TO_CONFIRM,
+            len(departments),
+        )
+        seen_departments = [
+            name for name in departments if name in self.read_sheets
+        ]
+        if len(seen_departments) < required_departments:
+            outstanding = [
+                name for name in departments if name not in self.read_sheets
+            ]
+            message = (
+                f"Only {len(seen_departments)} normal department P&L sheet(s) "
+                f"have been opened; confirm the controlling periods against "
+                f"{required_departments}. Read header rows from: "
+                f"{', '.join(outstanding[:10])}."
+            )
+            self.rejections.append(message)
+            return {
+                "ok": True,
+                "accepted": False,
+                "error": message,
+                "read_so_far": seen_departments,
+                "instruction": "Read those department headers and resubmit.",
+            }
+
         periods, corrected = self._with_true_evidence(found.periods)
-        notes = [*self.routing.notes, *found.notes]
+        unanchored = [
+            period.period_id
+            for period in periods
+            if anchor not in period.sheets_present
+        ]
+        if unanchored:
+            message = (
+                "Every selectable period must appear on the controlling summary. "
+                "Remove periods introduced only by auxiliary T12, monthly, trend, "
+                f"or supporting tabs: {', '.join(unanchored)}."
+            )
+            self.rejections.append(message)
+            return {
+                "ok": True,
+                "accepted": False,
+                "error": message,
+                "instruction": "Resubmit only periods anchored on the controlling summary.",
+            }
+        notes = [
+            *getattr(self.workbook, "compatibility_warnings", []),
+            *self.routing.notes,
+            *found.notes,
+        ]
         if corrected:
             notes.append(
                 "sheets_present was corrected on "
@@ -428,8 +528,8 @@ class WorkbookExplorationToolset:
             workbook_layout=self.routing.workbook_layout,
             layout_evidence=self.routing.layout_evidence,
             sheets=self.routing.sheets,
+            controlling_summary_sheet=anchor,
             periods=periods,
-            recommended_period_id=found.recommended_period_id,
             notes=notes,
         )
         return {

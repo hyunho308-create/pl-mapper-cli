@@ -41,10 +41,7 @@ This is a short guide to the main parts of the repository. The code and bundled 
 | Choice | Use |
 | --- | --- |
 | Interactive selection | Default. Codex relays the available periods and waits for the user's response. |
-| Recommended | Maps the validated recommended period without pausing. |
-| Actual and prior | Selects a validated annual Actual and matching Prior Actual when available. |
-| Annual periods | Selects the first requested number of validated full-year, YTD, or TTM periods. |
-| Exact period ID | Maps explicitly named validated periods for repeatable or automated runs. |
+| Exact period ID | Maps explicitly named validated periods for repeatable or automated runs. A lightweight wrapper chooses these IDs; the main workflow does not recommend or infer a default selection. |
 
 ## Run outputs
 

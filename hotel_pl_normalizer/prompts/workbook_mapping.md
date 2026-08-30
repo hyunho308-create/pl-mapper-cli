@@ -26,6 +26,26 @@ Before assigning detailed COA accounts:
    require an adjustment.
 7. Only then assign detailed COA children.
 
+`sheet_routing_context` carries exploration's role and evidence for each
+included sheet. Treat it as a compact orientation aid, not as a department ID,
+row boundary, or final mapping decision. Inspect the supplied workbook rows and
+resolve the relationship among controlling, detailed, duplicate, and supporting
+schedules in this mapping session.
+
+Record that resolution in the existing strategy fields:
+
+- `department_source_strategy`: name the controlling total and detailed
+  schedules for each relevant department, using exact sheet names.
+- `duplicate_or_supporting_schedules`: name every intentionally unused financial
+  schedule, explain why it is duplicate/supporting, and identify the exact
+  schedule that supersedes it.
+- `operator_to_coa_hierarchy_conflicts`: record each case where the operator's
+  explicit department membership or subtotal conflicts with a label-driven COA
+  classification and state which source hierarchy controls.
+
+Do not leave a routed `department_p_and_l` sheet unused unless it is documented
+in `duplicate_or_supporting_schedules` with the superseding schedule and reason.
+
 Determine conditional structures from the workbook evidence itself. Record each
 applicable condition
 in `strategy`, with concise reasons and supporting source rows. Use an empty list
@@ -108,15 +128,37 @@ Work from most important to least important:
 Never sacrifice a higher-priority structure merely to populate or reconcile a
 lower-priority child account.
 
+Within a parent department, classify rows using this evidence precedence:
+
+1. Explicit operator subtotal or department membership.
+2. A dedicated department or outlet schedule.
+3. Section, sibling, indentation, and row-sequence context.
+4. COA notes and synonyms.
+5. An isolated label or keyword.
+6. A residual account, only after positively supported siblings are mapped.
+
+A consolidated row anchors the controlling total, but it cannot be assigned
+wholly to one child when a dedicated schedule splits that same amount among
+payroll/labor and operating expense. Preserve the anchor and use the detailed
+schedule to classify the supported children. Leave aggregate-only COA detail
+blank when the source does not provide it. A detailed financial subschedule is
+not supporting or duplicate merely because a consolidated row reports its total.
+Map its non-overlapping components to the applicable COA children and use the
+consolidated row as the reconciliation control.
+
 ## Source Decisions
 
 - Map every supplied COA account exactly once.
 - Select source rows and operations, not model-generated values.
-- Prefer a directly reported total or subtotal when its scope matches the COA.
+- Prefer a directly reported total or subtotal when its scope matches the COA
+  account being mapped. This does not supersede a detailed subschedule that
+  supports distinct COA children beneath that total.
 - When a reported total includes clearly identified amounts outside the COA
   scope, use that total with cited adjustment rows instead of rebuilding it from
   many detail rows.
-- Never select both a subtotal and its descendants for the same amount.
+- Never select both a subtotal and its descendants for the same COA amount.
+  Using a consolidated total as a reconciliation control while mapping disjoint
+  child amounts from its detailed subschedule is not double counting.
 - A source row normally contributes to only one mutually exclusive path.
   Standard revenue-minus-profit calculations may reuse the required revenue
   row. For a rare nonstandard adjustment, reuse is permitted only across one
@@ -133,8 +175,11 @@ lower-priority child account.
   Prefer a supported parent over forced or label-driven detail.
 - Use headings, indentation, bold formatting, siblings, subtotal placement,
   Summary evidence, and arithmetic relationships; do not rely on labels alone.
-- Ignore inactive placeholders, statistics, percentages, calculations, and
-  supporting detail already represented by an authoritative selected row.
+- Ignore inactive placeholders, statistics, percentages, calculations, and true
+  duplicate rows already represented at the same COA scope. Do not ignore a
+  financial subschedule merely because its total is represented by an
+  authoritative consolidated row; use the subschedule for any distinct child
+  detail it supports.
 - Use `no_value` when the account is genuinely absent or cannot be matched to
   the source hierarchy, even with adjustments.
 - Net outlet-specific F&B allowances against that outlet's revenue, and banquet

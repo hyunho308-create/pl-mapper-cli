@@ -23,6 +23,11 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from hotel_pl_normalizer.structure.ingestion.openpyxl_compat import (
+    load_openpyxl_workbook,
+    repair_warning,
+)
+
 # A single read is capped so one tool call cannot pull a whole sheet into the
 # prompt. Forty rows is comfortably more than any header block seen in the
 # corpus -- the deepest was row 31 -- while leaving room to hunt.
@@ -88,14 +93,19 @@ class LazyWorkbook:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self.compatibility_warnings: list[str] = []
+        self._openpyxl_load = None
         suffix = self.path.suffix.lower()
         if suffix in {".xlsx", ".xlsm"}:
             self._kind = "xlsx"
-            import openpyxl
-
-            self._book = openpyxl.load_workbook(
+            self._openpyxl_load = load_openpyxl_workbook(
                 self.path, read_only=True, data_only=True
             )
+            self._book = self._openpyxl_load.workbook
+            if self._openpyxl_load.repairs:
+                self.compatibility_warnings.append(
+                    repair_warning(self._openpyxl_load.repairs)
+                )
         elif suffix == ".xls":
             self._kind = "xls"
             import xlrd
@@ -115,7 +125,7 @@ class LazyWorkbook:
     def close(self) -> None:
         try:
             if self._kind == "xlsx":
-                self._book.close()
+                self._openpyxl_load.close()
             else:
                 self._book.release_resources()
         except Exception:  # noqa: BLE001 - closing must not mask a real error
@@ -240,9 +250,10 @@ class LazyWorkbook:
 
         Coded tab names (`0400`, `F89_RC_ROOMS`) carry no meaning on their own,
         and operators put the real title inside the sheet: `0232 - Group
-        Banquet`. Without this, a session deciding from names alone skips real
-        departmental schedules, which is exactly what it did on Ritz-Carlton --
-        23 coded tabs marked `skip`, unread.
+        Banquet`. Without this, a session deciding from names alone excludes real
+        departmental schedules, which is exactly what an older router did on
+        Ritz-Carlton: 23 coded tabs were classified as nonfinancial without
+        being read.
 
         Returns more candidates than a caller wants to show, because the top of
         these sheets is mostly run metadata and export boilerplate. Narrowing

@@ -199,8 +199,7 @@ class WorkbookStructureAnalyzer:
             workbook,
             client=self.client,
             periods=selected_options,
-            financial_sheets=routing.selected_sheet_names
-            + routing.unsure_sheet_names,
+            financial_sheets=routing.included_sheet_names,
         )
         selections = binding_to_selection_maps(
             output.structure,

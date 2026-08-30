@@ -200,8 +200,14 @@ def _assert_template_matches(sheet, canonical: list[str]) -> int:
 
 def _periods(result: NormalizationResult) -> list[tuple[str, str, dict]]:
     """Ordered period id, label, and mapped values."""
+    if not result.period_values:
+        return [("selected", result.period_label, result.values)]
     return [
-        (period_id, result.period_labels[period_id], values)
+        (
+            period_id,
+            result.period_labels.get(period_id, result.period_label),
+            values,
+        )
         for period_id, values in result.period_values.items()
     ]
 
@@ -217,20 +223,20 @@ def _mapped_label_period(
         if re.fullmatch(r"20\d{2} (?:actual|forecast|budget)", label.lower()) or any(
             token in text for token in ("full year", "full_year", "fy", "total")
         ):
-            period_type = 5
+            range_priority = 5
         elif "ttm" in text or "trailing 12" in text:
-            period_type = 4
+            range_priority = 4
         elif "ytd" in text or "year to date" in text:
-            period_type = 3
+            range_priority = 3
         elif any(token in text for token in ("mtd", "ptd", "current period")):
-            period_type = 2
+            range_priority = 2
         elif re.search(
             r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",
             text,
         ):
-            period_type = 1
+            range_priority = 1
         else:
-            period_type = 0
+            range_priority = 0
 
         years = [int(year) for year in re.findall(r"\b(20\d{2})\b", text)]
         recency = max(years, default=0)
@@ -240,7 +246,7 @@ def _mapped_label_period(
             recency = max(recency, 9_998)
 
         scenario = 3 if "actual" in text or "last year" in text else 2 if "forecast" in text else 1 if "budget" in text else 0
-        return period_type, recency, scenario
+        return range_priority, recency, scenario
 
     return max(periods, key=priority)
 
@@ -490,7 +496,10 @@ def _feedback(
     labels = {period_id: label for period_id, label, _ in periods}
 
     grouped_checks: dict[tuple[str, str, str], list[str]] = {}
-    for period_id, period_checks in result.checks_by_period.items():
+    checks_by_period = result.checks_by_period or {
+        periods[0][0]: list(result.checks or [])
+    }
+    for period_id, period_checks in checks_by_period.items():
         for check in period_checks:
             severity, target, rendered = _describe_check(check)
             grouped_checks.setdefault((severity, target, rendered), []).append(
@@ -550,7 +559,10 @@ def _validation_findings(
     """Group the final validator findings consistently across selected periods."""
     labels = {period_id: label for period_id, label, _ in periods}
     grouped: dict[tuple[str, str, str], list[str]] = {}
-    for period_id, checks in result.checks_by_period.items():
+    checks_by_period = result.checks_by_period or {
+        periods[0][0]: list(result.checks or [])
+    }
+    for period_id, checks in checks_by_period.items():
         for check in checks:
             severity, target, rendered = _describe_check(check)
             if severity:
@@ -698,7 +710,12 @@ def _venue_names(by_account: dict, evidence_by_key: dict[str, dict]) -> dict[str
 
 def _run_note_mismatch_counts(result, periods) -> dict[str, int]:
     """Count the three requested final mismatch classes above 10."""
-    period_checks = list(result.checks_by_period.items())
+    period_checks = list(
+        (
+            result.checks_by_period
+            or {periods[0][0]: list(result.checks or [])}
+        ).items()
+    )
     values_by_period = {period_id: values for period_id, _, values in periods}
     children_by_parent: dict[str, list[str]] = {}
     for coa_id, metadata in result.coa.items():
@@ -788,7 +805,13 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         "scope_exception": "Rejected — scope decision required",
         "rejected": "Rejected",
     }
-    status = status_by_outcome.get(result.outcome)
+    if result.stopped_reason:
+        status = "Stopped"
+    elif result.accepted and result.outcome == "rejected":
+        # Compatibility for callers that predate the explicit outcome field.
+        status = None
+    else:
+        status = status_by_outcome.get(result.outcome)
     if status is None:
         if errors:
             status = "Completed with errors"

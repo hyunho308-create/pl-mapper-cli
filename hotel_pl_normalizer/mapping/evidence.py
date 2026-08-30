@@ -17,8 +17,8 @@ from typing import Any
 from hotel_pl_normalizer.models.period_selection import PeriodColumnSelectionMap
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.structure.representation import (
-    dominant_label_column,
-    label_cell,
+    infer_label_layout,
+    select_row_label,
 )
 
 
@@ -48,9 +48,7 @@ def compact_workbook_evidence(
     every workbook. See `_is_all_zero_filler`.
     """
     period_maps = (
-        period_map
-        if isinstance(period_map, dict)
-        else {"selected": period_map}
+        period_map if isinstance(period_map, dict) else {"selected": period_map}
     )
     columns_by_period: dict[str, dict[str, int]] = {}
     defaults_by_period: dict[str, int | None] = {}
@@ -80,7 +78,22 @@ def compact_workbook_evidence(
             for period_id in period_maps
         ):
             continue
-        label_column = dominant_label_column(sheet.rows)
+        selected_value_columns = {
+            column
+            for period_id in period_maps
+            if sheet.sheet_name not in unavailable_by_period[period_id]
+            for column in [
+                columns_by_period[period_id].get(
+                    sheet.sheet_name,
+                    defaults_by_period[period_id],
+                )
+            ]
+            if column is not None
+        }
+        label_layout = infer_label_layout(
+            sheet.rows,
+            value_columns=selected_value_columns,
+        )
         for row in sheet.rows:
             selected_columns = {}
             selected_values = {}
@@ -107,11 +120,8 @@ def compact_workbook_evidence(
                 for cell in row.cells
                 if isinstance(cell.raw_value, str) and cell.raw_value.strip()
             ]
-            row_label_cell = (
-                label_cell(text_cells, preferred_column=label_column)
-                if text_cells
-                else None
-            )
+            label_selection = select_row_label(row, label_layout)
+            row_label_cell = label_selection.cell
             label = (
                 " ".join(str(row_label_cell.raw_value).split())
                 if row_label_cell is not None
@@ -119,7 +129,10 @@ def compact_workbook_evidence(
             )
             # Nothing to say about this row: no label to map and no figure to map
             # it to, in any selected period.
-            if not label and all(value is None for value in selected_values.values()):
+            if not label and not any(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in selected_values.values()
+            ):
                 continue
             if _is_all_zero_filler(selected_values, text_cells):
                 continue
@@ -133,16 +146,25 @@ def compact_workbook_evidence(
                     # Kept for single-period callers and existing audit consumers.
                     "selected_value_column": selected_columns[first_period],
                     "selected_value": selected_values[first_period],
-                    "indent": row_label_cell.style.indent if row_label_cell is not None else None,
+                    "indent": row_label_cell.style.indent
+                    if row_label_cell is not None
+                    else None,
                     "bold": any(cell.style.bold for cell in text_cells),
+                    "label_column": (
+                        row_label_cell.column if row_label_cell is not None else None
+                    ),
+                    "label_rule": label_selection.rule,
+                    "label_status": label_selection.status,
+                    "label_context": [
+                        " ".join(str(cell.raw_value).split())
+                        for cell in label_selection.context
+                    ],
                 }
             )
     return evidence
 
 
-def _is_all_zero_filler(
-    selected_values: dict[str, Any], text_cells: list[Any]
-) -> bool:
+def _is_all_zero_filler(selected_values: dict[str, Any], text_cells: list[Any]) -> bool:
     """Is this a zero row the mapper does not need to see?
 
     True only when the row carries at least one number, every number it carries

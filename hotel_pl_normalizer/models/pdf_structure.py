@@ -4,17 +4,11 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .common import StrictModel
-from .period_selection import PeriodScenario, PeriodType
-
-
-class PdfPageRole(str, Enum):
-    FINANCIAL_STATEMENT = "financial_statement"
-    SUPPORTING_SCHEDULE = "supporting_schedule"
-    NON_FINANCIAL = "non_financial"
-    UNKNOWN = "unknown"
+from .period_selection import CanonicalPeriod
+from .sheet_selection import FinancialEvidenceClassification
 
 
 class PdfLayout(str, Enum):
@@ -29,9 +23,9 @@ class PdfPageRange(StrictModel):
     end_page: int = Field(ge=1)
 
 
-class PdfPageRangeDecision(PdfPageRange):
-    role: PdfPageRole
-    evidence: list[str] = []
+class PdfPageRangeDecision(FinancialEvidenceClassification):
+    start_page: int = Field(ge=1)
+    end_page: int = Field(ge=1)
 
 
 class PdfRouting(StrictModel):
@@ -41,39 +35,39 @@ class PdfRouting(StrictModel):
     notes: list[str] = []
 
 
-class PdfDiscoveredPeriod(StrictModel):
-    period_id: str
-    label: str
-    period_type: PeriodType = PeriodType.UNKNOWN
-    scenario: PeriodScenario = PeriodScenario.UNKNOWN
-    start_period: str | None = None
-    end_period: str | None = None
+class PdfDiscoveredPeriod(CanonicalPeriod):
     pages_present: list[PdfPageRange] = []
     evidence: list[str] = []
 
 
 class PdfPeriods(StrictModel):
+    controlling_summary_pages: PdfPageRange
     periods: list[PdfDiscoveredPeriod] = []
-    recommended_period_id: str | None = None
     notes: list[str] = []
+
+    @model_validator(mode="after")
+    def verify_period_identity(self):
+        ids = [period.period_id for period in self.periods]
+        if len(ids) != len(set(ids)):
+            raise ValueError("canonical period_id values must be unique")
+        return self
 
 
 class PdfExploration(StrictModel):
     layout: PdfLayout = PdfLayout.UNKNOWN
     layout_evidence: list[str] = []
     page_ranges: list[PdfPageRangeDecision] = []
+    # Optional only so compact discoveries created before this field existed
+    # can still be loaded. Every newly accepted exploration supplies it.
+    controlling_summary_pages: PdfPageRange | None = None
     periods: list[PdfDiscoveredPeriod] = []
-    recommended_period_id: str | None = None
     notes: list[str] = []
 
     @property
     def financial_pages(self) -> list[int]:
         pages: set[int] = set()
         for item in self.page_ranges:
-            if item.role in {
-                PdfPageRole.FINANCIAL_STATEMENT,
-                PdfPageRole.SUPPORTING_SCHEDULE,
-            }:
+            if item.include_as_financial_evidence:
                 pages.update(range(item.start_page, item.end_page + 1))
         return sorted(pages)
 

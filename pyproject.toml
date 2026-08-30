@@ -17,6 +17,9 @@ dependencies = [
     "xlrd>=2.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "reportlab>=4.0"]
+
 [project.scripts]
 hotel-pl-normalizer = "hotel_pl_normalizer.cli:main"
 
@@ -26,3 +29,6 @@ include = ["hotel_pl_normalizer*"]
 [tool.setuptools.package-data]
 "hotel_pl_normalizer.prompts" = ["*.md"]
 "hotel_pl_normalizer.data" = ["*.csv", "*.xlsx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

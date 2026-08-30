@@ -41,6 +41,10 @@ class ProviderToolLoopError(RuntimeError):
     """A tool-calling session ended without producing its typed result."""
 
 
+class ProviderRunCancelled(RuntimeError):
+    """A caller stopped a model session between billed requests."""
+
+
 class ModelToolError(ValueError):
     """A model supplied arguments that do not describe a valid tool call."""
 
@@ -106,6 +110,7 @@ class ModelClient(ABC):
         max_iterations: int,
         trace: list[dict] | None = None,
         on_activity: Callable[[str], None] | None = None,
+        cancel: Callable[[], str | None] | None = None,
     ) -> ModelT:
         """Run a typed tool-calling session."""
 

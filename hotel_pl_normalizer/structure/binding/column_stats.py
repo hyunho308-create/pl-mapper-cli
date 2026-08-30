@@ -14,6 +14,10 @@ from typing import Any
 from openpyxl.utils import get_column_letter
 
 from hotel_pl_normalizer.models.workbook import CellRecord, WorkbookRow, WorkbookSheet
+from hotel_pl_normalizer.structure.representation import (
+    infer_label_layout,
+    select_row_label,
+)
 
 # Below either of these, the sample cannot characterise a column's scale. Taken
 # from `_candidate_looks_like_ratio_values`, which is the judgement they encode:
@@ -139,9 +143,15 @@ def column_stats(
     it inflates every total below.
     """
     rows = [row for row in sheet.rows if start_row <= row.row_index <= end_row]
+    label_layout = infer_label_layout(rows)
     labelled: list[tuple[WorkbookRow, str, dict[int, CellRecord]]] = []
     for row in rows:
-        label = _row_label(row)
+        selection = select_row_label(row, label_layout)
+        label = (
+            (selection.cell.display_value or str(selection.cell.raw_value)).strip()
+            if selection.cell is not None
+            else None
+        )
         if not label:
             continue
         numbers = {
@@ -158,7 +168,9 @@ def column_stats(
     )[:max_columns]
 
     columns = [
-        _column_figures(column, counts[column], _samples(labelled, set(reported), column))
+        _column_figures(
+            column, counts[column], _samples(labelled, set(reported), column)
+        )
         for column in reported
     ]
     span = SpanFigures(
@@ -305,9 +317,7 @@ def _span_notes(
     # A short section is ordinary for Management Fees, Utilities, Miscellaneous
     # Income, OOD and Non-Op, so this states the count without calling it small.
     if numeric_rows:
-        notes.append(
-            f"{len(numeric_rows)} labelled row(s) in this span carry figures."
-        )
+        notes.append(f"{len(numeric_rows)} labelled row(s) in this span carry figures.")
     reportable = sum(
         1 for tallies in counts.values() if tallies["numeric"] >= MIN_NUMERIC_TO_REPORT
     )
@@ -347,26 +357,6 @@ def _samples(
         )
         for row, label, numbers in sorted(ranked, key=lambda item: item[0].row_index)
     ]
-
-
-def _row_label(row: WorkbookRow) -> str | None:
-    """The rightmost text cell that reads like a label, as the packets do.
-
-    `display_value` is preferred but not required: a record built by hand, or by
-    a reader that did not populate it, still has `raw_value`.
-
-    Rightmost by column rather than by position in `cells`, because a row's cells
-    are not guaranteed to be ordered and the label is the indented text nearest
-    the figures.
-    """
-    candidates = [
-        (cell.column, text)
-        for cell in row.cells
-        if isinstance(cell.raw_value, str)
-        and (text := (cell.display_value or cell.raw_value).strip())
-        and any(character.isalpha() for character in text)
-    ]
-    return max(candidates)[1] if candidates else None
 
 
 def _is_number(value: Any) -> bool:

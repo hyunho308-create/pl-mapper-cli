@@ -314,6 +314,21 @@ before its one focused coverage-review response completed.
 Resolution: Reject the run rather than presenting an unreviewed coverage gap as
 accepted. Rerun the mapping if another focused review turn is available.
 
+### `unused_financial_schedule`
+
+Description: Exploration identified a selected-period department P&L schedule,
+but no mapping decision cites it and the strategy does not document it as a
+duplicate or supporting schedule.
+
+Resolution: Inspect the named sheet and its relationship to the controlling
+department total. Cite at least one applicable row in the correct department
+hierarchy, or update `duplicate_or_supporting_schedules` with the exact sheet
+name, why it is intentionally unused, and the exact schedule that supersedes it.
+A consolidated total does not supersede a financial subschedule that provides
+distinct child detail; map those supported children and use the total as the
+reconciliation control. Do not create a plug or move a total based on a label
+alone.
+
 ### `unresolved_negative_residual`
 
 Description: Final presentation found a material negative remainder that Python

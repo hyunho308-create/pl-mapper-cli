@@ -75,9 +75,9 @@ Map the hotel P&L named Hotel.xlsx using the CLI in this project. Run it interac
 Codex will perform workbook exploration and then ask you which periods you want to map with a numbered list similar to:
 
 ```text
-1. 2025 Actual — Full Year
-2. 2024 Actual — Full Year
-3. 2026 Budget — Full Year
+1. 2025 Actual — actual | 2025-01 | 2025-12
+2. 2024 Actual — actual | 2024-01 | 2024-12
+3. 2026 Budget — budget | 2026-01 | 2026-12
 ```
 A typical run takes 10–20 minutes and makes paid OpenAI API calls.
 

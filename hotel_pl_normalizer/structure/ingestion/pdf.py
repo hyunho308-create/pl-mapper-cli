@@ -75,6 +75,13 @@ def read_pdf_document(
         raise ValueError(f"Could not extract PDF {source_path.name}: {exc}") from exc
 
     blank_pages = [page.page_number for page in pages if not page.words]
+    if not pages:
+        raise ValueError(f"PDF contains no pages: {source_path.name}")
+    if not any(page.words for page in pages):
+        raise ValueError(
+            f"PDF has no extractable text and appears to be scanned: "
+            f"{source_path.name}. OCR is not supported."
+        )
     if blank_pages:
         preview = ", ".join(str(number) for number in blank_pages[:10])
         suffix = "..." if len(blank_pages) > 10 else ""

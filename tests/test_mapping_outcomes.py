@@ -20,6 +20,45 @@ from hotel_pl_normalizer.mapping.mapper import (
 
 
 class MappingOutcomeTests(unittest.TestCase):
+    def test_patch_can_document_an_intentionally_unused_schedule(self) -> None:
+        validator = WorkbookMappingValidator("wb", [], {"S1.test": {}})
+        validator.current_plan = WorkbookSourcePlan(
+            plan_id="initial",
+            workbook_id="wb",
+            strategy=WorkbookStrategy(
+                reporting_layout="multi-tab",
+                summary_source="Summary",
+            ),
+            decisions=[
+                AccountSourceDecision(
+                    coa_id="S1.test",
+                    operation=SourceOperation.NO_VALUE,
+                )
+            ],
+        )
+
+        repaired, _ = validator._apply_patch(
+            {
+                "patch_id": "repair",
+                "workbook_id": "wb",
+                "replacements": [],
+                "repair_hypothesis": "The schedule is a duplicate.",
+                "expected_fix": "Document the controlling schedule.",
+                "duplicate_or_supporting_schedules": [
+                    "Reservations — duplicate; superseded by Rooms Detail"
+                ],
+            }
+        )
+
+        self.assertEqual(
+            repaired.strategy.duplicate_or_supporting_schedules,
+            ["Reservations — duplicate; superseded by Rooms Detail"],
+        )
+        patch_schema = next(
+            item for item in validator.declarations() if item["name"] == "patch_mapping"
+        )["parameters"]["properties"]
+        self.assertIn("duplicate_or_supporting_schedules", patch_schema)
+
     def test_outcomes_distinguish_clean_source_coverage_and_rejection(self) -> None:
         clean = {"accepted": True, "errors": [], "warnings": []}
         source = {

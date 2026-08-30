@@ -17,6 +17,7 @@ from hotel_pl_normalizer.providers.base import (
     ModelToolset,
     ProviderConfigurationError,
     ProviderResponseTruncated,
+    ProviderRunCancelled,
     ProviderToolLoopError,
     elapsed_ms,
     extract_json_object,
@@ -119,7 +120,9 @@ class OpenAIModelClient(ModelClient):
         reasoning_effort: str = "medium",
         repair_reasoning_effort: str = "medium",
     ) -> None:
-        self.model_name = DEFAULT_OPENAI_MODEL
+        self.model_name = os.environ.get(
+            "FRESH_START_OPENAI_MODEL", DEFAULT_OPENAI_MODEL
+        ).strip()
         self.reasoning_effort = reasoning_effort
         self.repair_reasoning_effort = repair_reasoning_effort
         self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
@@ -153,6 +156,7 @@ class OpenAIModelClient(ModelClient):
         max_iterations: int = 10,
         trace: list[dict] | None = None,
         on_activity: Callable[[str], None] | None = None,
+        cancel: Callable[[], str | None] | None = None,
     ) -> ModelT:
         """Run the existing mapping contract through the Responses API."""
         self._validate_environment()
@@ -184,6 +188,9 @@ class OpenAIModelClient(ModelClient):
                 pass
 
         for round_number in range(1, max_iterations + 1):
+            reason = cancel() if cancel is not None else None
+            if reason:
+                raise ProviderRunCancelled(reason)
             started_at = utc_now()
             started = time.perf_counter()
             request = {

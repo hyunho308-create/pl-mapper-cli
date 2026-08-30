@@ -8,7 +8,6 @@ import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import openpyxl
 from openpyxl.cell.cell import Cell
 from openpyxl.utils import get_column_letter, range_boundaries
 
@@ -26,9 +25,13 @@ from hotel_pl_normalizer.models.workbook import (
     WorkbookSource,
 )
 
+from .openpyxl_compat import load_openpyxl_workbook, repair_warning
+
 
 def read_excel_workbook(
     path: str | Path,
+    *,
+    source_id: str | None = None,
 ) -> WorkbookRecord:
     """Read an Excel workbook into the hotel P&L WorkbookRecord contract.
 
@@ -43,10 +46,12 @@ def read_excel_workbook(
             source_path=source_path,
             file_type=FileType.XLSM if suffix == ".xlsm" else FileType.XLSX,
             ingestion_warnings=[],
+            source_id=source_id,
         )
     if suffix == ".xls":
         return _read_xlrd_workbook(
             source_path=source_path,
+            source_id=source_id,
         )
     raise ValueError(f"read_excel_workbook only supports .xlsx, .xlsm, and .xls files: {source_path}")
 
@@ -54,6 +59,7 @@ def read_excel_workbook(
 def _read_xlrd_workbook(
     *,
     source_path: Path,
+    source_id: str | None = None,
 ) -> WorkbookRecord:
     xlrd = _load_xlrd()
     warnings: list[IngestionWarning] = []
@@ -92,6 +98,7 @@ def _read_xlrd_workbook(
     source = _source_record(
         source_path=source_path,
         file_type=FileType.XLS,
+        source_id=source_id,
     )
     return WorkbookRecord(
         workbook_id=_workbook_id(_parsed_content_hash(sheets)),
@@ -108,6 +115,7 @@ def _read_openpyxl_workbook(
     source_path: Path,
     file_type: FileType,
     ingestion_warnings: list[IngestionWarning],
+    source_id: str | None = None,
 ) -> WorkbookRecord:
     warnings = list(ingestion_warnings)
     # read_only streams one row at a time instead of materialising every parsed
@@ -116,30 +124,39 @@ def _read_openpyxl_workbook(
     # are released as we go. Styles survive the mode -- checked against the normal
     # reader, identical bold and indent counts -- which is what makes it usable
     # here, since bold and indent are the two style signals the mapper reads.
-    workbook = openpyxl.load_workbook(read_path, data_only=True, read_only=True)
-    sheets: list[WorkbookSheet] = []
-    # Shared across sheets but never across workbooks -- see `_cell_style`.
-    style_cache: dict = {}
-    for idx, worksheet in enumerate(workbook.worksheets, start=1):
-        merge_refs = _streaming_merge_refs(
-            read_path, getattr(worksheet, "_worksheet_path", "")
-        )
-        sheets.append(
-            _read_sheet_streaming(worksheet, idx, merge_refs, style_cache=style_cache)
-        )
-        if getattr(worksheet, "sheet_state", "visible") != "visible":
-            warnings.append(
-                IngestionWarning(
-                    severity=Severity.WARNING,
-                    message="Sheet is hidden but was still ingested.",
-                    sheet_name=worksheet.title,
-                )
+    loaded = load_openpyxl_workbook(read_path, data_only=True, read_only=True)
+    if loaded.repairs:
+        warnings.append(
+            IngestionWarning(
+                severity=Severity.WARNING,
+                message=repair_warning(loaded.repairs),
             )
-
-    workbook.close()
+        )
+    sheets: list[WorkbookSheet] = []
+    try:
+        # Shared across sheets but never across workbooks -- see `_cell_style`.
+        style_cache: dict = {}
+        for idx, worksheet in enumerate(loaded.workbook.worksheets, start=1):
+            merge_refs = _streaming_merge_refs(
+                loaded.read_path, getattr(worksheet, "_worksheet_path", "")
+            )
+            sheets.append(
+                _read_sheet_streaming(worksheet, idx, merge_refs, style_cache=style_cache)
+            )
+            if getattr(worksheet, "sheet_state", "visible") != "visible":
+                warnings.append(
+                    IngestionWarning(
+                        severity=Severity.WARNING,
+                        message="Sheet is hidden but was still ingested.",
+                        sheet_name=worksheet.title,
+                    )
+                )
+    finally:
+        loaded.close()
     source = _source_record(
         source_path=source_path,
         file_type=file_type,
+        source_id=source_id,
     )
     return WorkbookRecord(
         workbook_id=_workbook_id(_parsed_content_hash(sheets)),
@@ -325,9 +342,10 @@ def _source_record(
     *,
     source_path: Path,
     file_type: FileType,
+    source_id: str | None = None,
 ) -> WorkbookSource:
     return WorkbookSource(
-        source_id=f"primary:{source_path.stem}",
+        source_id=source_id or f"primary:{source_path.stem}",
         original_filename=source_path.name,
         file_type=file_type,
         local_path=str(source_path),

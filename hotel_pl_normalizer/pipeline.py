@@ -21,7 +21,10 @@ from hotel_pl_normalizer.models.run import StructureRun
 from hotel_pl_normalizer.models.sheet_selection import SheetNameSelectionResult
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers import ModelClient, create_model_client
-from hotel_pl_normalizer.structure.ingestion import read_excel_workbook, read_pdf_document
+from hotel_pl_normalizer.structure.ingestion import (
+    read_excel_workbook,
+    read_pdf_document,
+)
 from hotel_pl_normalizer.structure.pdf import bind_pdf_periods, explore_pdf
 
 
@@ -65,12 +68,13 @@ class NormalizationResult:
 
     @property
     def mapped_account_count(self) -> int:
+        period_values = self.period_values or {"selected": self.values}
         return sum(
             1
             for coa_id in self.coa
             if any(
                 value is not None and abs(value) > 0.005
-                for values in self.period_values.values()
+                for values in period_values.values()
                 for value in [values.get(coa_id)]
             )
         )
@@ -111,6 +115,21 @@ def _artifact(run: StructureRun, stage_name: str, key: str) -> dict:
     except KeyError as exc:
         raise LookupError(f"Structure run has no {stage_name}/{key} artifact") from exc
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _mapping_sheet_routing_context(selection: SheetNameSelectionResult) -> list[dict]:
+    """Carry exploration judgments forward without inventing row boundaries."""
+    return [
+        {
+            "sheet_name": item.sheet_name,
+            "include_as_financial_evidence": item.include_as_financial_evidence,
+            "role": item.role.value,
+            "confidence": item.confidence.value,
+            "evidence": list(item.evidence),
+        }
+        for item in selection.selections
+        if item.include_as_financial_evidence
+    ]
 
 
 def _selected_periods(
@@ -216,19 +235,114 @@ def discover_workbook_periods(
     )
 
 
+@dataclass
+class PdfDiscoveryResult:
+    """Compact PDF state retained while a web user chooses periods."""
+
+    document_id: str
+    file_hash: str
+    exploration: Any
+    duration_ms: int = 0
+    model_calls: list[dict] = field(default_factory=list)
+    tool_trace: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class _PdfStageSnapshot:
+    structure: Any
+    duration_ms: int = 0
+    tool_trace: list[dict] = field(default_factory=list)
+
+
+def discover_pdf_periods(
+    pdf: Path,
+    *,
+    output_dir: Path,
+    progress: Callable[[str], None] | None = None,
+) -> PdfDiscoveryResult:
+    """Discover PDF periods, persist compact JSON, then release page text."""
+    from hotel_pl_normalizer.models.pdf_structure import PdfExploration
+
+    started = time.perf_counter()
+    pdf = Path(pdf)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress("Reading positioned text from the PDF")
+    document = read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+    if progress:
+        progress("Finding financial pages and available periods")
+    client = create_model_client(
+        reasoning_effort="medium",
+        repair_reasoning_effort="medium",
+    )
+    explored = explore_pdf(document, client=client)
+    result = PdfDiscoveryResult(
+        document_id=document.document_id,
+        file_hash=document.source.file_hash,
+        exploration=PdfExploration.model_validate(explored.structure),
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        model_calls=list(client.usage_history),
+        tool_trace=list(explored.tool_trace),
+    )
+    (output_dir / "exploration.json").write_text(
+        result.exploration.model_dump_json(indent=2), encoding="utf-8"
+    )
+    (output_dir / "discovery.json").write_text(
+        json.dumps(
+            {
+                "document_id": result.document_id,
+                "file_hash": result.file_hash,
+                "duration_ms": result.duration_ms,
+                "model_calls": result.model_calls,
+                "tool_trace": result.tool_trace,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    del document
+    gc.collect()
+    return result
+
+
+def load_pdf_discovery(output_dir: Path) -> PdfDiscoveryResult:
+    """Load discovery without reconstructing the positioned PDF document."""
+    from hotel_pl_normalizer.models.pdf_structure import PdfExploration
+
+    output_dir = Path(output_dir)
+    metadata = json.loads(
+        (output_dir / "discovery.json").read_text(encoding="utf-8")
+    )
+    exploration_data = json.loads(
+        (output_dir / "exploration.json").read_text(encoding="utf-8")
+    )
+    # Compatibility for discoveries persisted before recommendations were
+    # removed. The value is deliberately ignored rather than used as a default.
+    exploration_data.pop("recommended_period_id", None)
+    exploration = PdfExploration.model_validate(exploration_data)
+    return PdfDiscoveryResult(
+        document_id=metadata["document_id"],
+        file_hash=metadata["file_hash"],
+        exploration=exploration,
+        duration_ms=int(metadata.get("duration_ms") or 0),
+        model_calls=list(metadata.get("model_calls") or []),
+        tool_trace=list(metadata.get("tool_trace") or []),
+    )
+
+
 def normalize_pdf(
     pdf: Path,
     *,
     output_dir: Path,
-    selected_period_ids: list[str] | None = None,
-    annual_periods: int = 0,
-    actual_and_prior: bool = False,
-    select_periods: Callable[[dict, set[str]], list[str]] | None = None,
+    selected_period_ids: list[str],
     source_name: str,
     progress: Callable[[str], None] | None = None,
     on_activity: Callable[[str], None] | None = None,
+    discovery: PdfDiscoveryResult | None = None,
+    limiter=None,
 ) -> NormalizationResult:
-    """Normalize a born-digital PDF through direct positioned-text evidence."""
+    """Normalize a PDF after the caller explicitly chooses discovered periods."""
     started = time.perf_counter()
     pdf = Path(pdf)
     output_dir = Path(output_dir)
@@ -237,73 +351,46 @@ def normalize_pdf(
     structure_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
-        progress("Reading positioned text from the PDF")
+        progress(
+            "Re-reading positioned text from the PDF"
+            if discovery is not None
+            else "Reading positioned text from the PDF"
+        )
     document = read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
     structure_client = create_model_client(
         reasoning_effort="medium",
         repair_reasoning_effort="medium",
     )
-    if progress:
-        progress("Finding financial pages and available periods")
-    exploration = explore_pdf(document, client=structure_client)
+    if discovery is None:
+        if progress:
+            progress("Finding financial pages and available periods")
+        exploration = explore_pdf(document, client=structure_client)
+    else:
+        if (
+            document.document_id != discovery.document_id
+            or document.source.file_hash != discovery.file_hash
+        ):
+            raise RuntimeError(
+                "The uploaded PDF changed after period discovery; start a new run."
+            )
+        structure_client.usage_history.extend(discovery.model_calls)
+        exploration = _PdfStageSnapshot(
+            structure=discovery.exploration,
+            duration_ms=discovery.duration_ms,
+            tool_trace=list(discovery.tool_trace),
+        )
+    if limiter is not None:
+        limiter.watch(structure_client)
     discovered = {item.period_id: item for item in exploration.structure.periods}
 
-    catalog = {
-        "options": [item.model_dump(mode="json") for item in discovered.values()],
-        "recommended_period_id": exploration.structure.recommended_period_id,
-    }
-    requested_ids = list(dict.fromkeys(selected_period_ids or []))
-    if requested_ids:
-        unknown = [period_id for period_id in requested_ids if period_id not in discovered]
-        if unknown:
-            raise ValueError("Unknown PDF period id(s): " + ", ".join(unknown))
-    elif actual_and_prior:
-        annual = [
-            item
-            for item in exploration.structure.periods
-            if item.period_type.value in {"full_year", "ytd", "ttm"}
-        ]
-        actuals = [item for item in annual if item.scenario.value == "actual"]
-        priors = [item for item in annual if item.scenario.value == "prior_actual"]
-        primary = next(
-            (
-                item
-                for item in (actuals or priors)
-                if item.period_id == exploration.structure.recommended_period_id
-            ),
-            (actuals or priors or [None])[0],
-        )
-        if primary is None:
-            raise RuntimeError("No annual Actual or Prior Actual period was found in the PDF.")
-        prior = next(
-            (
-                item
-                for item in priors
-                if item.period_id != primary.period_id
-                and item.period_type == primary.period_type
-            ),
-            None,
-        )
-        requested_ids = [primary.period_id] + ([prior.period_id] if prior else [])
-    elif annual_periods > 0:
-        annual_ids = [
-            item.period_id
-            for item in exploration.structure.periods
-            if item.period_type.value in {"full_year", "ytd", "ttm"}
-        ]
-        recommended = exploration.structure.recommended_period_id
-        if recommended in annual_ids:
-            annual_ids = [recommended] + [item for item in annual_ids if item != recommended]
-        if not annual_ids:
-            raise RuntimeError("No annual period was found in the PDF.")
-        requested_ids = annual_ids[:annual_periods]
-    elif select_periods is not None:
-        requested_ids = select_periods(catalog, set(discovered))
-    else:
-        recommended = exploration.structure.recommended_period_id
-        requested_ids = [recommended] if recommended else list(discovered)[:1]
+    requested_ids = list(dict.fromkeys(selected_period_ids))
     if not requested_ids:
-        raise RuntimeError("PDF period discovery returned no period to map.")
+        raise RuntimeError(
+            "PDF normalization requires explicit selected_period_ids after discovery."
+        )
+    unknown = [period_id for period_id in requested_ids if period_id not in discovered]
+    if unknown:
+        raise ValueError("Unknown PDF period id(s): " + ", ".join(unknown))
 
     if progress:
         progress("Binding selected periods to displayed PDF amount columns")
@@ -312,6 +399,7 @@ def normalize_pdf(
         exploration.structure,
         client=structure_client,
         period_ids=requested_ids,
+        cancel=limiter,
     )
     usable_ids = [
         period_id
@@ -354,6 +442,10 @@ def normalize_pdf(
             notes=["PDF point anchors; no intermediate Excel workbook was created."],
         )
 
+    document_id = document.document_id
+    del document
+    gc.collect()
+
     (structure_dir / "exploration.json").write_text(
         exploration.structure.model_dump_json(indent=2), encoding="utf-8"
     )
@@ -370,22 +462,26 @@ def normalize_pdf(
         reasoning_effort="max",
         repair_reasoning_effort="medium",
     )
+    structure_calls = list(structure_client.usage_history)
+    mapping_client.usage_history.extend(structure_calls)
+    if limiter is not None:
+        limiter.watch(mapping_client)
     mapping = map_workbook(
-        workbook_id=document.document_id,
+        workbook_id=document_id,
         requested_period=labels[usable_ids[0]],
         periods=period_maps,
         period_labels=labels,
         evidence=evidence,
-        skipped_sheets=[],
+        excluded_sheets=[],
         client=mapping_client,
         on_activity=on_activity,
+        cancel=limiter,
     )
-    structure_calls = list(structure_client.usage_history)
     structure_cost = structure_client.estimate_cost(structure_calls)
     mapping_cost = mapping_client.estimate_cost(mapping.model_calls)
     cost_usd = round(structure_cost + mapping_cost, 6)
     return NormalizationResult(
-        workbook_id=document.document_id,
+        workbook_id=document_id,
         source_name=source_name,
         period_label=labels[usable_ids[0]],
         values=mapping.values,
@@ -404,7 +500,8 @@ def normalize_pdf(
         outcome=mapping.outcome.value,
         exceptions=mapping.exceptions,
         stopped_reason=mapping.stopped_reason,
-        duration_ms=round((time.perf_counter() - started) * 1000),
+        duration_ms=(discovery.duration_ms if discovery is not None else 0)
+        + round((time.perf_counter() - started) * 1000),
         session_calls=mapping.session_calls,
         session_call_ms=mapping.session_call_ms,
         session_tool_calls=mapping.session_tool_calls,
@@ -449,6 +546,7 @@ def normalize_workbook(
     parsed: SharedWorkbook,
     progress: Callable[[str], None] | None = None,
     on_activity: Callable[[str], None] | None = None,
+    limiter=None,
 ) -> NormalizationResult:
     """Map the bound workbook to the Standard COA."""
     started = time.perf_counter()
@@ -470,8 +568,11 @@ def normalize_workbook(
     sheet_selection = SheetNameSelectionResult.model_validate(
         _artifact(prior_run, "sheet_routing", "selection")
     )
-    skipped = set(sheet_selection.skipped_sheet_names)
-    included = {sheet.sheet_name for sheet in record.sheets if sheet.sheet_name not in skipped}
+    excluded = set(sheet_selection.excluded_sheet_names)
+    sheet_routing_context = _mapping_sheet_routing_context(sheet_selection)
+    included = {
+        sheet.sheet_name for sheet in record.sheets if sheet.sheet_name not in excluded
+    }
 
     if progress:
         progress("Reading every relevant row")
@@ -490,6 +591,8 @@ def normalize_workbook(
         reasoning_effort="max",
         repair_reasoning_effort="medium",
     )
+    if limiter is not None:
+        limiter.watch(client)
     primary_period_id = next(iter(period_maps))
     mapping = map_workbook(
         workbook_id=workbook_id,
@@ -497,9 +600,11 @@ def normalize_workbook(
         periods=period_maps,
         period_labels=period_labels,
         evidence=evidence,
-        skipped_sheets=sorted(skipped),
+        excluded_sheets=sorted(excluded),
         client=client,
+        sheet_routing_context=sheet_routing_context,
         on_activity=on_activity,
+        cancel=limiter,
     )
     cost_usd, cost_details = estimate_workflow_cost(
         prior_run,

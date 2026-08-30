@@ -60,7 +60,7 @@ shift between the Summary tab and the department tabs is common. Check each shee
 against its own header block; never assume two tabs share a convention because
 their columns are near each other.
 
-The chosen-period list includes canonical scenario, type and date coverage from
+The chosen-period list includes canonical scenario and inclusive month coverage from
 discovery. Match the economic period, not the exact wording of its header. A
 December YTD column ending at a December fiscal year-end, a Jan–Dec `Total`, an
 FY column and a TTM ending in that same December are equivalent when they cover
@@ -165,8 +165,8 @@ For each financial sheet, either a binding per chosen period, or an entry in
 `unavailable` naming the period, the sheet, and what you saw. Silence about a
 sheet is the one answer that helps nobody.
 
-An unavailable sheet is not a failure. The run continues, that sheet falls back
-to the workbook's usual column, and your reason is recorded. **One sheet lacking
-one period is never a reason to abandon the others.**
+An unavailable sheet is not a failure. The run continues, your reason is
+recorded, and that sheet contributes no value for that period. **One sheet
+lacking one period is never a reason to abandon the others.**
 
 Then call `submit_bindings`.

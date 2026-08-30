@@ -9,15 +9,29 @@ from hotel_pl_normalizer.models.pdf_structure import (
     PdfBindings,
     PdfExploration,
     PdfPageRange,
-    PdfPageRole,
     PdfPeriods,
     PdfRouting,
 )
 from hotel_pl_normalizer.providers.base import tool_parameter_schema
+from hotel_pl_normalizer.structure.monthly_spread import (
+    MONTHLY_SPREAD_THRESHOLD,
+    explicit_month_years,
+)
 
 from .toolset import PdfInspectionToolset
 
-MIN_FINANCIAL_PAGES_READ = 5
+MAX_DEPARTMENT_PAGES_TO_CONFIRM = 4
+
+_HEADER_LINE_LIMIT = 25
+
+
+def _explicit_header_months(document: PdfDocumentRecord, pages: set[int]) -> set[str]:
+    """Return explicit month-year labels in the top header band of pages."""
+    return explicit_month_years(
+        line.text
+        for page_number in pages
+        for line in document.page(page_number).text_lines[:_HEADER_LINE_LIMIT]
+    )
 
 
 def _pages_in_ranges(ranges) -> set[int]:
@@ -109,7 +123,9 @@ class PdfExplorationToolset(PdfInspectionToolset):
         self.routing = routing
         self.period_read_pages.clear()
         financial = self._financial_pages()
-        must_read = min(MIN_FINANCIAL_PAGES_READ, len(financial))
+        summaries = self._ranges_for_role("summary_p_and_l")
+        departments = self._ranges_for_role("department_p_and_l")
+        required_departments = min(MAX_DEPARTMENT_PAGES_TO_CONFIRM, len(departments))
         return {
             "ok": True,
             "accepted": True,
@@ -117,25 +133,30 @@ class PdfExplorationToolset(PdfInspectionToolset):
                 item.model_dump(mode="json")
                 for item in _ranges_for_pages(financial)
             ],
-            "must_read_at_least": must_read,
+            "summary_page_ranges": [
+                item.model_dump(mode="json") for item in summaries
+            ],
+            "department_page_ranges": [
+                item.model_dump(mode="json") for item in departments
+            ],
+            "required_department_reads": required_departments,
+            "must_read_at_least": 1 + required_departments,
             "next_phase": (
-                "Discover reporting periods from header lines on representative financial pages. "
+                "Choose one controlling core summary statement from summary_page_ranges. "
+                "Discover periods from that summary, then confirm its layout against "
+                f"{required_departments} normal department page(s). Periods found only on "
+                "auxiliary department, T12, monthly, trend, or supporting pages may confirm "
+                "coverage but cannot add periods. If the controlling summary itself is a T12 "
+                "or monthly spread, its displayed months are core periods: return every monthly "
+                "amount column plus the displayed TTM/Total amount, never only the aggregate. "
                 "Enumerate one period per amount anchor; Actual, Budget, Prior and Forecast are "
-                "distinct. Exclude percentages and variances. Confirm the intersection across at "
-                f"least {must_read} financial page(s), then call submit_periods."
+                "distinct. Exclude percentages and variances, then call submit_periods."
             ),
         }
+
     def _submit_periods(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.routing is None:
             return self._reject("Call submit_routing and receive its instructions first.")
-        financial = self._financial_pages()
-        required = min(MIN_FINANCIAL_PAGES_READ, len(financial))
-        read_financial = self.period_read_pages & financial
-        if len(read_financial) < required:
-            return self._reject(
-                f"Read period headers on at least {required} financial pages; read so far: "
-                f"{sorted(read_financial)}."
-            )
         try:
             periods = PdfPeriods.model_validate(arguments)
         except ValueError as exc:
@@ -143,41 +164,114 @@ class PdfExplorationToolset(PdfInspectionToolset):
         ids = [period.period_id for period in periods.periods]
         if len(ids) != len(set(ids)):
             return self._reject("Every period_id must be unique.")
-        if periods.recommended_period_id and periods.recommended_period_id not in set(ids):
-            return self._reject("recommended_period_id must name one submitted period.")
+        anchor = set(
+            range(
+                periods.controlling_summary_pages.start_page,
+                periods.controlling_summary_pages.end_page + 1,
+            )
+        )
+        summary_ranges = self._ranges_for_role("summary_p_and_l")
+        summary_candidates = [
+            set(range(item.start_page, item.end_page + 1))
+            for item in summary_ranges
+        ]
+        if not anchor or anchor not in summary_candidates:
+            return self._reject(
+                "controlling_summary_pages must exactly match one routed, included "
+                "summary_p_and_l statement range."
+            )
+        if not anchor & self.period_read_pages:
+            return self._reject(
+                "Read the period header on at least one controlling summary page before "
+                "submitting periods."
+            )
+
+        explicit_months = _explicit_header_months(self.document, anchor)
+        if len(explicit_months) >= MONTHLY_SPREAD_THRESHOLD:
+            submitted_months = {
+                period.start_month
+                for period in periods.periods
+                if period.start_month == period.end_month
+            }
+            missing_months = sorted(explicit_months - submitted_months)
+            if missing_months:
+                return self._reject(
+                    "The controlling summary has an explicit monthly spread, but the period "
+                    "catalog omits displayed months. Return every monthly amount period and "
+                    "keep any displayed TTM/Total as an additional aggregate. Missing month "
+                    f"headers: {missing_months}."
+                )
+
+        department_ranges = self._ranges_for_role("department_p_and_l")
+        required_departments = min(
+            MAX_DEPARTMENT_PAGES_TO_CONFIRM, len(department_ranges)
+        )
+        read_department_ranges = [
+            item
+            for item in department_ranges
+            if self.period_read_pages
+            & set(range(item.start_page, item.end_page + 1))
+        ]
+        if len(read_department_ranges) < required_departments:
+            return self._reject(
+                "Read a period header from each of "
+                f"{required_departments} normal department schedule range(s); "
+                f"confirmed so far: {len(read_department_ranges)}."
+            )
+
+        corrected_periods = []
+        corrected_pages: set[int] = set()
         for period in periods.periods:
             claimed = _pages_in_ranges(period.pages_present)
-            if not read_financial <= claimed:
+            observed = claimed & self.period_read_pages
+            corrected_pages.update(claimed - observed)
+            if not observed & anchor:
                 return self._reject(
-                    f"{period.period_id} does not claim every financial page inspected in phase "
-                    f"two. Missing: {sorted(read_financial - claimed)}. Drop it if not universal."
+                    "Every selectable period must appear on the controlling summary. "
+                    "Remove periods introduced only by auxiliary T12, monthly, trend, "
+                    f"department, or supporting pages: {period.period_id}."
                 )
+            corrected_periods.append(
+                period.model_copy(update={"pages_present": _ranges_for_pages(observed)})
+            )
+
+        notes = [*self.routing.notes, *periods.notes]
+        if corrected_pages:
+            notes.append(
+                "pages_present was corrected to pages actually inspected during period "
+                f"discovery; removed unobserved pages: {sorted(corrected_pages)}."
+            )
         self.submission = PdfExploration(
             layout=self.routing.layout,
             layout_evidence=self.routing.layout_evidence,
             page_ranges=self.routing.page_ranges,
-            periods=periods.periods,
-            recommended_period_id=periods.recommended_period_id,
-            notes=[*self.routing.notes, *periods.notes],
+            controlling_summary_pages=periods.controlling_summary_pages,
+            periods=corrected_periods,
+            notes=notes,
         )
         return {
             "ok": True,
             "accepted": True,
             "structure": self.submission.model_dump(mode="json"),
         }
-
     def _financial_pages(self) -> set[int]:
         if self.routing is None:
             return set()
         return {
             page
             for item in self.routing.page_ranges
-            if item.role in {
-                PdfPageRole.FINANCIAL_STATEMENT,
-                PdfPageRole.SUPPORTING_SCHEDULE,
-            }
+            if item.include_as_financial_evidence
             for page in range(item.start_page, item.end_page + 1)
         }
+
+    def _ranges_for_role(self, role: str) -> list[PdfPageRange]:
+        if self.routing is None:
+            return []
+        return [
+            PdfPageRange(start_page=item.start_page, end_page=item.end_page)
+            for item in self.routing.page_ranges
+            if item.include_as_financial_evidence and item.role.value == role
+        ]
 
     def _reject(self, message: str) -> dict[str, Any]:
         self.rejections.append(message)
@@ -230,7 +324,7 @@ class PdfBindingToolset(PdfInspectionToolset):
         return None
 
     def _submit_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        required = min(MIN_FINANCIAL_PAGES_READ, len(self.financial_pages))
+        required = min(5, len(self.financial_pages))
         if len(self.read_pages & self.financial_pages) < required:
             return self._reject(
                 f"Read headers and numeric anchors on at least {required} financial pages first."

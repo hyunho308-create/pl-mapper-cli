@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-
 COA_PATH = (
     Path(__file__).resolve().parents[1]
     / "hotel_pl_normalizer"

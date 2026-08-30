@@ -8,10 +8,10 @@ from hotel_pl_normalizer.models.period_selection import (
     PeriodOption,
 )
 from hotel_pl_normalizer.models.sheet_selection import (
-    SheetNameDecision,
     SheetNameSelection,
     SheetNameSelectionResult,
 )
+
 
 def exploration_to_period_catalog(
     exploration: WorkbookExploration,
@@ -25,24 +25,17 @@ def exploration_to_period_catalog(
             period_id=period.period_id,
             label=period.label,
             scenario=period.scenario,
-            period_type=period.period_type,
-            start_period=period.start_period,
-            end_period=period.end_period,
+            start_month=period.start_month,
+            end_month=period.end_month,
+            actual_months=period.actual_months,
         )
         for period in exploration.periods
     ]
-    recommended = exploration.recommended_period_id
-    known = {option.period_id for option in options}
-    if recommended not in known:
-        # A recommendation naming a period that is not in the list is worse than
-        # none: every consumer of it would have to guard, and the first option is
-        # not a safe substitute when the model meant something specific.
-        recommended = None
     return PeriodCatalog(
         catalog_id=catalog_id or f"{workbook_id}:exploration",
         workbook_id=workbook_id,
+        controlling_summary_sheet=exploration.controlling_summary_sheet,
         options=options,
-        recommended_period_id=recommended,
         notes=list(exploration.notes),
     )
 
@@ -54,24 +47,17 @@ def exploration_to_sheet_selection(
     selections = [
         SheetNameSelection(
             sheet_name=sheet.sheet_name,
-            decision=sheet.decision,
-            role_hint=sheet.role_hint,
+            include_as_financial_evidence=sheet.include_as_financial_evidence,
+            role=sheet.role,
+            confidence=sheet.confidence,
             evidence=list(sheet.evidence),
         )
         for sheet in exploration.sheets
     ]
-
-    def named(decision: SheetNameDecision) -> list[str]:
-        return [s.sheet_name for s in exploration.sheets if s.decision == decision]
-
     return SheetNameSelectionResult(
         workbook_id=workbook_id,
         workbook_layout=exploration.workbook_layout,
         layout_evidence=list(exploration.layout_evidence),
         selections=selections,
-        selected_sheet_names=named(SheetNameDecision.TRIAGE),
-        deferred_sheet_names=named(SheetNameDecision.DEFER),
-        skipped_sheet_names=named(SheetNameDecision.SKIP),
-        unsure_sheet_names=named(SheetNameDecision.UNSURE),
         notes=list(exploration.notes),
     )

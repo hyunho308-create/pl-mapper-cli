@@ -41,8 +41,12 @@ def render_binding_prompt(
     )
     chosen = "\n".join(
         f"- `{period.period_id}` — {period.label}; scenario={period.scenario.value}; "
-        f"type={period.period_type.value}; coverage="
-        f"{period.start_period or 'unknown'} through {period.end_period or 'unknown'}"
+        f"inclusive coverage={period.start_month} through {period.end_month}"
+        + (
+            f"; reforecast={period.actual_months}+{12 - period.actual_months}"
+            if period.actual_months is not None
+            else ""
+        )
         for period in periods
     )
     routed = ", ".join(financial_sheets) or "none recorded; judge from list_sheets"
@@ -52,9 +56,9 @@ def render_binding_prompt(
             "## This workbook",
             f"Filename: {source_filename}",
             "",
-            "Routing selected these sheets as holding P&L content. Treat it as "
-            "a strong hint, not a boundary — a binding on a sheet routing "
-            f"skipped is accepted:\n\n{routed}",
+            "Routing selected these sheets as financial evidence. They are the "
+            "binding scope; do not bind excluded sheets:\n\n"
+            f"{routed}",
             "",
             "The periods a person chose, which you are being asked to bind:"
             f"\n\n{chosen}",

@@ -15,6 +15,7 @@ from pathlib import Path
 from hotel_pl_normalizer.output import mapped_output_name, write_normalized_workbook
 from hotel_pl_normalizer.pipeline import (
     analyze_workbook_structure,
+    discover_pdf_periods,
     discover_workbook_periods,
     normalize_pdf,
     normalize_workbook,
@@ -33,9 +34,6 @@ def _catalog(run) -> dict:
     )
 
 
-# Full-year, year-to-date and trailing-twelve periods are the spans normally
-# compared between properties; a single month is only useful in context.
-ANNUAL_PERIOD_TYPES = {"full_year", "ytd", "ttm"}
 SUPPORTED_INPUT_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".pdf"}
 
 
@@ -71,99 +69,22 @@ def _doctor() -> int:
     return 0 if all(checks.values()) else 1
 
 
-def _choose_period_ids(
+def _validate_period_ids(
     catalog: dict,
     valid_ids: set[str],
     requested_ids: list[str],
-    annual_periods: int = 0,
-    actual_and_prior: bool = False,
 ) -> list[str]:
-    """Decide which discovered periods to map.
-
-    Explicit `--period-id` wins and is checked rather than trusted -- naming a
-    period that failed validation should say so, not quietly map something else.
-
-    `--actual-and-prior` chooses a validated annual Actual and the matching
-    Prior Actual from this discovery response. It uses semantic fields rather
-    than model-generated period ids, which are intentionally not stable across
-    separate discovery calls.
-
-    `--annual-periods N` takes the first N validated annual periods in catalog
-    order, with the recommendation first if it qualifies. Fewer than N is not an
-    error: a workbook holding one annual column has one annual period, and
-    refusing to map it would be unhelpful.
-
-    With neither, the validated recommendation is mapped, falling back to the
-    first validated period of any kind.
-    """
+    """Validate explicit period IDs supplied in place of a human selection."""
     available = [item["period_id"] for item in catalog["options"]]
-    if requested_ids:
-        unknown = [item for item in requested_ids if item not in available]
-        invalid = [item for item in requested_ids if item in available and item not in valid_ids]
-        if unknown:
-            raise ValueError("Unknown period id(s): " + ", ".join(unknown))
-        if invalid:
-            raise ValueError("Period id(s) failed validation: " + ", ".join(invalid))
-        return list(dict.fromkeys(requested_ids))
-
-    recommended = catalog.get("recommended_period_id")
-
-    if actual_and_prior:
-        annual_options = [
-            item
-            for item in catalog["options"]
-            if item.get("period_type") in ANNUAL_PERIOD_TYPES
-            and item["period_id"] in valid_ids
-        ]
-        actuals = [item for item in annual_options if item.get("scenario") == "actual"]
-        prior_actuals = [
-            item for item in annual_options if item.get("scenario") == "prior_actual"
-        ]
-        if not actuals and not prior_actuals:
-            raise RuntimeError(
-                "No discovered annual Actual or Prior Actual period passed "
-                "validation. Available "
-                "validated periods: " + (", ".join(sorted(valid_ids)) or "none")
-            )
-        candidates = actuals or prior_actuals
-        primary = next(
-            (item for item in candidates if item["period_id"] == recommended),
-            candidates[0],
-        )
-        prior = next(
-            (
-                item
-                for item in prior_actuals
-                if item.get("scenario") == "prior_actual"
-                and item.get("period_type") == primary.get("period_type")
-                and item["period_id"] != primary["period_id"]
-            ),
-            None,
-        )
-        return [primary["period_id"]] + ([prior["period_id"]] if prior else [])
-
-    if annual_periods > 0:
-        annual = [
-            item["period_id"]
-            for item in catalog["options"]
-            if item.get("period_type") in ANNUAL_PERIOD_TYPES
-            and item["period_id"] in valid_ids
-        ]
-        if recommended in annual:
-            annual = [recommended] + [pid for pid in annual if pid != recommended]
-        if annual:
-            return annual[:annual_periods]
-        raise RuntimeError(
-            "No discovered annual period passed validation. Available validated "
-            "periods: " + (", ".join(sorted(valid_ids)) or "none")
-        )
-
-    if recommended in valid_ids:
-        return [recommended]
-    for period_id in available:
-        if period_id in valid_ids:
-            return [period_id]
-    raise RuntimeError("No discovered period passed validation.")
+    unknown = [item for item in requested_ids if item not in available]
+    invalid = [
+        item for item in requested_ids if item in available and item not in valid_ids
+    ]
+    if unknown:
+        raise ValueError("Unknown period id(s): " + ", ".join(unknown))
+    if invalid:
+        raise ValueError("Period id(s) failed validation: " + ", ".join(invalid))
+    return list(dict.fromkeys(requested_ids))
 
 
 def _prompt_for_period_ids(
@@ -179,45 +100,32 @@ def _prompt_for_period_ids(
     if not options:
         raise RuntimeError("No discovered period passed validation.")
 
-    recommended = catalog.get("recommended_period_id")
-    default_index = next(
-        (
-            index
-            for index, item in enumerate(options, start=1)
-            if item["period_id"] == recommended
-        ),
-        1,
-    )
     print("\nAvailable validated periods:", flush=True)
     for index, item in enumerate(options, start=1):
         details = " / ".join(
             _display_period_detail(value)
             for value in (
                 item.get("scenario"),
-                item.get("period_type"),
-                item.get("start_period"),
-                item.get("end_period"),
+                item.get("start_month"),
+                item.get("end_month"),
             )
             if value
         )
-        marker = " (recommended)" if index == default_index else ""
         suffix = f" — {details}" if details else ""
-        print(f"  {index}. {item['label']}{suffix}{marker}", flush=True)
+        print(f"  {index}. {item['label']}{suffix}", flush=True)
 
-    prompt = (
-        "Select period number(s), separated by commas "
-        f"[default {default_index}; q to cancel]: "
-    )
+    prompt = "Select period number(s), separated by commas [q to cancel]: "
     while True:
         try:
             response = read(prompt).strip()
         except EOFError as exc:
             raise SystemExit(
                 "Period selection requires an interactive terminal. Re-run with "
-                "--actual-and-prior, --annual-periods N, or --period-id."
+                "one or more explicit --period-id values."
             ) from exc
         if not response:
-            indexes = [default_index]
+            print("Choose at least one period, or enter q to cancel.")
+            continue
         elif response.lower() in {"q", "quit", "cancel"}:
             raise SystemExit("Period selection cancelled.")
         else:
@@ -253,8 +161,7 @@ def main() -> None:
     parser.add_argument("output_dir", type=Path, nargs="?")
     parser.add_argument("--doctor", action="store_true", help="Check setup and exit without making an API call.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument(
+    parser.add_argument(
         "--period-id",
         action="append",
         default=[],
@@ -262,29 +169,6 @@ def main() -> None:
             "Period id to map; repeat to map multiple periods and skip the "
             "interactive prompt."
         ),
-    )
-    selection.add_argument(
-        "--annual-periods",
-        type=int,
-        default=0,
-        metavar="N",
-        help=(
-            "Map the first N validated annual periods (full year, YTD or TTM) "
-            "instead of the recommendation."
-        ),
-    )
-    selection.add_argument(
-        "--actual-and-prior",
-        action="store_true",
-        help=(
-            "Map the first validated annual Actual and a matching Prior Actual "
-            "when available."
-        ),
-    )
-    selection.add_argument(
-        "--recommended",
-        action="store_true",
-        help="Map the validated recommended period without prompting.",
     )
     args = parser.parse_args()
 
@@ -306,28 +190,32 @@ def main() -> None:
     source_path = args.workbook
     is_pdf = source_path.suffix.lower() == ".pdf"
     if is_pdf:
-        interactive_selector = None
-        if not (
-            args.period_id
-            or args.annual_periods
-            or args.actual_and_prior
-            or args.recommended
-        ):
-            interactive_selector = lambda catalog, valid: _prompt_for_period_ids(
-                catalog, valid
-            )
+        discovery = discover_pdf_periods(
+            source_path,
+            output_dir=work_dir / "discovery",
+            progress=lambda message: print(message, flush=True),
+        )
+        catalog = {
+            "options": [
+                period.model_dump(mode="json")
+                for period in discovery.exploration.periods
+            ]
+        }
+        valid_ids = {item["period_id"] for item in catalog["options"]}
+        selected_ids = (
+            _validate_period_ids(catalog, valid_ids, args.period_id)
+            if args.period_id
+            else _prompt_for_period_ids(catalog, valid_ids)
+        )
         result = normalize_pdf(
             source_path,
             output_dir=work_dir,
-            selected_period_ids=args.period_id,
-            annual_periods=args.annual_periods,
-            actual_and_prior=args.actual_and_prior,
-            select_periods=interactive_selector,
+            selected_period_ids=selected_ids,
             source_name=source_path.name,
             progress=lambda message: print(message, flush=True),
             on_activity=lambda message: print(f"  · {message}", flush=True),
+            discovery=discovery,
         )
-        selected_ids = list(result.period_labels)
     else:
         # Discovery, structure analysis and evidence extraction all borrow this
         # same parsed record. Mapping releases it once compact evidence exists.
@@ -340,16 +228,11 @@ def main() -> None:
         )
         catalog = _catalog(discovery)
         valid_ids = validated_period_ids(discovery)
-        if args.period_id or args.annual_periods or args.actual_and_prior or args.recommended:
-            selected_ids = _choose_period_ids(
-                catalog,
-                valid_ids,
-                args.period_id,
-                annual_periods=args.annual_periods,
-                actual_and_prior=args.actual_and_prior,
-            )
-        else:
-            selected_ids = _prompt_for_period_ids(catalog, valid_ids)
+        selected_ids = (
+            _validate_period_ids(catalog, valid_ids, args.period_id)
+            if args.period_id
+            else _prompt_for_period_ids(catalog, valid_ids)
+        )
         labels = {
             item["period_id"]: item["label"] for item in catalog["options"]
         }

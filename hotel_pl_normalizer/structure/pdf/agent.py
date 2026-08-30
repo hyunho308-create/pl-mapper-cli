@@ -23,21 +23,22 @@ class PdfStageOutput:
     rejections: list[str] = field(default_factory=list)
 
 
-def explore_pdf(document: PdfDocumentRecord, *, client) -> PdfStageOutput:
+def explore_pdf(document: PdfDocumentRecord, *, client, cancel=None) -> PdfStageOutput:
     toolset = PdfExplorationToolset(document)
     trace: list[dict] = []
     started = time.perf_counter()
     prompt = """You are inspecting a hotel P&L PDF directly, not an Excel conversion.
 
-This session has two ordered phases. First route every page using contiguous page ranges. A financial statement page contains P&L values; a supporting schedule contains financial detail; non-financial covers coversheets, narratives, and blank pages. Call inspect_document and list_pages, inspect representative pages, then submit_routing.
+This session has two ordered phases. First route every page using contiguous page ranges. Split ranges at statement boundaries even when adjacent pages have the same role, so the controlling summary and distinct department schedules remain identifiable. For every range return include_as_financial_evidence, role, confidence, and evidence. Included roles are summary_p_and_l, department_p_and_l, financial_supporting_schedule, and unknown. Excluded roles are topline_operating_statistics, balance_sheet, payroll_statistics, and other. A financial supporting page contains selected-period financial amounts useful for mapping or reconciliation. Topline operating statistics include RN, occupancy, ADR, RevPAR, and segmentation without P&L amounts. Payroll statistics include FTE, hours, wage rates, and staffing without labor expense amounts; a page with usable labor or payroll expense is financial evidence. Unknown is included conservatively. Call inspect_document and list_pages, inspect representative pages, then submit_routing.
 
-After routing, follow the returned period instructions. Read header lines and numeric anchors on representative financial pages. Enumerate distinct amount periods: Month versus YTD and Actual versus Budget, Forecast, or Prior are separate periods. Percent and variance anchors are not periods. Recommend the current YTD or full-year actual when available; prefer it over a single current month. Use exact page/line evidence. Then submit_periods. Do not map accounts or transcribe statement amounts."""
+After routing, follow the returned period instructions. Choose one controlling core summary statement, read its full period header, and inspect up to four normal department P&L pages to confirm the periods used throughout the core document. Periods found only on auxiliary T12, monthly, trend, department, or supporting pages cannot expand the catalog. This restriction does not suppress periods displayed by the controlling summary itself: when the controlling summary is a T12 or monthly spread, return every displayed monthly amount column as a selectable monthly period, plus its TTM or Total amount column when present. Never replace the displayed months with only their aggregate. Return the controlling summary page range explicitly. Enumerate distinct amount periods using scenario plus inclusive start_month and end_month. Scenarios are only actual, budget, and forecast; a Prior Year column is an older actual. For full-calendar-year reforecasts, set actual_months to the completed Actual count from 1 through 11; omit it for pure forecasts and every non-calendar-year period. Percent and variance anchors are not periods. Use deterministic IDs and labels from the schema and exact page/line evidence. Then submit_periods. Do not map accounts or transcribe statement amounts."""
     client.generate_json_model_with_tools(
         prompt,
         PdfExploration,
         toolset=toolset,  # type: ignore[arg-type]
         max_iterations=24,
         trace=trace,
+        cancel=cancel,
     )
     if toolset.submission is None:
         raise RuntimeError(
@@ -60,6 +61,7 @@ def bind_pdf_periods(
     *,
     client,
     period_ids: list[str],
+    cancel=None,
 ) -> PdfStageOutput:
     toolset = PdfBindingToolset(document, exploration, period_ids)
     trace: list[dict] = []
@@ -73,7 +75,7 @@ def bind_pdf_periods(
     financial = ", ".join(
         f"{item.start_page}-{item.end_page}"
         for item in exploration.page_ranges
-        if item.role.value in {"financial_statement", "supporting_schedule"}
+        if item.include_as_financial_evidence
     )
     prompt = f"""Bind selected PDF periods to displayed numeric anchors. This is the second and final upstream structure stage; do not map accounts or transcribe statement amounts.
 
@@ -91,6 +93,7 @@ submit_bindings is a full replacement, never a patch. If it is rejected, correct
         toolset=toolset,  # type: ignore[arg-type]
         max_iterations=24,
         trace=trace,
+        cancel=cancel,
     )
     if toolset.submission is None:
         raise RuntimeError(

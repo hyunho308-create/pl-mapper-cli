@@ -21,10 +21,11 @@ from pydantic import Field, model_validator
 
 from hotel_pl_normalizer.models.common import StrictModel
 from hotel_pl_normalizer.providers.base import (
+    ModelToolError,
     ProviderResponseTruncated,
+    ProviderRunCancelled,
     ProviderToolLoopError,
 )
-from hotel_pl_normalizer.providers.base import ModelToolError
 
 
 class SourceOperation(str, Enum):
@@ -209,6 +210,9 @@ class WorkbookSourcePatch(StrictModel):
     derived_summary_source_rows: list[str] | None = None
     structural_scenarios: list[StructuralScenarioEvidence] | None = None
     ood_misc_summary_mode: OodMiscSummaryMode | None = None
+    department_source_strategy: list[str] | None = None
+    duplicate_or_supporting_schedules: list[str] | None = None
+    operator_to_coa_hierarchy_conflicts: list[str] | None = None
     review_items: list[MappingReviewItem] | None = None
 
     @model_validator(mode="after")
@@ -265,11 +269,13 @@ class WorkbookMappingValidator:
         evidence,
         coa,
         period_labels=None,
+        sheet_routing_context=None,
     ):
         self.workbook_id = workbook_id
         self.evidence = evidence
         self.coa = coa
         self.period_labels = period_labels or {"selected": "Selected period"}
+        self.sheet_routing_context = list(sheet_routing_context or [])
         self.preserve_blanks = len(self.period_labels) > 1
         self.history: list[dict[str, Any]] = []
         self.submissions: list[dict[str, Any]] = []
@@ -489,6 +495,21 @@ class WorkbookMappingValidator:
                 and patch.structural_scenarios
                 != self.current_plan.strategy.structural_scenarios
             )
+            or (
+                patch.department_source_strategy is not None
+                and patch.department_source_strategy
+                != self.current_plan.strategy.department_source_strategy
+            )
+            or (
+                patch.duplicate_or_supporting_schedules is not None
+                and patch.duplicate_or_supporting_schedules
+                != self.current_plan.strategy.duplicate_or_supporting_schedules
+            )
+            or (
+                patch.operator_to_coa_hierarchy_conflicts is not None
+                and patch.operator_to_coa_hierarchy_conflicts
+                != self.current_plan.strategy.operator_to_coa_hierarchy_conflicts
+            )
         )
         changes_review = (
             patch.review_items is not None
@@ -526,6 +547,18 @@ class WorkbookMappingValidator:
             strategy_updates["structural_scenarios"] = patch.structural_scenarios
         if patch.ood_misc_summary_mode is not None:
             strategy_updates["ood_misc_summary_mode"] = patch.ood_misc_summary_mode
+        if patch.department_source_strategy is not None:
+            strategy_updates["department_source_strategy"] = (
+                patch.department_source_strategy
+            )
+        if patch.duplicate_or_supporting_schedules is not None:
+            strategy_updates["duplicate_or_supporting_schedules"] = (
+                patch.duplicate_or_supporting_schedules
+            )
+        if patch.operator_to_coa_hierarchy_conflicts is not None:
+            strategy_updates["operator_to_coa_hierarchy_conflicts"] = (
+                patch.operator_to_coa_hierarchy_conflicts
+            )
         if strategy_updates:
             strategy = strategy.model_copy(update=strategy_updates)
         plan = self.current_plan.model_copy(
@@ -600,6 +633,13 @@ class WorkbookMappingValidator:
         collapse_issue = _detail_collapse_issue(plan, self.evidence)
         if collapse_issue:
             errors.append(collapse_issue)
+        errors.extend(
+            _unused_financial_schedule_issues(
+                plan,
+                self.evidence,
+                self.sheet_routing_context,
+            )
+        )
         missing_venue_names = sorted(
             decision.coa_id
             for decision in plan.decisions
@@ -1008,6 +1048,15 @@ class WorkbookMappingValidator:
                         "type": "string",
                         "enum": [item.value for item in OodMiscSummaryMode],
                     },
+                    "department_source_strategy": {
+                        "anyOf": [string_list, {"type": "null"}],
+                    },
+                    "duplicate_or_supporting_schedules": {
+                        "anyOf": [string_list, {"type": "null"}],
+                    },
+                    "operator_to_coa_hierarchy_conflicts": {
+                        "anyOf": [string_list, {"type": "null"}],
+                    },
                     "review_items": review_items,
                 },
                 "required": [
@@ -1350,6 +1399,7 @@ def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
             "coverage_inconsistent",
             "coverage_unspecified",
             "parent_no_value_with_children",
+            "unused_financial_schedule",
         }
         for rule in errors
     )
@@ -2102,11 +2152,14 @@ def map_workbook(
     periods,
     period_labels: dict[str, str] | None = None,
     evidence: list[dict],
-    skipped_sheets: list[str],
+    excluded_sheets: list[str],
     client,
+    sheet_routing_context: list[dict] | None = None,
     on_activity=None,
+    cancel=None,
 ) -> MappingResult:
     """Map one complete workbook using model decisions and Python validation."""
+    initial_usage_count = len(client.usage_history)
     coa = _load_coa()
     period_labels = period_labels or {"selected": requested_period}
     prompt = _primary_prompt(
@@ -2116,13 +2169,15 @@ def map_workbook(
         period_labels,
         evidence,
         coa,
-        skipped_sheets,
+        excluded_sheets,
+        sheet_routing_context,
     )
     validator = WorkbookMappingValidator(
         workbook_id,
         evidence,
         coa,
         period_labels=period_labels,
+        sheet_routing_context=sheet_routing_context,
     )
     exhausted = False
     repair_truncated = False
@@ -2137,6 +2192,7 @@ def map_workbook(
             max_iterations=iteration_limit,
             trace=tool_trace,
             on_activity=on_activity,
+            cancel=cancel,
         )
     except ProviderToolLoopError:
         exhausted = True
@@ -2145,6 +2201,10 @@ def map_workbook(
             raise
         exhausted = True
         repair_truncated = True
+    except ProviderRunCancelled as stop:
+        if not validator.submissions:
+            raise
+        validator.stopped_reason = str(stop)
 
     if validator.best_plan is not None:
         plan = validator.best_plan
@@ -2235,6 +2295,13 @@ def map_workbook(
     checks_by_period[primary_period_id].extend(
         _review_item_blockers(plan.review_items)
     )
+    checks_by_period[primary_period_id].extend(
+        _unused_financial_schedule_issues(
+            plan,
+            evidence,
+            sheet_routing_context,
+        )
+    )
     has_coverage_gap = any(
         _needs_coverage_review(period_checks)
         for period_checks in checks_by_period.values()
@@ -2290,7 +2357,7 @@ def map_workbook(
     exceptions = _structured_exceptions(
         checks_by_period, period_labels, plan.review_items
     )
-    model_calls = list(client.usage_history)
+    model_calls = list(client.usage_history[initial_usage_count:])
     session_calls = [call for call in model_calls if call.get("tool_loop")]
 
     return MappingResult(
@@ -2403,7 +2470,8 @@ def _primary_prompt(
     period_labels,
     evidence,
     coa,
-    skipped_sheets,
+    excluded_sheets,
+    sheet_routing_context=None,
 ) -> str:
     rows = _group_rows(evidence, period_labels)
     coa_lines = _coa_lines(coa)
@@ -2427,7 +2495,8 @@ def _primary_prompt(
         "coa": coa_lines,
         "coa_hierarchy_equations": _hierarchy_equations(coa),
         "summary_equations": _summary_equation_lines(),
-        "sheets_excluded_as_irrelevant": skipped_sheets,
+        "sheets_excluded_as_nonfinancial": excluded_sheets,
+        "sheet_routing_context": list(sheet_routing_context or []),
         "workbook_rows": rows,
     }
     if multi_period:
@@ -2704,6 +2773,99 @@ def _detail_collapse_issue(plan, evidence):
         f"{len(active_detail)} detailed COA account(s) from them; "
         "map identifiable child accounts instead of collapsing the workbook "
         "mostly to parents/no_value"
+    )
+
+
+def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
+    """Require every routed department P&L to be used or explained.
+
+    This is intentionally structural. Routing supplies the sheet role, evidence
+    supplies whether the selected periods contain financial amounts, and the
+    mapping supplies either a citation or an explicit duplicate/supporting
+    explanation. No account-label semantics are inferred here.
+    """
+    active_rows_by_sheet: dict[str, list[str]] = {}
+    for row in evidence:
+        values = row.get("selected_values") or {
+            "selected": row.get("selected_value")
+        }
+        if not any(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and abs(float(value)) > 0.005
+            for value in values.values()
+        ):
+            continue
+        row_key = str(row.get("row_key") or "")
+        if "!" not in row_key:
+            continue
+        sheet_name = row_key.rsplit("!", 1)[0]
+        active_rows_by_sheet.setdefault(sheet_name, []).append(row_key)
+
+    cited_rows = {
+        row_key
+        for decision in plan.decisions
+        for row_key in [*decision.source_rows, *decision.excluded_rows]
+    }
+    supporting_notes = plan.strategy.duplicate_or_supporting_schedules
+    routed_sheet_names = [
+        str(item.get("sheet_name") or "").strip()
+        for item in sheet_routing_context or []
+        if str(item.get("sheet_name") or "").strip()
+    ]
+    issues = []
+    for routed in sheet_routing_context or []:
+        role = getattr(routed.get("role"), "value", routed.get("role"))
+        included = bool(routed.get("include_as_financial_evidence"))
+        sheet_name = str(routed.get("sheet_name") or "").strip()
+        active_rows = active_rows_by_sheet.get(sheet_name, [])
+        if (
+            role != "department_p_and_l"
+            or not included
+            or not sheet_name
+            or not active_rows
+        ):
+            continue
+        if any(row_key in cited_rows for row_key in active_rows):
+            continue
+        if _strategy_documents_schedule(
+            supporting_notes,
+            sheet_name,
+            routed_sheet_names,
+        ):
+            continue
+        context_rows = ",".join(active_rows[:12])
+        issues.append(
+            f"error|unused_financial_schedule|{sheet_name}|"
+            "routing classified this selected-period financial sheet as "
+            "department_p_and_l, but no mapping decision cites it and "
+            "duplicate_or_supporting_schedules does not explain which schedule "
+            f"supersedes it|source_rows={context_rows}"
+        )
+    return issues
+
+
+def _strategy_documents_schedule(entries, sheet_name, routed_sheet_names):
+    """Whether a note names the unused sheet and its superseding schedule."""
+    target_pattern = _sheet_name_pattern(sheet_name)
+    superseding_patterns = [
+        _sheet_name_pattern(candidate)
+        for candidate in routed_sheet_names
+        if candidate.casefold() != sheet_name.casefold()
+    ]
+    for entry in entries or []:
+        text = str(entry).strip()
+        if target_pattern.search(text) and any(
+            pattern.search(text) for pattern in superseding_patterns
+        ):
+            return True
+    return False
+
+
+def _sheet_name_pattern(sheet_name):
+    return re.compile(
+        rf"(?<![\w]){re.escape(sheet_name)}(?![\w])",
+        re.IGNORECASE,
     )
 
 
