@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
-
 from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.period_selection import (
     PeriodColumnSelection,
@@ -27,9 +25,9 @@ def binding_to_selection_maps(
 ) -> dict[str, PeriodColumnSelectionMap]:
     """One selection map per chosen period, keyed by period id.
 
-    A sheet explicitly marked unavailable is retained as such so evidence never
-    falls back to another sheet's column for it. The workbook default remains
-    only for an unanswered sheet salvaged from an incomplete binding session.
+    A sheet explicitly marked unavailable is retained as such. New runs never
+    infer a missing sheet's column from the workbook-wide modal column: every
+    routed sheet-period pair must have an explicit binding or unavailable result.
     """
     labels = dict(period_labels or {})
     maps: dict[str, PeriodColumnSelectionMap] = {}
@@ -56,39 +54,9 @@ def binding_to_selection_maps(
             selection_map_id=f"{workbook_id}:period_columns:{period_id}",
             workbook_id=workbook_id,
             requested_period=label,
-            default_selection=_default_selection(selections),
+            default_selection=None,
             sheet_selections=selections,
             unavailable_sheets=unavailable,
             notes=notes,
         )
     return maps
-
-
-def _default_selection(
-    selections: list[PeriodColumnSelection],
-) -> PeriodColumnSelection | None:
-    """The column this workbook uses when a sheet did not say.
-
-    The most frequently bound column across sheets, because a workbook that puts
-    YTD in column H on nine tabs almost certainly puts it there on the tenth. Ties
-    break toward the leftmost column, which is the one nearer the labels.
-    """
-    if not selections:
-        return None
-    counts = Counter(
-        (selection.value_column, selection.excel_column) for selection in selections
-    )
-    best = max(counts.items(), key=lambda item: (item[1], -item[0][0]))[0]
-    template = next(
-        selection
-        for selection in selections
-        if (selection.value_column, selection.excel_column) == best
-    )
-    return template.model_copy(
-        update={
-            "sheet_name": None,
-            "evidence": [
-                f"Most common bound column across {len(selections)} sheet(s)."
-            ],
-        }
-    )

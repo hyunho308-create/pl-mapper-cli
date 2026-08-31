@@ -27,8 +27,8 @@ Two obligations, both enforced. A submission missing either is refused.
    an `unavailable` note saying what you saw instead. The list is in the workbook
    context. Routing already decided these sheets hold P&L
    content, so silence about one is not an answer, and leaving it out does not
-   make it safe: it falls back to another sheet's column, which is the same guess
-   you would have made, only harder to see.
+   make it safe: an unanswered sheet is excluded for that period rather than
+   assigned another sheet's column.
 2. **You cannot answer for a sheet you have not opened.** That includes marking
    one unavailable — saying a period is *not* on a sheet is as much a claim about
    its headers as saying which column holds it. A `find_rows` hit does not count;

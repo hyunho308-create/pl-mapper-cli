@@ -217,8 +217,36 @@ class WorkbookStructureAnalyzer:
         }
         if output.tool_trace:
             artifacts["tool_trace"] = output.tool_trace
+        unresolved = [
+            item
+            for item in output.structure.unavailable
+            if item.reason.startswith("Binding was not established")
+        ]
+        salvage_observations = [
+            item
+            for item in output.structure.observations
+            if item.startswith(
+                (
+                    "Dropped bindings for ",
+                    "Marked ",
+                    "Removed during deterministic salvage: ",
+                )
+            )
+        ]
         messages = [
-            "Selected periods were bound to columns for every routed sheet.",
+            (
+                "Binding required deterministic salvage; "
+                + (
+                    f"{len(unresolved)} unresolved sheet-period pair(s) were "
+                    "excluded without inferring a default column."
+                    if unresolved
+                    else "invalid or ambiguous model claims were removed before "
+                    "acceptance."
+                )
+                if salvage_observations
+                else "Binding finished with an explicit column or unavailable "
+                "outcome for every routed sheet-period pair."
+            ),
             *(
                 f"{period_id}: "
                 f"{sum(item.period_id == period_id for item in output.structure.bindings)} "
@@ -233,7 +261,7 @@ class WorkbookStructureAnalyzer:
         return self._stage(
             output_dir,
             "period_binding",
-            StageStatus.PASS,
+            StageStatus.WARNING if salvage_observations else StageStatus.PASS,
             artifacts,
             stage_started_at,
             stage_started,

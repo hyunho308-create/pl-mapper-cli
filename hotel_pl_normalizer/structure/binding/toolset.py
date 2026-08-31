@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hotel_pl_normalizer.models.binding import WorkbookBindings
+from hotel_pl_normalizer.models.binding import UnavailablePeriod, WorkbookBindings
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers.base import tool_parameter_schema
 
@@ -64,7 +64,8 @@ class PeriodBindingToolset:
         self.workbook = workbook
         self.period_ids = list(period_ids)
         self.sheets = {sheet.sheet_name: sheet for sheet in workbook.sheets}
-        # Routing's answer is a preference rather than a hard boundary.
+        # Routing defines the binding scope. Other sheets remain readable for
+        # context, but they cannot contribute a binding outcome.
         self.financial_sheets = [
             name for name in (financial_sheets or list(self.sheets)) if name in self.sheets
         ]
@@ -446,21 +447,26 @@ class PeriodBindingToolset:
         # again here: the fast model bound columns on 28 tabs it never opened,
         # and got the period block wrong on every one of them.
         unread = self._unopened_claims(submission)
-        unanswered = self._unanswered_sheets(submission)
+        unanswered = self._unanswered_pairs(submission)
         if unread or unanswered:
             self._refusals["coverage"] = self._refusals.get("coverage", 0) + 1
             if self._refusals["coverage"] <= self.MAX_COVERAGE_REFUSALS:
                 return self._coverage_refusal(unread, unanswered)
-            # Out of patience. An unopened claim is the one case where taking the
-            # answer is worse than dropping it -- the sheet falls back to the
-            # workbook's usual column, which beats a column nobody looked at.
-            # An unanswered sheet already falls back, so it just gets recorded.
+            # Out of patience. Keep only claims grounded in opened sheets, then
+            # fail closed for every unresolved sheet-period pair. Never infer a
+            # missing column from another sheet's convention.
             if unread:
                 submission = _drop_unopened(submission, self.opened_sheets)
                 self.observations.append(
                     f"Dropped bindings for {len(unread)} sheet(s) the session never "
-                    f"opened ({', '.join(sorted(unread)[:6])}); they fall back to the "
-                    "workbook default column."
+                    f"opened ({', '.join(sorted(unread)[:6])})."
+                )
+            unanswered = self._unanswered_pairs(submission)
+            if unanswered:
+                submission = _mark_unresolved_unavailable(submission, unanswered)
+                self.observations.append(
+                    f"Marked {len(unanswered)} unresolved sheet-period pair(s) "
+                    "unavailable; no default column was inferred."
                 )
 
         result = check_bindings(
@@ -473,13 +479,25 @@ class PeriodBindingToolset:
             return self._reject(" ".join(result.rejections), "submit_bindings")
 
         if result.rejections:
-            # Taking a flawed binding beats taking none: every sheet the model
-            # did name still gets its column, and the rest fall back to the
-            # workbook default rather than to nothing at all.
-            submission = _drop_rejected_bindings(submission, self.sheets, self.period_ids)
-            self.observations.extend(
-                f"Accepted despite: {message}" for message in result.rejections
+            # Preserve only mechanically valid, unambiguous outcomes, then fail
+            # closed for every pair the salvage removed.
+            submission = _drop_rejected_bindings(
+                submission,
+                self.sheets,
+                self.period_ids,
+                self.financial_sheets,
             )
+            unresolved = self._unanswered_pairs(submission)
+            submission = _mark_unresolved_unavailable(submission, unresolved)
+            self.observations.extend(
+                f"Removed during deterministic salvage: {message}"
+                for message in result.rejections
+            )
+            if unresolved:
+                self.observations.append(
+                    f"Marked {len(unresolved)} invalid or ambiguous sheet-period "
+                    "pair(s) unavailable; no default column was inferred."
+                )
         self.observations.extend(result.observations)
         self.submission = submission.model_copy(
             update={"observations": list(self.observations)}
@@ -490,8 +508,8 @@ class PeriodBindingToolset:
             "structure": self.submission.model_dump(mode="json"),
         }
 
-    def _unanswered_sheets(self, submission: WorkbookBindings) -> set[str]:
-        """Routed sheets this submission says nothing about, for some period.
+    def _unanswered_pairs(self, submission: WorkbookBindings) -> set[tuple[str, str]]:
+        """Routed sheet-period pairs this submission says nothing about.
 
         The hole the first version of the read gate left. It asked only that
         claims be backed by reads, which a *small* answer satisfies trivially --
@@ -504,7 +522,7 @@ class PeriodBindingToolset:
             (binding.sheet_name, binding.period_id) for binding in submission.bindings
         } | {(item.sheet_name, item.period_id) for item in submission.unavailable}
         return {
-            name
+            (name, period_id)
             for name in self.financial_sheets
             for period_id in self.period_ids
             if (name, period_id) not in answered
@@ -513,14 +531,18 @@ class PeriodBindingToolset:
     def _coverage_refusal(
         self,
         unread: set[str],
-        unanswered: set[str],
+        unanswered: set[tuple[str, str]],
     ) -> dict[str, Any]:
         """One message covering the binding and read obligations."""
         parts: list[str] = []
         if unanswered:
+            examples = ", ".join(
+                f"{sheet} [{period}]"
+                for sheet, period in sorted(unanswered)[:12]
+            )
             parts.append(
-                f"{len(unanswered)} routed sheet(s) have no binding and no "
-                f"unavailable note: {', '.join(sorted(unanswered)[:12])}. Routing "
+                f"{len(unanswered)} routed sheet-period pair(s) have no binding "
+                f"and no unavailable note: {examples}. Routing "
                 "decided these hold P&L content, so each one needs an answer for "
                 "every chosen period -- a column, or an unavailable note saying "
                 "what you saw instead."
@@ -535,8 +557,8 @@ class PeriodBindingToolset:
             f"Use read_headers to open up to {MAX_SHEETS_PER_HEADER_READ} sheets "
             "in a single call and compare their header blocks side by side, then "
             "submit once with every sheet answered for. Do not shrink the "
-            "submission to satisfy this: a sheet left out falls back to another "
-            "sheet's column, which is the same guess, only harder to see."
+            "submission to satisfy this: a sheet left out is excluded from "
+            "mapping for that period rather than assigned another sheet's column."
         )
         message = " ".join(parts)
         self.rejections.append(message)
@@ -619,7 +641,10 @@ def _drop_unopened(
 
 
 def _drop_rejected_bindings(
-    submission: WorkbookBindings, sheets, period_ids: list[str]
+    submission: WorkbookBindings,
+    sheets,
+    period_ids: list[str],
+    financial_sheets: list[str],
 ) -> WorkbookBindings:
     """Keep the bindings that stand on their own, drop the ones that cannot.
 
@@ -629,16 +654,103 @@ def _drop_rejected_bindings(
     rest are kept, because they were never the problem.
     """
     chosen = set(period_ids)
-    kept = []
+    financial = set(financial_sheets)
+    unavailable = []
+    unavailable_pairs: set[tuple[str, str]] = set()
+    for item in submission.unavailable:
+        pair = (item.sheet_name, item.period_id)
+        if (
+            pair in unavailable_pairs
+            or item.period_id not in chosen
+            or item.sheet_name not in sheets
+            or item.sheet_name not in financial
+            or not item.reason.strip()
+        ):
+            continue
+        unavailable.append(item)
+        unavailable_pairs.add(pair)
+
+    candidates = []
     for binding in submission.bindings:
         sheet = sheets.get(binding.sheet_name)
-        if sheet is None or binding.period_id not in chosen:
+        pair = (binding.sheet_name, binding.period_id)
+        if (
+            sheet is None
+            or binding.sheet_name not in financial
+            or binding.period_id not in chosen
+            or pair in unavailable_pairs
+        ):
             continue
         letters = (binding.excel_column or "").strip().upper()
         if not letters.isalpha():
             continue
-        kept.append(binding)
-    return submission.model_copy(update={"bindings": kept})
+        column = _excel_column_number(letters)
+        if not _sheet_column_holds_numbers(sheet, column):
+            continue
+        candidates.append(binding)
+
+    pair_counts: dict[tuple[str, str], int] = {}
+    column_periods: dict[tuple[str, str], set[str]] = {}
+    for binding in candidates:
+        pair = (binding.sheet_name, binding.period_id)
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        column_periods.setdefault(
+            (binding.sheet_name, binding.excel_column.strip().upper()), set()
+        ).add(binding.period_id)
+    kept = [
+        binding
+        for binding in candidates
+        if pair_counts[(binding.sheet_name, binding.period_id)] == 1
+        and len(
+            column_periods[
+                (binding.sheet_name, binding.excel_column.strip().upper())
+            ]
+        )
+        == 1
+    ]
+    return submission.model_copy(
+        update={"bindings": kept, "unavailable": unavailable}
+    )
+
+
+def _mark_unresolved_unavailable(
+    submission: WorkbookBindings,
+    unresolved: set[tuple[str, str]],
+) -> WorkbookBindings:
+    """Fail closed for pairs the model did not establish explicitly."""
+    if not unresolved:
+        return submission
+    additions = [
+        UnavailablePeriod(
+            sheet_name=sheet_name,
+            period_id=period_id,
+            reason=(
+                "Binding was not established before the model session ended; "
+                "no column was inferred from another sheet."
+            ),
+        )
+        for sheet_name, period_id in sorted(unresolved)
+    ]
+    return submission.model_copy(
+        update={"unavailable": [*submission.unavailable, *additions]}
+    )
+
+
+def _excel_column_number(letters: str) -> int:
+    number = 0
+    for character in letters:
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number
+
+
+def _sheet_column_holds_numbers(sheet, column: int) -> bool:
+    return any(
+        isinstance(cell.raw_value, int | float)
+        and not isinstance(cell.raw_value, bool)
+        for row in sheet.rows
+        for cell in row.cells
+        if cell.column == column
+    )
 
 
 def _text(cell) -> str | None:

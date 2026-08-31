@@ -191,6 +191,9 @@ class PeriodColumnSelectionMap(StrictModel):
     selection_map_id: str
     workbook_id: str
     requested_period: str
+    # Read compatibility for artifacts created before binding became strictly
+    # per sheet. New binding runs always leave this unset and never infer a
+    # missing sheet's column from another sheet.
     default_selection: PeriodColumnSelection | None = None
     sheet_selections: list[PeriodColumnSelection] = []
     unavailable_sheets: dict[str, str] = {}

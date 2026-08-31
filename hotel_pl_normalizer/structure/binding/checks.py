@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 
 from hotel_pl_normalizer.models.binding import PeriodBinding, WorkbookBindings
@@ -27,11 +28,36 @@ def check_bindings(
     period_ids: list[str],
     financial_sheets: list[str],
 ) -> CheckResult:
-    """Reject only bindings that cannot be true of this workbook."""
+    """Require one mechanically valid outcome for every routed sheet-period pair."""
 
     result = CheckResult()
     chosen = set(period_ids)
+    financial = set(financial_sheets)
     claimed: dict[str, list[PeriodBinding]] = {}
+    binding_pairs = Counter(
+        (binding.sheet_name, binding.period_id) for binding in submission.bindings
+    )
+    unavailable_pairs = Counter(
+        (item.sheet_name, item.period_id) for item in submission.unavailable
+    )
+
+    for (sheet_name, period_id), count in sorted(binding_pairs.items()):
+        if count > 1:
+            result.rejections.append(
+                f"{sheet_name!r} has {count} bindings for {period_id!r}; "
+                "one sheet-period pair must have exactly one outcome."
+            )
+    for (sheet_name, period_id), count in sorted(unavailable_pairs.items()):
+        if count > 1:
+            result.rejections.append(
+                f"{sheet_name!r} has {count} unavailable entries for {period_id!r}; "
+                "one sheet-period pair must have exactly one outcome."
+            )
+    for sheet_name, period_id in sorted(binding_pairs.keys() & unavailable_pairs.keys()):
+        result.rejections.append(
+            f"{sheet_name!r} and {period_id!r} appear in both bindings and "
+            "unavailable; choose exactly one outcome."
+        )
 
     for binding in submission.bindings:
         if binding.period_id not in chosen:
@@ -44,6 +70,11 @@ def check_bindings(
         if sheet is None:
             result.rejections.append(
                 f"There is no sheet named {binding.sheet_name!r} in this workbook."
+            )
+            continue
+        if binding.sheet_name not in financial:
+            result.rejections.append(
+                f"{binding.sheet_name!r} is outside the routed financial-sheet scope."
             )
             continue
         column = _column_number(binding.excel_column)
@@ -62,6 +93,27 @@ def check_bindings(
             continue
         claimed.setdefault(binding.sheet_name, []).append(binding)
 
+    for item in submission.unavailable:
+        if item.period_id not in chosen:
+            result.rejections.append(
+                f"Unavailable entry {item.period_id!r} was not one of the chosen "
+                f"periods ({', '.join(period_ids)})."
+            )
+        if item.sheet_name not in sheets:
+            result.rejections.append(
+                f"Unavailable entry names nonexistent sheet {item.sheet_name!r}."
+            )
+        elif item.sheet_name not in financial:
+            result.rejections.append(
+                f"Unavailable entry {item.sheet_name!r} is outside the routed "
+                "financial-sheet scope."
+            )
+        if not item.reason.strip():
+            result.rejections.append(
+                f"Unavailable entry for {item.sheet_name!r} and {item.period_id!r} "
+                "needs a reason."
+            )
+
     for sheet_name, bindings in sorted(claimed.items()):
         by_column: dict[str, set[str]] = {}
         for binding in bindings:
@@ -74,12 +126,11 @@ def check_bindings(
                     f"({', '.join(sorted(periods))}). One column holds one period."
                 )
 
-    if not result.rejections:
-        _observe_unbound_sheets(submission, financial_sheets, period_ids, result)
+    _reject_unbound_sheets(submission, financial_sheets, period_ids, result)
     return result
 
 
-def _observe_unbound_sheets(
+def _reject_unbound_sheets(
     submission: WorkbookBindings,
     financial_sheets: list[str],
     period_ids: list[str],
@@ -93,10 +144,10 @@ def _observe_unbound_sheets(
             name for name in financial_sheets if (name, period_id) not in answered
         ]
         if silent:
-            result.observations.append(
+            result.rejections.append(
                 f"{len(silent)} routed sheet(s) have no binding and no "
                 f"unavailable note for {period_id!r}: {', '.join(silent[:8])}. "
-                "They fall back to the workbook default column."
+                "Every routed sheet-period pair needs exactly one explicit outcome."
             )
 
 
