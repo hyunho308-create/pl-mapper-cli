@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from hotel_pl_normalizer.models.binding import UnavailablePeriod, WorkbookBindings
+from openpyxl.utils import get_column_letter
+
+from hotel_pl_normalizer.models.binding import (
+    PeriodBinding,
+    UnavailablePeriod,
+    WorkbookBindings,
+)
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
-from hotel_pl_normalizer.providers.base import tool_parameter_schema
+from hotel_pl_normalizer.structure.representation import (
+    infer_label_layout,
+    select_row_label,
+)
 
 from .checks import check_bindings
 from .column_stats import column_stats
@@ -30,6 +40,102 @@ MAX_CELLS_PER_READ = 1_200
 MAX_SHEETS_PER_HEADER_READ = 20
 MAX_HEADER_ROWS = 30
 DEFAULT_HEADER_ROWS = 15
+LAYOUT_HEADER_ROWS = 30
+MAX_LAYOUT_SUBMISSIONS = 3
+
+_MONTHS = (
+    "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    "jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    "nov(?:ember)?|dec(?:ember)?"
+)
+_HEADER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("actual", re.compile(r"\bactuals?\b", re.I)),
+    ("budget", re.compile(r"\bbudget\b|\bbud\b", re.I)),
+    ("forecast", re.compile(r"\bforecast\b|\bfcst\b", re.I)),
+    (
+        "prior_year",
+        re.compile(r"\bprior\s*year\b|\blast\s*year\b|\bprevious\s*year\b|\bLY\b", re.I),
+    ),
+    ("ytd", re.compile(r"\bytd\b|year\s*[- ]?to\s*[- ]?date", re.I)),
+    ("ptd", re.compile(r"\bptd\b|\bperiodic\b|period\s*[- ]?to\s*[- ]?date", re.I)),
+    ("ttm", re.compile(r"\bttm\b|\bt12\b|trailing\s*(?:twelve|12)", re.I)),
+    ("total", re.compile(r"\btotal\b|\bannual\b|\bfull\s*year\b|\bfy\b", re.I)),
+    ("amount", re.compile(r"\bamount\b|\bamt\b", re.I)),
+    ("percent", re.compile(r"%|\bpercent\b|\bpct\b", re.I)),
+    ("variance", re.compile(r"\bvariance\b|\bvar\b|fav\s*/?\s*\(?unfav", re.I)),
+    ("ratio", re.compile(r"\b(?:r?por|par|margin|occupancy|adr|revpar)\b", re.I)),
+)
+_MONTH_NUMBERS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
+def _layout_binding_submission_schema() -> dict[str, Any]:
+    layout_binding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "layout_id": {"type": "string"},
+            "period_id": {"type": "string"},
+            "excel_column": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["layout_id", "period_id", "excel_column"],
+    }
+    layout_unavailable = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "layout_id": {"type": "string"},
+            "period_id": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["layout_id", "period_id", "reason"],
+    }
+    sheet_binding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "sheet_name": {"type": "string"},
+            "period_id": {"type": "string"},
+            "excel_column": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["sheet_name", "period_id", "excel_column"],
+    }
+    sheet_unavailable = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "sheet_name": {"type": "string"},
+            "period_id": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["sheet_name", "period_id", "reason"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "layout_bindings": {"type": "array", "items": layout_binding},
+            "layout_unavailable": {"type": "array", "items": layout_unavailable},
+            "sheet_bindings": {"type": "array", "items": sheet_binding},
+            "sheet_unavailable": {"type": "array", "items": sheet_unavailable},
+            "notes": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["layout_bindings", "layout_unavailable"],
+    }
 
 
 class PeriodBindingToolset:
@@ -59,6 +165,7 @@ class PeriodBindingToolset:
         *,
         period_ids: list[str],
         financial_sheets: list[str] | None = None,
+        controlling_summary_sheet: str | None = None,
         max_reads: int = 120,
     ) -> None:
         self.workbook = workbook
@@ -69,6 +176,11 @@ class PeriodBindingToolset:
         self.financial_sheets = [
             name for name in (financial_sheets or list(self.sheets)) if name in self.sheets
         ]
+        self.controlling_summary_sheet = (
+            controlling_summary_sheet
+            if controlling_summary_sheet in self.financial_sheets
+            else None
+        )
         self.max_reads = max_reads
         self.reads = 0
         # Only `read_rows` and `column_stats` count as opening a sheet. A
@@ -80,6 +192,17 @@ class PeriodBindingToolset:
         self.rejections: list[str] = []
         self.observations: list[str] = []
         self._refusals: dict[str, int] = {}
+        self.layout_groups: list[dict[str, Any]] | None = None
+        self.layout_submission_count = 0
+        self.header_end_rows = {
+            name: _header_end_row(self.sheets[name]) for name in self.financial_sheets
+        }
+        self.value_column_counts = {
+            name: _labelled_column_counts(
+                self.sheets[name], self.header_end_rows[name]
+            )
+            for name in self.financial_sheets
+        }
 
     def signature(self) -> str:
         return f"period_binding:{self.workbook.workbook_id}"
@@ -93,6 +216,16 @@ class PeriodBindingToolset:
             "enum": list(self.sheets),
         }
         return [
+            {
+                "name": "list_sheet_layouts",
+                "description": (
+                    "Group routed financial sheets only when their deterministic "
+                    "period-header markers occupy the same Excel columns. Returns "
+                    "representative headers and candidate value-column profiles. "
+                    "Start here; sheets without a safe match remain singleton layouts."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
             {
                 "name": "list_sheets",
                 "description": (
@@ -187,12 +320,13 @@ class PeriodBindingToolset:
                 },
             },
             {
-                "name": "submit_bindings",
+                "name": "submit_layout_bindings",
                 "description": (
-                    "Which column holds each chosen period on each sheet. "
-                    "This ends the session."
+                    "Bind every selected period once per deterministic sheet layout. "
+                    "Python expands those choices to sheets, with optional sheet-level "
+                    "overrides, and runs the existing exact per-sheet verifier."
                 ),
-                "parameters": tool_parameter_schema(WorkbookBindings),
+                "parameters": _layout_binding_submission_schema(),
             },
         ]
 
@@ -200,11 +334,15 @@ class PeriodBindingToolset:
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers = {
+            "list_sheet_layouts": lambda: self._list_sheet_layouts(),
             "list_sheets": lambda: self._list_sheets(),
             "read_rows": lambda: self._read_rows(arguments),
             "read_headers": lambda: self._read_headers(arguments),
             "find_rows": lambda: self._find_rows(arguments),
             "column_stats": lambda: self._column_stats(arguments),
+            "submit_layout_bindings": lambda: self._submit_layout_bindings(arguments),
+            # Hidden compatibility path for focused tests and saved replays. Live
+            # sessions see only the compact layout submission tool.
             "submit_bindings": lambda: self._submit_bindings(arguments),
         }
         handler = handlers.get(name)
@@ -218,11 +356,105 @@ class PeriodBindingToolset:
 
     def terminal_result(self, name: str, result: dict[str, Any]):
         """End the session once the binding submission is accepted."""
-        if name == "submit_bindings" and result.get("accepted"):
+        if name == "submit_layout_bindings" and result.get("accepted"):
             return result.get("structure")
         return None
 
+    @staticmethod
+    def final_response_error(_result: WorkbookBindings) -> str:
+        """A bare final object cannot bypass the tool's coverage verifier."""
+        return (
+            "Do not end with bare JSON. Call submit_layout_bindings with the complete "
+            "layout outcomes and any sheet overrides; only accepted=true completes "
+            "this stage."
+        )
+
     # -- readers ----------------------------------------------------------
+
+    def _list_sheet_layouts(self) -> dict[str, Any]:
+        """Return conservative header-equivalent groups for routed sheets."""
+        if self.layout_groups is None:
+            self.layout_groups = self._build_sheet_layouts()
+        # Building the groups inspects every routed header deterministically.
+        # The model is making one claim about that exact shared header, not
+        # guessing from another unexamined sheet.
+        self.opened_sheets.update(self.financial_sheets)
+        return {
+            "ok": True,
+            "layout_groups": self.layout_groups,
+            "selected_period_ids": self.period_ids,
+            "instruction": (
+                "Return one layout outcome for every layout_id and selected period. "
+                "Use a sheet override only when a named member is a real exception."
+            ),
+        }
+
+    def _build_sheet_layouts(self) -> list[dict[str, Any]]:
+        grouped: dict[tuple[Any, ...], list[str]] = {}
+        singleton = 0
+        for name in self.financial_sheets:
+            sheet = self.sheets[name]
+            signature = _sheet_header_signature(sheet)
+            if not signature:
+                # No semantic header evidence means no safe equivalence claim.
+                singleton += 1
+                key: tuple[Any, ...] = ("singleton", singleton, name)
+            else:
+                # Used-range tails vary with blank formatting and technical
+                # export cells. The semantic marker/column signature, not
+                # max_column, defines whether a period choice can be shared.
+                key = ("header", signature)
+            grouped.setdefault(key, []).append(name)
+
+        layouts: list[dict[str, Any]] = []
+        for index, names in enumerate(grouped.values(), start=1):
+            sheets = [self.sheets[name] for name in names]
+            representative = sheets[0]
+            columns = sorted(
+                {
+                    column
+                    for sheet in sheets
+                    for column in self.value_column_counts[sheet.sheet_name]
+                }
+            )
+            candidates = []
+            for column in columns:
+                numeric = [
+                    sheet.sheet_name
+                    for sheet in sheets
+                    if self.value_column_counts[sheet.sheet_name]
+                    .get(column, {})
+                    .get("numeric", 0)
+                ]
+                nonzero = [
+                    sheet.sheet_name
+                    for sheet in sheets
+                    if self.value_column_counts[sheet.sheet_name]
+                    .get(column, {})
+                    .get("nonzero", 0)
+                ]
+                candidates.append(
+                    {
+                        "excel_column": get_column_letter(column),
+                        "header_text": _column_header_text(representative, column),
+                        "scenario_hints": _column_scenario_hints(
+                            representative, column
+                        ),
+                        "sheets_with_numbers": len(numeric),
+                        "sheets_with_nonzero": len(nonzero),
+                    }
+                )
+            layouts.append(
+                {
+                    "layout_id": f"layout_{index}",
+                    "representative_sheet": representative.sheet_name,
+                    "sheet_count": len(names),
+                    "sheet_names": names,
+                    "header_cells": _semantic_header_cells(representative),
+                    "candidate_columns": candidates,
+                }
+            )
+        return layouts
 
     def _list_sheets(self) -> dict[str, Any]:
         routed = set(self.financial_sheets)
@@ -434,11 +666,283 @@ class PeriodBindingToolset:
 
     # -- submission -------------------------------------------------------
 
-    def _submit_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _submit_layout_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Expand compact layout choices into the existing sheet-level contract."""
+        self.layout_submission_count += 1
+        if self.layout_submission_count > MAX_LAYOUT_SUBMISSIONS:
+            raise RuntimeError(
+                "Excel layout binding exceeded one initial submission and two repairs."
+            )
+        if self.layout_groups is None:
+            self.layout_groups = self._build_sheet_layouts()
+        layouts = {item["layout_id"]: item for item in self.layout_groups}
+        layout_for_sheet = {
+            name: layout_id
+            for layout_id, layout in layouts.items()
+            for name in layout["sheet_names"]
+        }
+        layout_bindings = arguments.get("layout_bindings") or []
+        layout_unavailable = arguments.get("layout_unavailable") or []
+        sheet_bindings = arguments.get("sheet_bindings") or []
+        sheet_unavailable = arguments.get("sheet_unavailable") or []
+        arrays = {
+            "layout_bindings": layout_bindings,
+            "layout_unavailable": layout_unavailable,
+            "sheet_bindings": sheet_bindings,
+            "sheet_unavailable": sheet_unavailable,
+        }
+        if any(not isinstance(value, list) for value in arrays.values()):
+            return self._reject(
+                "All compact binding collections must be arrays.",
+                "submit_layout_bindings",
+            )
+
+        outcomes: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+        for kind, items in (
+            ("binding", layout_bindings),
+            ("unavailable", layout_unavailable),
+        ):
+            for item in items:
+                if not isinstance(item, dict):
+                    return self._reject(
+                        f"Each layout {kind} must be an object.",
+                        "submit_layout_bindings",
+                    )
+                layout_id = str(item.get("layout_id") or "")
+                period_id = str(item.get("period_id") or "")
+                if layout_id not in layouts:
+                    return self._reject(
+                        f"Unknown layout_id {layout_id!r}.",
+                        "submit_layout_bindings",
+                    )
+                if period_id not in self.period_ids:
+                    return self._reject(
+                        f"Unknown selected period_id {period_id!r}.",
+                        "submit_layout_bindings",
+                    )
+                pair = (layout_id, period_id)
+                if pair in outcomes:
+                    return self._reject(
+                        f"{layout_id} and {period_id} have more than one outcome.",
+                        "submit_layout_bindings",
+                    )
+                outcomes[pair] = (kind, item)
+
+        required = {
+            (layout_id, period_id)
+            for layout_id in layouts
+            for period_id in self.period_ids
+        }
+        missing = sorted(required - set(outcomes))
+        if missing:
+            preview = ", ".join(f"{layout}/{period}" for layout, period in missing[:12])
+            return self._reject(
+                "Every layout and selected period requires one compact outcome. "
+                f"Missing: {preview}.",
+                "submit_layout_bindings",
+            )
+
+        overrides: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+        for kind, items in (
+            ("binding", sheet_bindings),
+            ("unavailable", sheet_unavailable),
+        ):
+            for item in items:
+                if not isinstance(item, dict):
+                    return self._reject(
+                        f"Each sheet {kind} override must be an object.",
+                        "submit_layout_bindings",
+                    )
+                sheet_name = str(item.get("sheet_name") or "")
+                period_id = str(item.get("period_id") or "")
+                if sheet_name not in layout_for_sheet:
+                    return self._reject(
+                        f"Sheet override {sheet_name!r} is outside routed layouts.",
+                        "submit_layout_bindings",
+                    )
+                if period_id not in self.period_ids:
+                    return self._reject(
+                        f"Unknown selected period_id {period_id!r} in sheet override.",
+                        "submit_layout_bindings",
+                    )
+                pair = (sheet_name, period_id)
+                if pair in overrides:
+                    return self._reject(
+                        f"{sheet_name!r} and {period_id} have multiple overrides.",
+                        "submit_layout_bindings",
+                    )
+                overrides[pair] = (kind, item)
+
+        bindings: list[PeriodBinding] = []
+        unavailable: list[UnavailablePeriod] = []
+        notes = [str(value) for value in arguments.get("notes") or []]
+        for (layout_id, period_id), (kind, item) in outcomes.items():
+            layout = layouts[layout_id]
+            if kind == "binding":
+                column = str(item.get("excel_column") or "").strip().upper()
+                candidates = {
+                    value["excel_column"]: value
+                    for value in layout["candidate_columns"]
+                }
+                if column not in candidates:
+                    return self._reject(
+                        f"{layout_id} has no listed numeric candidate column {column!r}.",
+                        "submit_layout_bindings",
+                    )
+                scenario_hints = set(candidates[column]["scenario_hints"])
+                allowed_hints = _allowed_scenario_hints(period_id)
+                if scenario_hints and not scenario_hints & allowed_hints:
+                    return self._reject(
+                        f"{layout_id} column {column} has explicit scenario hints "
+                        f"{sorted(scenario_hints)}, which do not match {period_id}.",
+                        "submit_layout_bindings",
+                    )
+                evidence = [str(value) for value in item.get("evidence") or []]
+            else:
+                reason = str(item.get("reason") or "").strip()
+                if not reason:
+                    return self._reject(
+                        f"Unavailable outcome for {layout_id}/{period_id} needs a reason.",
+                        "submit_layout_bindings",
+                    )
+
+            for sheet_name in layout["sheet_names"]:
+                override = overrides.get((sheet_name, period_id))
+                if override is not None:
+                    override_kind, override_item = override
+                    if override_kind == "binding":
+                        override_column = str(
+                            override_item.get("excel_column") or ""
+                        ).strip().upper()
+                        if not override_column.isalpha():
+                            return self._reject(
+                                f"Sheet override for {sheet_name!r} requires a valid "
+                                "Excel column.",
+                                "submit_layout_bindings",
+                            )
+                        override_hints = set(
+                            _column_scenario_hints(
+                                self.sheets[sheet_name],
+                                _excel_column_number(override_column),
+                            )
+                        )
+                        if override_hints and not override_hints & _allowed_scenario_hints(
+                            period_id
+                        ):
+                            return self._reject(
+                                f"Sheet override {sheet_name!r} column "
+                                f"{override_column} has explicit scenario hints "
+                                f"{sorted(override_hints)}, which do not match "
+                                f"{period_id}.",
+                                "submit_layout_bindings",
+                            )
+                        bindings.append(
+                            PeriodBinding(
+                                sheet_name=sheet_name,
+                                period_id=period_id,
+                                excel_column=override_column,
+                                evidence=[
+                                    str(value)
+                                    for value in override_item.get("evidence") or []
+                                ],
+                            )
+                        )
+                    else:
+                        override_reason = str(
+                            override_item.get("reason") or ""
+                        ).strip()
+                        if not override_reason:
+                            return self._reject(
+                                f"Unavailable override for {sheet_name!r}/{period_id} "
+                                "needs a reason.",
+                                "submit_layout_bindings",
+                            )
+                        unavailable.append(
+                            UnavailablePeriod(
+                                sheet_name=sheet_name,
+                                period_id=period_id,
+                                reason=override_reason,
+                            )
+                        )
+                    continue
+                if kind == "unavailable":
+                    unavailable.append(
+                        UnavailablePeriod(
+                            sheet_name=sheet_name,
+                            period_id=period_id,
+                            reason=reason,
+                        )
+                    )
+                    continue
+                column_number = _excel_column_number(column)
+                counts = self.value_column_counts[sheet_name].get(column_number, {})
+                if counts.get("nonzero", 0):
+                    bindings.append(
+                        PeriodBinding(
+                            sheet_name=sheet_name,
+                            period_id=period_id,
+                            excel_column=column,
+                            evidence=evidence,
+                        )
+                    )
+                else:
+                    state = (
+                        "all zero"
+                        if counts.get("numeric", 0)
+                        else "blank"
+                    )
+                    unavailable.append(
+                        UnavailablePeriod(
+                            sheet_name=sheet_name,
+                            period_id=period_id,
+                            reason=(
+                                f"Layout {layout_id} selected column {column}, but the "
+                                f"column is {state} on this sheet."
+                            ),
+                        )
+                    )
+
+        expanded = WorkbookBindings(
+            bindings=bindings,
+            unavailable=unavailable,
+            notes=notes,
+        )
+        if self.controlling_summary_sheet is not None:
+            bound_on_anchor = {
+                item.period_id
+                for item in expanded.bindings
+                if item.sheet_name == self.controlling_summary_sheet
+            }
+            missing_anchor = [
+                period_id
+                for period_id in self.period_ids
+                if period_id not in bound_on_anchor
+            ]
+            if missing_anchor:
+                return self._reject(
+                    f"Discovery confirmed every selected period on controlling summary "
+                    f"{self.controlling_summary_sheet!r}, but it has no usable binding "
+                    f"for: {', '.join(missing_anchor)}. Re-read that summary header and "
+                    "bind its displayed amount columns.",
+                    "submit_layout_bindings",
+                )
+        return self._submit_bindings(
+            expanded.model_dump(mode="json"),
+            submission_tool="submit_layout_bindings",
+        )
+
+    def _submit_bindings(
+        self,
+        arguments: dict[str, Any],
+        *,
+        submission_tool: str = "submit_bindings",
+    ) -> dict[str, Any]:
         try:
             submission = WorkbookBindings.model_validate(arguments)
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
-            return self._reject(f"That did not match the schema: {exc}", "submit_bindings")
+            return self._reject(
+                f"That did not match the schema: {exc}", submission_tool
+            )
 
         # Before anything about the columns: did the session actually open the
         # sheets it is making claims about? Asking in the prompt does not carry
@@ -475,8 +979,8 @@ class PeriodBindingToolset:
             period_ids=self.period_ids,
             financial_sheets=self.financial_sheets,
         )
-        if not result.accepted and not self._out_of_patience("submit_bindings"):
-            return self._reject(" ".join(result.rejections), "submit_bindings")
+        if not result.accepted and not self._out_of_patience(submission_tool):
+            return self._reject(" ".join(result.rejections), submission_tool)
 
         if result.rejections:
             # Preserve only mechanically valid, unambiguous outcomes, then fail
@@ -686,6 +1190,17 @@ def _drop_rejected_bindings(
             continue
         column = _excel_column_number(letters)
         if not _sheet_column_holds_numbers(sheet, column):
+            unavailable.append(
+                UnavailablePeriod(
+                    sheet_name=binding.sheet_name,
+                    period_id=binding.period_id,
+                    reason=(
+                        f"Column {letters} was inspected and contains no numeric "
+                        "values for the selected period."
+                    ),
+                )
+            )
+            unavailable_pairs.add(pair)
             continue
         candidates.append(binding)
 
@@ -751,6 +1266,206 @@ def _sheet_column_holds_numbers(sheet, column: int) -> bool:
         for cell in row.cells
         if cell.column == column
     )
+
+
+def _sheet_column_has_nonzero(
+    sheet, column: int, header_end: int | None = None
+) -> bool:
+    header_end = header_end if header_end is not None else _header_end_row(sheet)
+    return any(
+        _is_number(cell.raw_value) and float(cell.raw_value) != 0
+        for row in sheet.rows
+        if row.row_index > header_end
+        for cell in row.cells
+        if cell.column == column
+    )
+
+
+def _sheet_value_column_holds_numbers(
+    sheet, column: int, header_end: int | None = None
+) -> bool:
+    header_end = header_end if header_end is not None else _header_end_row(sheet)
+    return any(
+        _is_number(cell.raw_value)
+        for row in sheet.rows
+        if row.row_index > header_end
+        for cell in row.cells
+        if cell.column == column
+    )
+
+
+def _labelled_column_counts(sheet, header_end: int) -> dict[int, dict[str, int]]:
+    rows = [row for row in sheet.rows if row.row_index > header_end]
+    layout = infer_label_layout(rows)
+    counts: dict[int, dict[str, int]] = {}
+    for row in rows:
+        if select_row_label(row, layout).cell is None:
+            continue
+        for cell in row.cells:
+            if not _is_number(cell.raw_value):
+                continue
+            tally = counts.setdefault(cell.column, {"numeric": 0, "nonzero": 0})
+            tally["numeric"] += 1
+            if float(cell.raw_value) != 0:
+                tally["nonzero"] += 1
+    return counts
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _header_markers(value: str) -> tuple[str, ...]:
+    text = " ".join(value.split())
+    markers = [name for name, pattern in _HEADER_PATTERNS if pattern.search(text)]
+    lowered = text.lower()
+    for match in re.finditer(rf"\b({_MONTHS})\b", lowered, re.I):
+        markers.append(f"month:{_MONTH_NUMBERS[match.group(1)[:3].lower()]:02d}")
+    for match in re.finditer(r"\b(?:19|20)\d{2}\b", text):
+        markers.append(f"year:{match.group(0)}")
+    for match in re.finditer(
+        r"\b(0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])[/.-]((?:19|20)\d{2})\b",
+        text,
+    ):
+        markers.extend((f"month:{int(match.group(1)):02d}", f"year:{match.group(2)}"))
+    for match in re.finditer(
+        r"\b((?:19|20)\d{2})-(0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?=T|\b)",
+        text,
+    ):
+        markers.extend((f"month:{int(match.group(2)):02d}", f"year:{match.group(1)}"))
+    return tuple(dict.fromkeys(markers))
+
+
+def _sheet_header_signature(sheet) -> tuple[Any, ...]:
+    header_end = _header_end_row(sheet)
+    markers: list[tuple[int, tuple[str, ...]]] = []
+    for row in sheet.rows:
+        if row.row_index > header_end:
+            continue
+        for cell in row.cells:
+            text = _text(cell)
+            if not text:
+                continue
+            found = _header_markers(text)
+            if found:
+                markers.append((cell.column, found))
+    merge_markers: list[tuple[int, int, tuple[str, ...]]] = []
+    cells = {
+        (cell.row, cell.column): cell
+        for row in sheet.rows
+        if row.row_index <= header_end
+        for cell in row.cells
+    }
+    for merged in sheet.merged_ranges:
+        if merged.top_left_row > header_end:
+            continue
+        cell = cells.get((merged.top_left_row, merged.top_left_column))
+        text = _text(cell) if cell is not None else None
+        found = _header_markers(text) if text else ()
+        if found:
+            end_column = _merged_end_column(merged.range)
+            merge_markers.append((merged.top_left_column, end_column, found))
+    if not markers and not merge_markers:
+        return ()
+    return tuple(sorted(markers)), tuple(sorted(merge_markers))
+
+
+def _semantic_header_cells(sheet) -> list[dict[str, Any]]:
+    header_end = _header_end_row(sheet)
+    result: list[dict[str, Any]] = []
+    for row in sheet.rows:
+        if row.row_index > header_end:
+            continue
+        for cell in row.cells:
+            text = _text(cell)
+            markers = _header_markers(text) if text else ()
+            if markers:
+                result.append(
+                    {"at": cell.address, "value": text, "markers": list(markers)}
+                )
+    return result[:120]
+
+
+def _column_header_text(sheet, column: int) -> list[str]:
+    header_end = _header_end_row(sheet)
+    values: list[str] = []
+    for row in sheet.rows:
+        if row.row_index > header_end:
+            continue
+        for cell in row.cells:
+            if cell.column != column:
+                continue
+            text = _text(cell)
+            if text and text not in values:
+                values.append(text)
+    for merged in sheet.merged_ranges:
+        if merged.top_left_row > header_end:
+            continue
+        if merged.top_left_column <= column <= _merged_end_column(merged.range):
+            value = str(merged.value or "").strip()
+            if value and value not in values:
+                values.append(value)
+    return values[:12]
+
+
+def _column_scenario_hints(sheet, column: int) -> list[str]:
+    hints: set[str] = set()
+    for value in _column_header_text(sheet, column):
+        hints.update(
+            marker
+            for marker in _header_markers(value)
+            if marker in {"actual", "budget", "forecast", "prior_year"}
+        )
+    return sorted(hints)
+
+
+def _allowed_scenario_hints(period_id: str) -> set[str]:
+    if "_budget" in period_id:
+        return {"budget"}
+    if "_forecast" in period_id:
+        return {"forecast"}
+    return {"actual", "prior_year"}
+
+
+def _merged_end_column(cell_range: str) -> int:
+    end = cell_range.split(":", 1)[-1]
+    letters = "".join(character for character in end if character.isalpha())
+    return _excel_column_number(letters)
+
+
+def _header_end_row(sheet) -> int:
+    """Stop before the first substantive value row, capped for prompt safety."""
+    saw_period_header = False
+    for row in sheet.rows:
+        numeric = [cell for cell in row.cells if _is_number(cell.raw_value)]
+        row_markers = {
+            marker
+            for cell in row.cells
+            if (text := _text(cell))
+            for marker in _header_markers(text)
+        }
+        labelled_value_row = bool(numeric) and any(
+            (text := _text(cell)) and not _header_markers(text)
+            for cell in row.cells
+            if not _is_number(cell.raw_value)
+        )
+        if saw_period_header and (len(numeric) >= 2 or labelled_value_row):
+            return max(1, min(LAYOUT_HEADER_ROWS, row.row_index - 1))
+        saw_period_header = saw_period_header or bool(
+            row_markers
+            & {
+                "actual",
+                "budget",
+                "forecast",
+                "prior_year",
+                "ytd",
+                "ptd",
+                "ttm",
+                "total",
+            }
+            or any(marker.startswith(("month:", "year:")) for marker in row_markers)
+        )
+    return LAYOUT_HEADER_ROWS
 
 
 def _text(cell) -> str | None:

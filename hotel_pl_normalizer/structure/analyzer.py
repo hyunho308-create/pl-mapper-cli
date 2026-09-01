@@ -200,6 +200,7 @@ class WorkbookStructureAnalyzer:
             client=self.client,
             periods=selected_options,
             financial_sheets=routing.included_sheet_names,
+            controlling_summary_sheet=catalog.controlling_summary_sheet,
         )
         selections = binding_to_selection_maps(
             output.structure,

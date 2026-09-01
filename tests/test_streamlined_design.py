@@ -353,7 +353,9 @@ class StreamlinedDesignTests(unittest.TestCase):
             _record(), period_ids=["p1"], financial_sheets=["P&L"]
         )
         names = {item["name"] for item in toolset.declarations()}
-        self.assertIn("submit_bindings", names)
+        self.assertIn("submit_layout_bindings", names)
+        self.assertIn("list_sheet_layouts", names)
+        self.assertNotIn("submit_bindings", names)
         self.assertNotIn("submit_departments", names)
 
         toolset.dispatch("read_rows", {"sheet_name": "P&L", "start_row": 1})

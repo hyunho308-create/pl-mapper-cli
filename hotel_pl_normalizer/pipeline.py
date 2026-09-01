@@ -254,6 +254,30 @@ class _PdfStageSnapshot:
     tool_trace: list[dict] = field(default_factory=list)
 
 
+def _write_pdf_failure(
+    path: Path,
+    exc: Exception,
+    *,
+    client,
+    stage: str,
+) -> None:
+    """Persist paid PDF-stage context before the exception leaves the pipeline."""
+    diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+    diagnostics.setdefault("stage", stage)
+    diagnostics.setdefault(
+        "model_calls", list(getattr(client, "usage_history", []) or [])
+    )
+    diagnostics.setdefault(
+        "tool_trace", list(getattr(client, "last_tool_trace", []) or [])
+    )
+    payload = {
+        "error": f"{type(exc).__name__}: {exc}",
+        **diagnostics,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
 def discover_pdf_periods(
     pdf: Path,
     *,
@@ -276,7 +300,16 @@ def discover_pdf_periods(
         reasoning_effort="medium",
         repair_reasoning_effort="medium",
     )
-    explored = explore_pdf(document, client=client)
+    try:
+        explored = explore_pdf(document, client=client)
+    except Exception as exc:
+        _write_pdf_failure(
+            output_dir / "failure.json",
+            exc,
+            client=client,
+            stage="pdf_period_discovery",
+        )
+        raise
     result = PdfDiscoveryResult(
         document_id=document.document_id,
         file_hash=document.source.file_hash,
@@ -364,7 +397,16 @@ def normalize_pdf(
     if discovery is None:
         if progress:
             progress("Finding financial pages and available periods")
-        exploration = explore_pdf(document, client=structure_client)
+        try:
+            exploration = explore_pdf(document, client=structure_client)
+        except Exception as exc:
+            _write_pdf_failure(
+                structure_dir / "failure.json",
+                exc,
+                client=structure_client,
+                stage="pdf_period_discovery",
+            )
+            raise
     else:
         if (
             document.document_id != discovery.document_id
@@ -394,13 +436,22 @@ def normalize_pdf(
 
     if progress:
         progress("Binding selected periods to displayed PDF amount columns")
-    binding = bind_pdf_periods(
-        document,
-        exploration.structure,
-        client=structure_client,
-        period_ids=requested_ids,
-        cancel=limiter,
-    )
+    try:
+        binding = bind_pdf_periods(
+            document,
+            exploration.structure,
+            client=structure_client,
+            period_ids=requested_ids,
+            cancel=limiter,
+        )
+    except Exception as exc:
+        _write_pdf_failure(
+            structure_dir / "failure.json",
+            exc,
+            client=structure_client,
+            stage="pdf_anchor_binding",
+        )
+        raise
     usable_ids = [
         period_id
         for period_id in requested_ids

@@ -11,6 +11,7 @@ from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.period_selection import PeriodOption
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 
+from .checks import check_bindings
 from .toolset import PeriodBindingToolset
 
 
@@ -33,6 +34,7 @@ def render_binding_prompt(
     *,
     periods: list[PeriodOption],
     financial_sheets: list[str],
+    controlling_summary_sheet: str | None = None,
 ) -> str:
     skill = (
         resources.files("hotel_pl_normalizer.prompts")
@@ -62,7 +64,15 @@ def render_binding_prompt(
             "",
             "The periods a person chose, which you are being asked to bind:"
             f"\n\n{chosen}",
-            "Call `list_sheets` to begin.",
+            (
+                "Discovery's controlling summary is "
+                f"`{controlling_summary_sheet}`. Every selected period was "
+                "confirmed there, so each must have a usable amount-column binding "
+                "on that sheet."
+                if controlling_summary_sheet
+                else ""
+            ),
+            "Call `list_sheet_layouts` to begin.",
         ]
     )
 
@@ -73,6 +83,7 @@ def bind_periods(
     client,
     periods: list[PeriodOption],
     financial_sheets: list[str] | None = None,
+    controlling_summary_sheet: str | None = None,
     max_iterations: int = 80,
     max_reads: int = 120,
     on_activity: Callable[[str], None] | None = None,
@@ -86,12 +97,14 @@ def bind_periods(
         workbook,
         period_ids=period_ids,
         financial_sheets=financial_sheets,
+        controlling_summary_sheet=controlling_summary_sheet,
         max_reads=max_reads,
     )
     prompt = render_binding_prompt(
         workbook.source.original_filename,
         periods=periods,
         financial_sheets=toolset.financial_sheets,
+        controlling_summary_sheet=toolset.controlling_summary_sheet,
     )
     options: dict[str, Any] = {
         "toolset": toolset,
@@ -112,6 +125,36 @@ def bind_periods(
         if salvaged is None:
             raise
         structure = salvaged
+
+    # The tool normally enforces this matrix before accepting a submission, but
+    # keep the stage boundary closed as well.  A provider-returned final object
+    # or an exception salvage must never bypass complete sheet-period coverage.
+    final_check = check_bindings(
+        structure,
+        toolset.sheets,
+        period_ids=period_ids,
+        financial_sheets=toolset.financial_sheets,
+    )
+    if not final_check.accepted:
+        raise RuntimeError(
+            "Period binding failed final deterministic validation: "
+            + " ".join(final_check.rejections)
+        )
+    if controlling_summary_sheet is not None:
+        bound_on_anchor = {
+            item.period_id
+            for item in structure.bindings
+            if item.sheet_name == controlling_summary_sheet
+        }
+        missing_anchor = [
+            period_id for period_id in period_ids if period_id not in bound_on_anchor
+        ]
+        if missing_anchor:
+            raise RuntimeError(
+                "Period binding failed final deterministic validation: discovery "
+                f"confirmed {', '.join(missing_anchor)} on controlling summary "
+                f"{controlling_summary_sheet!r}, but no usable binding survived."
+            )
 
     return BindingOutput(
         structure=structure,

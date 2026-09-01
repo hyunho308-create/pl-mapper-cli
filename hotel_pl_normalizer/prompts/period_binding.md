@@ -19,46 +19,46 @@ If a period looks absent from a sheet, the usual causes, in order of likelihood:
 Only after checking the first should you conclude the second. And when you do,
 mark that **sheet** unavailable for that period. Do not drop the period.
 
-## Answer for every routed sheet, and open every sheet you answer for
+## Answer for every deterministic layout
 
-Two obligations, both enforced. A submission missing either is refused.
+Call `list_sheet_layouts` first. It inspects the header markers on every routed
+sheet and groups sheets only when the same period, scenario, block and metric
+markers occupy the same Excel columns. Sheets without enough evidence remain
+singleton layouts.
 
-1. **Every routed sheet needs an answer for every chosen period** — a column, or
-   an `unavailable` note saying what you saw instead. The list is in the workbook
-   context. Routing already decided these sheets hold P&L
-   content, so silence about one is not an answer, and leaving it out does not
-   make it safe: an unanswered sheet is excluded for that period rather than
-   assigned another sheet's column.
-2. **You cannot answer for a sheet you have not opened.** That includes marking
-   one unavailable — saying a period is *not* on a sheet is as much a claim about
-   its headers as saying which column holds it. A `find_rows` hit does not count;
-   it returns matching cells, not the header block that gives them meaning.
+Return exactly one binding or unavailable outcome for every layout and selected
+period. Python expands the layout choice to every member sheet and then applies
+the existing exact per-sheet verifier. If the chosen column is blank or all zero
+on one member, Python records that member as unavailable instead of forcing a
+false binding.
+
+Use `sheet_bindings` or `sheet_unavailable` only for a verified member exception.
+Do not enumerate ordinary member sheets. The compact submission permits one
+initial answer and at most two repairs.
 
 ### Do it in one or two calls, not twenty
 
-`read_headers` opens **up to twenty sheets in a single call** and gives you the
-top of each with coordinates. That is the intended way to do this phase:
+`list_sheet_layouts` returns representative header cells and candidate column
+profiles for every layout in one call. Usually that is enough. When it is not:
 
-- Call `read_headers` on every routed sheet, in one or two batches.
-- Compare their header blocks side by side. Most workbooks use one convention
-  throughout, so the exceptions are what you are looking for — a tab whose block
-  is shifted a column, or one that carries fewer periods than the rest.
-- Use `read_rows` afterwards for any single sheet whose header sits deeper than
-  the rows you asked for, and `column_stats` where you want to see the figures.
+- Use `read_rows` on the representative sheet when its header sits deeper than
+  the returned semantic cells.
+- Use `column_stats` where you need to distinguish amounts from ratios.
+- Read a named member sheet only before creating a sheet-specific override.
 
-Do not read sheets one at a time and submit after each. Read them all, decide,
-submit once.
+Do not re-list every member sheet in the submission. Decide by layout and submit
+the complete compact answer once.
 
-## Bind per sheet
+## Bind per layout, verify per sheet
 
 One binding per sheet per period, and nothing finer. A column convention belongs
 to the sheet: every department on a tab reads the same columns as every other
 department on it. You never need to say which department a column is for.
 
-**Equivalent periods use different columns on different sheets.** A one-column
-shift between the Summary tab and the department tabs is common. Check each sheet
-against its own header block; never assume two tabs share a convention because
-their columns are near each other.
+**Equivalent periods use different columns in different layouts.** A one-column
+shift between the Summary tab and department tabs creates separate deterministic
+layouts. Never transfer a column choice between layout IDs merely because the
+columns are near each other.
 
 The chosen-period list includes canonical scenario and inclusive month coverage from
 discovery. Match the economic period, not the exact wording of its header. A
@@ -169,4 +169,4 @@ An unavailable sheet is not a failure. The run continues, your reason is
 recorded, and that sheet contributes no value for that period. **One sheet
 lacking one period is never a reason to abandon the others.**
 
-Then call `submit_bindings`.
+Then call `submit_layout_bindings`.
