@@ -231,6 +231,23 @@ def test_model_tab_venue_labels_point_at_the_venue_column(tmp_path):
     assert book["KHP Model Accounts"]["B40"].value == "=COA!Y86"
 
 
+def test_model_tab_preserves_authored_label_indentation(tmp_path):
+    ids = canonical_ids()
+    result = build_result(coa={i: {} for i in ids})
+
+    model = load_workbook(
+        write_normalized_workbook(result, tmp_path / "o.xlsx")
+    )["KHP Model Accounts"]
+
+    assert model["B36"].alignment.indent == 2
+    assert model["B38"].alignment.indent == 5
+    assert model["B66"].alignment.indent == 8
+    assert sum(
+        bool(model.cell(row=row, column=2).alignment.indent)
+        for row in range(2, model.max_row + 1)
+    ) == 172
+
+
 def test_mapped_labels_show_sources_and_exclusions(tmp_path):
     ids = canonical_ids()
     target = "S2.venue1_food_revenue"
@@ -386,8 +403,8 @@ def test_review_items_attach_to_their_accounts(tmp_path):
     sheet = book["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
-    assert note in (None, "")
-    assert "Contract labor sits inside the salary subtotal." in book["Run Notes"]["C9"].value
+    assert note == "Mapping treatment: Contract labor sits inside the salary subtotal."
+    assert "Contract labor sits inside the salary subtotal." not in book["Run Notes"]["C9"].value
 
 
 def test_review_item_is_displayed_once_on_summary_account(tmp_path):
@@ -416,12 +433,12 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(detail), column=FEEDBACK_COL
     ).value
 
-    assert message in book["Run Notes"]["C9"].value
-    assert message not in (summary_note or "")
+    assert message not in book["Run Notes"]["C9"].value
+    assert message in (summary_note or "")
     assert message not in (detail_note or "")
 
 
-def test_review_items_hide_internal_ids_and_source_rows(tmp_path):
+def test_review_items_hide_internal_ids_but_keep_readable_source_rows(tmp_path):
     ids = canonical_ids()
     target = "S12.total_sales_and_marketing_expenses"
     result = build_result(
@@ -446,11 +463,11 @@ def test_review_items_hide_internal_ids_and_source_rows(tmp_path):
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
     run_note = book["Run Notes"]["C9"].value
 
-    assert note in (None, "")
-    assert "Rooms!40" not in run_note
-    assert "S12." not in run_note
-    assert "no_value" not in run_note
-    assert "left blank" in run_note
+    assert "Rooms row 40" in note
+    assert "S12." not in note
+    assert "no_value" not in note
+    assert "left blank" in note
+    assert "Franchise Fees" not in run_note
 
 
 def test_per_period_checks_name_their_period(tmp_path):
@@ -687,9 +704,8 @@ def test_all_model_feedback_numbers_are_rounded_to_whole_numbers(tmp_path):
 
     assert "1,652" in note
     assert "$" not in note
-    run_note = book["Run Notes"]["C9"].value
-    assert "-713,193" in run_note
-    assert "8%" in run_note
+    assert "-713,193" in note
+    assert "8%" in note
     assert ".03" not in note
     assert ".41" not in note
     assert "7.5%" not in note

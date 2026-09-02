@@ -26,9 +26,9 @@ formula, all 139 of them.
 
 **Say which lines to check.** Accuracy runs ~95%, and the honest move is to mark
 the risky lines rather than present every number with equal confidence. Model
-Feedback carries actionable account-level exceptions. Routine conventions and
-aggregate completeness information live on Run Notes; full detail remains in
-the run log.
+Feedback carries actionable account-level exceptions and nonstandard mapping
+treatments beside the affected COA account. Aggregate completeness information
+lives on Run Notes; full detail remains in the run log.
 """
 
 from __future__ import annotations
@@ -466,20 +466,17 @@ def _describe_check(check) -> tuple[str, str, str]:
 
 
 def _clean_feedback_message(message: str, coa: dict[str, dict]) -> str:
-    """Remove implementation details from model-written reviewer messages."""
+    """Make model-written reviewer messages readable without losing provenance."""
     text = str(message).strip()
     for coa_id in sorted(coa, key=len, reverse=True):
         account_name = str(coa.get(coa_id, {}).get("account_name") or "").strip()
         replacement = account_name or coa_id.split(".", 1)[-1].replace("_", " ")
         text = text.replace(coa_id, replacement)
-    text = re.sub(
-        r"\s*\([^)]*(?:\brow\s+\d+\b|\b[\w&.-]+!\d+\b)[^)]*\)",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"\b[\w&.-]+!\d+\b", "", text)
-    text = re.sub(r"\brow\s+\d+\b", "", text, flags=re.IGNORECASE)
+    # Source references are meaningful evidence, not implementation noise.
+    # Deleting them corrupted messages such as "Outlet1!35 and
+    # RoomService!35 are combined allowances" into "and are combined...".
+    # Keep the reference but spell it in analyst-friendly language.
+    text = re.sub(r"\b([\w&.-]+)!(\d+)\b", r"\1 row \2", text)
     text = text.replace("no_value", "left blank")
     text = re.sub(
         r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b",
@@ -668,11 +665,6 @@ def _feedback(
         if not message:
             continue
         kind = str(_field(item, "kind", "") or "")
-        if kind == "unusual_convention":
-            orphans.append(
-                f"Mapping convention: {_round_feedback_numbers(message)}"
-            )
-            continue
         if kind in {"source_discrepancy", "scope_exception"} and any(
             coa_id in deterministic_review_targets
             for coa_id in (_field(item, "coa_ids", []) or [])
@@ -689,6 +681,8 @@ def _feedback(
             if kind == "scope_exception"
             else "Source difference"
             if kind == "source_discrepancy"
+            else "Mapping treatment"
+            if kind == "unusual_convention"
             else "Review"
         )
         rendered = f"{prefix}: {message}" if kind else message
@@ -1039,19 +1033,7 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     incomplete = list(dict.fromkeys(
         note for note in orphans if note.startswith("Mapping incomplete:")
     ))
-    conventions = list(dict.fromkeys(
-        note.removeprefix("Mapping convention: ")
-        for note in orphans
-        if note.startswith("Mapping convention: ")
-    ))
     note_lines.extend(incomplete)
-    if conventions:
-        note_lines.append(f"Mapping conventions ({len(conventions)}):")
-        note_lines.extend(f"• {message}" for message in conventions[:8])
-        if len(conventions) > 8:
-            note_lines.append(
-                f"• {len(conventions) - 8} more convention(s) retained in the run log."
-            )
     label_cell = sheet.cell(row=9, column=2, value="Notes")
     label_cell._style = copy(sheet.cell(row=8, column=2)._style)
     label_cell.alignment = Alignment(horizontal="left", vertical="bottom")
