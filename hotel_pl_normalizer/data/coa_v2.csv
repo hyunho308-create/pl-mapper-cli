@@ -30,8 +30,8 @@ Summary,S12.insurance,Insurance,,,FALSE,,
 Summary,S12.other,Other Non-Operating Expenses,,,FALSE,,
 Summary,S12.total_non_operating_income_and_expenses,Total Non-Operating Income and Expenses,,,FALSE,,
 Summary,S12.ebitda,EBITDA,,,FALSE,,
-Summary,S12.ffe_reserve,FF&E Reserve,,,FALSE,Do not invent when absent or zero.,replacement reserve|furniture fixtures and equipment reserve
-Summary,S12.noi,EBITDA Less Replacement Reserve (NOI),,,FALSE,Do not invent when absent or zero.,net operating income|EBITDA less replacement reserve
+Summary,S12.ffe_reserve,FF&E Reserve,,,FALSE,Calculated deterministically as 4% of Total Revenue.,replacement reserve|furniture fixtures and equipment reserve
+Summary,S12.noi,EBITDA Less Replacement Reserve (NOI),,,FALSE,Calculated deterministically as EBITDA less FF&E Reserve.,net operating income|EBITDA less replacement reserve
 Rooms,S1.discount,Discount,Total Rooms Revenue > Transient Rooms Revenue > Discount,S1.transient_rooms_revenue,FALSE,Rate segments only; exclude rebates and ancillary revenue.,promotional rate | opaque rate | package rate
 Rooms,S1.negotiated,Negotiated,Total Rooms Revenue > Transient Rooms Revenue > Negotiated,S1.transient_rooms_revenue,FALSE,Requires negotiated or corporate-rate evidence.,LNR | locally negotiated rate | special corporate
 Rooms,S1.qualified,Qualified,Total Rooms Revenue > Transient Rooms Revenue > Qualified,S1.transient_rooms_revenue,FALSE,Government transient maps here; government group maps to Government.,government transient | AAA | loyalty redemptions

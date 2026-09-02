@@ -10,6 +10,10 @@ Choose classifications, source rows, and operations. You may reason with values,
 but do not invent values or numeric plugs. Python reads the cited cells and
 performs all authoritative arithmetic and validation.
 
+Do not map `S12.ffe_reserve` or `S12.noi`. They are absent from the mapper's COA
+decision list because Python always calculates FF&E Reserve as 4% of Total
+Revenue and NOI as EBITDA less that calculated reserve. Map through EBITDA only.
+
 ## Inspect First
 
 Before assigning detailed COA accounts:
@@ -87,6 +91,10 @@ and supporting `source_rows`. Apply it only to the cited structure:
 
 Return one source-row plan that applies to every selected period. Differences in
 period values do not change the row classification.
+When the same source label appears on a period-complete schedule and a
+current-only schedule with matching overlapping values, use the period-complete
+row. Python blocks a selection that leaves a requested period blank when an
+equivalent same-label row demonstrably supplies it.
 
 Keep source layers independent. Map Summary evidence to S12 and department
 evidence to its corresponding S1-S11 section. Never populate a Summary account
@@ -297,6 +305,11 @@ missing or misplaced detail. If it remains at final presentation, Python assigns
 the difference to the residual and warns the user; never invent rows or detail
 to reduce it.
 
+A residual produced by subtracting children from a subtotal is still an
+unsupported remainder even though the arithmetic is exact. Python discloses it
+when it is at least 10,000 or at least 5% of the parent. Prefer directly
+identified residual source rows whenever they exist.
+
 Without a legitimate residual, retain all positively supported children during
 repair and keep searching the source for additional usable detail. Set the
 parent's `child_coverage` to `not_present` only when the source contains no usable
@@ -353,6 +366,11 @@ Use `review_items` to prevent silent guessing and flag material oddities:
   used by the mapping in
   `selected_source_rows` and every row in the unused comparison layer in
   `alternate_source_rows` so Python can calculate and report both values.
+  Also provide `selected_source_operation` and `alternate_source_operation` as
+  `direct`, `sum`, `adjusted_subtotal`, or `negate`, plus the corresponding
+  selected or alternate excluded rows for `adjusted_subtotal`. The two typed
+  equations must be disjoint and the selected equation must equal the mapped
+  target.
   Review any proposed offset rows
   using their labels and
   surrounding structure; do not use a numerical near-match from another
@@ -371,8 +389,14 @@ basis. If no consistent controlling hierarchy can be supported, add one
 `ambiguity` item describing the competing bases; do not use multiple exception
 items to make an unstable workbook look accepted.
 
-`ambiguity` and `scope_exception` are blocking outcomes: use them only when the
-mapping cannot be resolved from available evidence and a person must decide.
+`ambiguity` is blocking. For `scope_exception`, set
+`requires_human_decision=true` only when including versus excluding the material
+schedule cannot be resolved from the workbook and a person must decide. A
+strongly supported exclusion uses `requires_human_decision=false`; it is
+accepted with a visible scope warning. Do not describe an excluded entity or
+other scope decision as a duplicate or supporting schedule. Reserve
+`duplicate_or_supporting_schedules` for a genuine duplicate with an identified
+controlling replacement.
 Do not label a quantified conflict between a chosen source layer and an
 alternative reported subtotal as merely `unusual_convention`; use
 `source_discrepancy` even when the chosen layer reconciles the final mapping.

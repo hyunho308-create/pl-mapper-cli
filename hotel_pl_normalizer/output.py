@@ -26,8 +26,9 @@ formula, all 139 of them.
 
 **Say which lines to check.** Accuracy runs ~95%, and the honest move is to mark
 the risky lines rather than present every number with equal confidence. Model
-Feedback carries validation checks, mapper review items, and accounts nothing
-mapped to, per account. Run Notes stays a compact summary of the completed job.
+Feedback carries actionable account-level exceptions. Routine conventions and
+aggregate completeness information live on Run Notes; full detail remains in
+the run log.
 """
 
 from __future__ import annotations
@@ -47,7 +48,10 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.views import Selection
 
 from hotel_pl_normalizer.atomic import replace_atomically
-from hotel_pl_normalizer.mapping import GENERIC_VENUE_SLOTS
+from hotel_pl_normalizer.mapping import (
+    DETERMINISTIC_SUMMARY_CALCULATIONS,
+    GENERIC_VENUE_SLOTS,
+)
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -416,6 +420,25 @@ def _describe_check(check) -> tuple[str, str, str]:
             )
         except ValueError:
             rendered = "A material remaining difference was assigned to the all-other account."
+    elif rule == "unsupported_residual_remainder":
+        try:
+            remainder = abs(float(details.get("remainder", "")))
+            ratio = float(details.get("ratio", ""))
+            rendered = (
+                f"Coverage gap: {_money(remainder)} ({ratio:.1%} of the parent) "
+                "is a calculated all-other remainder rather than identified source detail."
+            )
+        except ValueError:
+            rendered = "Coverage gap: a material all-other amount is an unsupported calculated remainder."
+    elif rule == "scope_exclusion":
+        rendered = f"Scope note: {details.get('message', 'A material schedule was excluded from the mapping scope.')}"
+    elif rule == "period_detail_available":
+        rendered = (
+            "An equivalent source row supplies selected-period "
+            "detail that the chosen row leaves blank."
+        )
+    elif rule == "invalid_source_layer_comparison":
+        rendered = "The selected-versus-alternate source comparison is not mathematically valid."
     elif rule == "coverage_inconsistent":
         rendered = "The selected child detail conflicts with the stated parent coverage."
     elif rule == "parent_no_value_with_children":
@@ -484,6 +507,63 @@ def _round_feedback_numbers(message: str) -> str:
     return rounded.replace("$", "")
 
 
+def _check_rule_and_details(check) -> tuple[str, dict[str, str]]:
+    parts = [part for part in str(check).split("|") if part != ""]
+    rule = parts[1] if len(parts) > 1 else ""
+    details = {
+        key.strip(): value.strip()
+        for part in parts[3:]
+        if "=" in part
+        for key, value in [part.split("=", 1)]
+    }
+    return rule, details
+
+
+def _compact_period_feedback(rule, entries) -> str:
+    values = []
+    for label, _rendered, details in entries:
+        if rule in {
+            "hierarchy_complete",
+            "source_detail_incomplete",
+            "hierarchy_partial_with_residual",
+        }:
+            try:
+                difference = float(details["children"]) - float(details["parent"])
+                relation = "above" if difference > 0 else "below"
+                values.append(f"{label}: {abs(difference):,.0f} {relation}")
+            except (KeyError, ValueError):
+                values.append(label)
+        elif rule in {
+            "source_layer_conflict",
+            "source_discrepancy",
+            "source_presentation_exception",
+            "summary_department",
+            "summary_math",
+        }:
+            try:
+                values.append(f"{label}: {float(details['variance']):+,.0f}")
+            except (KeyError, ValueError):
+                values.append(label)
+        else:
+            return "\n".join(f"{label} — {rendered}" for label, rendered, _ in entries)
+    prefix = (
+        "Coverage gap: child accounts versus parent"
+        if rule in {
+            "hierarchy_complete",
+            "source_detail_incomplete",
+            "hierarchy_partial_with_residual",
+        }
+        else "Source difference"
+        if rule in {
+            "source_layer_conflict",
+            "source_discrepancy",
+            "source_presentation_exception",
+        }
+        else "Needs review: validation difference"
+    )
+    return f"{prefix} — {'; '.join(values)}."
+
+
 def _feedback(
     result: NormalizationResult,
     known_ids: set[str],
@@ -495,21 +575,85 @@ def _feedback(
     multi = len(periods) > 1
     labels = {period_id: label for period_id, label, _ in periods}
 
-    grouped_checks: dict[tuple[str, str, str], list[str]] = {}
+    check_records = []
     checks_by_period = result.checks_by_period or {
         periods[0][0]: list(result.checks or [])
     }
     for period_id, period_checks in checks_by_period.items():
         for check in period_checks:
             severity, target, rendered = _describe_check(check)
-            grouped_checks.setdefault((severity, target, rendered), []).append(
-                labels[period_id]
+            rule, details = _check_rule_and_details(check)
+            check_records.append(
+                {
+                    "period_id": period_id,
+                    "label": labels[period_id],
+                    "severity": severity,
+                    "target": target,
+                    "rule": rule,
+                    "details": details,
+                    "rendered": rendered,
+                }
             )
-    for (severity, target, rendered), affected_labels in grouped_checks.items():
+
+    source_priority = {
+        "source_discrepancy": 0,
+        "source_presentation_exception": 1,
+        "source_layer_conflict": 2,
+    }
+    source_fingerprints = set()
+    deduped_records = []
+    for record in sorted(
+        check_records,
+        key=lambda item: source_priority.get(item["rule"], 99),
+    ):
+        fingerprint = None
+        if record["rule"] in source_priority:
+            try:
+                fingerprint = (
+                    record["period_id"],
+                    record["target"],
+                    round(abs(float(record["details"]["variance"])), 2),
+                )
+            except (KeyError, ValueError):
+                pass
+        if fingerprint is not None and fingerprint in source_fingerprints:
+            continue
+        if fingerprint is not None:
+            source_fingerprints.add(fingerprint)
+        deduped_records.append(record)
+
+    grouped_checks: dict[tuple[str, str, str, str], list[dict]] = {}
+    for record in deduped_records:
+        shape = re.sub(
+            r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?%?",
+            "<n>",
+            record["rendered"],
+        )
+        grouped_checks.setdefault(
+            (record["severity"], record["rule"], record["target"], shape),
+            [],
+        ).append(record)
+    deterministic_review_targets = {
+        record["target"]
+        for record in deduped_records
+        if record["rule"] in set(source_priority) | {"scope_exclusion"}
+    }
+    for (severity, rule, target, _shape), records in grouped_checks.items():
+        rendered = records[0]["rendered"]
+        affected_labels = list(dict.fromkeys(record["label"] for record in records))
         prefix = ""
-        if multi and len(affected_labels) < len(periods):
-            prefix = f"{', '.join(affected_labels)} — "
-        line = f"{prefix}{rendered}"
+        if len(records) > 1 and len(affected_labels) > 1:
+            line = _compact_period_feedback(
+                rule,
+                [
+                    (record["label"], record["rendered"], record["details"])
+                    for record in records
+                ],
+            )
+        else:
+            if multi and len(affected_labels) < len(periods):
+                prefix = f"{', '.join(affected_labels)} — "
+            line = f"{prefix}{rendered}"
         if target in known_ids:
             by_account.setdefault(target, []).append(
                 (SEVERITY_ORDER.get(severity, 2), line)
@@ -524,7 +668,29 @@ def _feedback(
         if not message:
             continue
         kind = str(_field(item, "kind", "") or "")
-        prefix = "Ambiguity" if kind == "ambiguity" else "Unusual presentation"
+        if kind == "unusual_convention":
+            orphans.append(
+                f"Mapping convention: {_round_feedback_numbers(message)}"
+            )
+            continue
+        if kind in {"source_discrepancy", "scope_exception"} and any(
+            coa_id in deterministic_review_targets
+            for coa_id in (_field(item, "coa_ids", []) or [])
+        ):
+            continue
+        prefix = (
+            "Review"
+            if kind == "ambiguity"
+            else "Scope decision"
+            if kind == "scope_exception" and _field(
+                item, "requires_human_decision", False
+            )
+            else "Scope note"
+            if kind == "scope_exception"
+            else "Source difference"
+            if kind == "source_discrepancy"
+            else "Review"
+        )
         rendered = f"{prefix}: {message}" if kind else message
         targets = [
             coa_id
@@ -548,6 +714,17 @@ def _feedback(
     for period_id, issues in (result.execution_issues_by_period or {}).items():
         prefix = f"{labels.get(period_id, period_id)} — " if multi else ""
         orphans.extend(f"{prefix}{issue}" for issue in issues or [])
+
+    decided = {
+        str(_field(decision, "coa_id", ""))
+        for decision in result.decisions or []
+    }
+    deterministic = set(DETERMINISTIC_SUMMARY_CALCULATIONS)
+    missing_count = len(known_ids - deterministic - decided)
+    if missing_count and (not result.accepted or bool(result.decisions)):
+        orphans.append(
+            f"Mapping incomplete: {missing_count} COA accounts have no submitted mapping decision."
+        )
 
     return by_account, orphans
 
@@ -665,6 +842,11 @@ def _mapped_from(
     if residual_plug is not None:
         lines.append(f"Residual plug: {_source_value(residual_plug, coa_id)}")
     return "\n".join(dict.fromkeys(lines))[:32_000]
+
+
+def _deterministic_mapped_label(coa_id: str) -> str | None:
+    calculation = DETERMINISTIC_SUMMARY_CALCULATIONS.get(coa_id)
+    return str(calculation["mapped_label"]) if calculation else None
 
 
 def _inferred_venue_name(decision, evidence_by_key: dict[str, dict]) -> str:
@@ -827,7 +1009,8 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         7: int(result.mapped_account_count),
         8: (
             "Every value is calculated by code from cited source rows; "
-            "model-generated numbers are not used."
+            "model-generated numbers are not used. FF&E Reserve is 4% of "
+            "Total Revenue and NOI is EBITDA less that reserve."
         ),
     }
     labels = {
@@ -850,9 +1033,25 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         if row_number == 7:
             detail_cell.number_format = "0"
         if row_number == 8:
-            sheet.row_dimensions[row_number].height = 14.5
+            sheet.row_dimensions[row_number].height = 30.0
 
     note_lines = _run_note_mismatches(result, periods)
+    incomplete = list(dict.fromkeys(
+        note for note in orphans if note.startswith("Mapping incomplete:")
+    ))
+    conventions = list(dict.fromkeys(
+        note.removeprefix("Mapping convention: ")
+        for note in orphans
+        if note.startswith("Mapping convention: ")
+    ))
+    note_lines.extend(incomplete)
+    if conventions:
+        note_lines.append(f"Mapping conventions ({len(conventions)}):")
+        note_lines.extend(f"• {message}" for message in conventions[:8])
+        if len(conventions) > 8:
+            note_lines.append(
+                f"• {len(conventions) - 8} more convention(s) retained in the run log."
+            )
     label_cell = sheet.cell(row=9, column=2, value="Notes")
     label_cell._style = copy(sheet.cell(row=8, column=2)._style)
     label_cell.alignment = Alignment(horizontal="left", vertical="bottom")
@@ -990,20 +1189,21 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
             row=row,
             column=LABELS_COL,
             value=(
-                _mapped_from(
-                    decision,
-                    evidence_by_key,
-                    mapped_label_period,
-                    residual_plug=residual_plug,
+                _deterministic_mapped_label(coa_id)
+                or (
+                    _mapped_from(
+                        decision,
+                        evidence_by_key,
+                        mapped_label_period,
+                        residual_plug=residual_plug,
+                    )
+                    if decision
+                    else None
                 )
-                if decision
-                else None
             ),
         )
 
         notes = list(feedback.get(coa_id, []))
-        if decision is None:
-            notes.append((3, "No source found — nothing mapped to this account."))
         if notes:
             ordered = [
                 _round_feedback_numbers(text)

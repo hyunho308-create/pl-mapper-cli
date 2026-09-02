@@ -29,6 +29,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hotel_pl_normalizer.mapping import DETERMINISTIC_SUMMARY_CALCULATIONS
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
 LOG_VERSION = 3
@@ -130,7 +131,39 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
             }
         )
 
-    mapped = {str(getattr(d, "coa_id", "")) for d in result.decisions}
+    calculated = {
+        coa_id: calculation
+        for coa_id, calculation in DETERMINISTIC_SUMMARY_CALCULATIONS.items()
+        if coa_id in result.coa
+    }
+    for coa_id, calculation in calculated.items():
+        meta = result.coa[coa_id]
+        accounts.append(
+            {
+                "coa_id": coa_id,
+                "account_name": meta.get("account_name"),
+                "department": meta.get("department"),
+                "computed_value": result.values.get(coa_id),
+                "computed_values": {
+                    period_id: values.get(coa_id)
+                    for period_id, values in period_values.items()
+                },
+                "operation": "calculated",
+                "formula": calculation["formula"],
+                "dependencies": list(calculation["dependencies"]),
+                "scale_factor": None,
+                "child_coverage": "not_applicable",
+                "venue_name": None,
+                "rationale": calculation["mapped_label"],
+                "residual_plugs": {},
+                "source_rows": [],
+                "excluded_rows": [],
+            }
+        )
+
+    mapped = {
+        str(getattr(decision, "coa_id", "")) for decision in result.decisions
+    } | set(calculated)
     unmapped = [
         {"coa_id": coa_id, "account_name": meta.get("account_name")}
         for coa_id, meta in result.coa.items()
@@ -155,6 +188,7 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
             "accounts_in_chart": len(result.coa),
             "accounts_populated": result.mapped_account_count,
             "accounts_with_a_decision": len(result.decisions),
+            "accounts_calculated_deterministically": len(calculated),
             "accounts_without_a_decision": len(unmapped),
             "checks_raised": len(result.checks),
             "execution_issues": len(result.execution_issues),

@@ -67,6 +67,27 @@ def test_derived_summary_mapped_label_explains_coa_rollup():
     ) == "Derived from mapped department accounts."
 
 
+def test_deterministic_ffe_and_noi_labels_need_no_model_decisions(tmp_path):
+    ids = canonical_ids()
+    result = build_result(
+        coa={i: {} for i in ids},
+        values={"S12.ffe_reserve": 40.0, "S12.noi": 110.0},
+    )
+
+    sheet = load_workbook(
+        write_normalized_workbook(result, tmp_path / "o.xlsx")
+    )["COA"]
+
+    assert sheet.cell(
+        row=FIRST_ACCOUNT_ROW + ids.index("S12.ffe_reserve"),
+        column=LABELS_COL,
+    ).value == "Calculated: 4% of Total Revenue."
+    assert sheet.cell(
+        row=FIRST_ACCOUNT_ROW + ids.index("S12.noi"),
+        column=LABELS_COL,
+    ).value == "Calculated: EBITDA less FF&E Reserve."
+
+
 def test_coa_tab_carries_every_account_in_canonical_order(tmp_path):
     """The guarantee the whole model tab rests on."""
     ids = canonical_ids()
@@ -361,11 +382,12 @@ def test_review_items_attach_to_their_accounts(tmp_path):
         ],
     )
 
-    sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    sheet = book["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
-    assert "Unusual presentation" in note
-    assert "Contract labor sits inside the salary subtotal." in note
+    assert note in (None, "")
+    assert "Contract labor sits inside the salary subtotal." in book["Run Notes"]["C9"].value
 
 
 def test_review_item_is_displayed_once_on_summary_account(tmp_path):
@@ -385,7 +407,8 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         ],
     )
 
-    sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    sheet = book["COA"]
     summary_note = sheet.cell(
         row=FIRST_ACCOUNT_ROW + ids.index(summary), column=FEEDBACK_COL
     ).value
@@ -393,7 +416,8 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(detail), column=FEEDBACK_COL
     ).value
 
-    assert message in summary_note
+    assert message in book["Run Notes"]["C9"].value
+    assert message not in (summary_note or "")
     assert message not in (detail_note or "")
 
 
@@ -417,13 +441,16 @@ def test_review_items_hide_internal_ids_and_source_rows(tmp_path):
             }
         ],
     )
-    sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    sheet = book["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
+    run_note = book["Run Notes"]["C9"].value
 
-    assert "Rooms!40" not in note
-    assert "S12." not in note
-    assert "no_value" not in note
-    assert "left blank" in note
+    assert note in (None, "")
+    assert "Rooms!40" not in run_note
+    assert "S12." not in run_note
+    assert "no_value" not in run_note
+    assert "left blank" in run_note
 
 
 def test_per_period_checks_name_their_period(tmp_path):
@@ -446,6 +473,65 @@ def test_per_period_checks_name_their_period(tmp_path):
 
     assert note.startswith("2024 YTD — ")
     assert "Rollup warning: Child accounts are 20 less than the parent account." in note
+
+
+def test_repeated_period_rollups_are_combined_into_one_feedback_line(tmp_path):
+    ids = canonical_ids()
+    target = "S1.total_rooms_expenses"
+    result = build_result(
+        coa={i: {} for i in ids},
+        period_labels={"cur": "2025 Actual", "pri": "2024 Actual"},
+        period_values={"cur": {}, "pri": {}},
+        checks_by_period={
+            "cur": [
+                f"warning|source_detail_incomplete|{target}|"
+                "parent=100.00|children=80.00|variance=20.00"
+            ],
+            "pri": [
+                f"warning|source_detail_incomplete|{target}|"
+                "parent=90.00|children=75.00|variance=15.00"
+            ],
+        },
+    )
+
+    sheet = load_workbook(
+        write_normalized_workbook(result, tmp_path / "o.xlsx")
+    )["COA"]
+    note = sheet.cell(
+        row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL
+    ).value
+
+    assert note == (
+        "Coverage gap: child accounts versus parent — "
+        "2025 Actual: 20 below; 2024 Actual: 15 below."
+    )
+
+
+def test_missing_decisions_are_summarized_in_run_notes_not_every_account(tmp_path):
+    ids = canonical_ids()
+    target = ids[0]
+    result = build_result(
+        coa={i: {} for i in ids},
+        decisions=[
+            SimpleNamespace(
+                coa_id=target,
+                operation="no_value",
+                source_rows=[],
+                excluded_rows=[],
+                venue_name=None,
+            )
+        ],
+        accepted=False,
+    )
+
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    feedback = [
+        book["COA"].cell(row=FIRST_ACCOUNT_ROW + index, column=FEEDBACK_COL).value
+        for index in range(len(ids))
+    ]
+
+    assert all("No source found" not in str(value or "") for value in feedback)
+    assert "COA accounts have no submitted mapping decision" in book["Run Notes"]["C9"].value
 
 
 def test_residual_plug_is_shown_in_mapped_labels(tmp_path):
@@ -593,15 +679,17 @@ def test_all_model_feedback_numbers_are_rounded_to_whole_numbers(tmp_path):
         ],
     )
 
-    sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    sheet = book["COA"]
     note = sheet.cell(
         row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL
     ).value
 
     assert "1,652" in note
     assert "$" not in note
-    assert "-713,193" in note
-    assert "8%" in note
+    run_note = book["Run Notes"]["C9"].value
+    assert "-713,193" in run_note
+    assert "8%" in run_note
     assert ".03" not in note
     assert ".41" not in note
     assert "7.5%" not in note
@@ -692,7 +780,7 @@ def test_run_notes_uses_the_approved_template_format(tmp_path):
     assert notes["C7"].number_format == "0"
     assert notes["C7"].alignment.horizontal == "left"
     assert notes["B8"].value == "Calculation policy"
-    assert notes.row_dimensions[8].height == 14.5
+    assert notes.row_dimensions[8].height == 30.0
     assert notes["B9"].value == "Notes"
     assert notes["C9"].value.splitlines() == [
         "No summary math errors",
@@ -776,6 +864,7 @@ def test_run_notes_summarizes_final_validation_and_review_counts(tmp_path):
         "No summary math errors",
         "No summary-to-department errors",
         "No material rollup warnings",
+        "Mapping incomplete: 269 COA accounts have no submitted mapping decision.",
     ]
 
 

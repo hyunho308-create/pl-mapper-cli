@@ -7,16 +7,23 @@ from hotel_pl_normalizer.mapping.mapper import (
     MappingOutcome,
     MappingReviewItem,
     SourceOperation,
+    SourceLayerOperation,
     WorkbookMappingValidator,
     WorkbookSourcePlan,
     WorkbookStrategy,
     _outcome_from_result,
+    _execute,
+    _period_completeness_issues,
     _review_item_blockers,
+    _review_item_warnings,
     _same_blocking_conflicts,
     _source_layer_conflict_warnings,
     _structured_exceptions,
+    _unsupported_residual_remainder_warnings,
     _validation_score,
 )
+from hotel_pl_normalizer.pipeline import NormalizationResult
+from hotel_pl_normalizer.run_log import build_run_log
 
 
 class MappingOutcomeTests(unittest.TestCase):
@@ -99,6 +106,7 @@ class MappingOutcomeTests(unittest.TestCase):
             kind="scope_exception",
             message="Operator direction is required before including this item.",
             coa_ids=["S11.other"],
+            requires_human_decision=True,
         )
 
         blockers = _review_item_blockers([review])
@@ -109,6 +117,27 @@ class MappingOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome, MappingOutcome.SCOPE_EXCEPTION)
         self.assertEqual(len(blockers), 1)
         self.assertIn("error|scope_exception|S11.other|", blockers[0])
+
+    def test_supported_scope_exclusion_warns_without_blocking(self) -> None:
+        review = MappingReviewItem(
+            kind="scope_exception",
+            message="The club statement is a separately reported entity.",
+            coa_ids=["S11.other"],
+            source_rows=["Club!10"],
+            requires_human_decision=False,
+        )
+
+        self.assertEqual(_review_item_blockers([review]), [])
+        warnings = _review_item_warnings([review])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("warning|scope_exclusion|S11.other|", warnings[0])
+        self.assertEqual(
+            _outcome_from_result(
+                {"accepted": True, "errors": [], "warnings": warnings},
+                [review],
+            ),
+            MappingOutcome.SOURCE_EXCEPTION,
+        )
 
     def test_source_exception_does_not_consume_coverage_cleanup_turn(self) -> None:
         validator = WorkbookMappingValidator("wb", [], {})
@@ -252,6 +281,8 @@ class MappingOutcomeTests(unittest.TestCase):
                     ],
                     selected_source_rows=["NonOp!10", "NonOp!11"],
                     alternate_source_rows=["NonOp!20", "NonOp!21"],
+                    selected_source_operation=SourceLayerOperation.SUM,
+                    alternate_source_operation=SourceLayerOperation.SUM,
                 )
             ],
         )
@@ -269,6 +300,161 @@ class MappingOutcomeTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("warning|source_layer_conflict|", warnings[0])
         self.assertIn("actual=100.0000|expected=125.0000|variance=-25.0000", warnings[0])
+
+    def test_ffe_and_noi_are_calculated_without_model_decisions(self) -> None:
+        coa = {
+            "S12.total_revenue": {},
+            "S12.ebitda": {},
+            "S12.ffe_reserve": {},
+            "S12.noi": {},
+        }
+        decisions = [
+            AccountSourceDecision(
+                coa_id="S12.total_revenue",
+                operation=SourceOperation.DIRECT,
+                source_rows=["Summary!10"],
+            ),
+            AccountSourceDecision(
+                coa_id="S12.ebitda",
+                operation=SourceOperation.DIRECT,
+                source_rows=["Summary!20"],
+            ),
+        ]
+        evidence = [
+            {"row_key": "Summary!10", "selected_values": {"actual": 1_000_000}},
+            {"row_key": "Summary!20", "selected_values": {"actual": 150_000}},
+        ]
+
+        values, issues = _execute(
+            decisions,
+            evidence,
+            coa,
+            period_id="actual",
+            preserve_blanks=True,
+        )
+
+        self.assertEqual(issues, [])
+        self.assertEqual(values["S12.ffe_reserve"], 40_000)
+        self.assertEqual(values["S12.noi"], 110_000)
+
+    def test_run_log_records_deterministic_accounts_as_calculations(self) -> None:
+        coa = {
+            "S12.total_revenue": {"account_name": "Total Revenue"},
+            "S12.ebitda": {"account_name": "EBITDA"},
+            "S12.ffe_reserve": {"account_name": "FF&E Reserve"},
+            "S12.noi": {"account_name": "NOI"},
+        }
+        values = {
+            "S12.total_revenue": 1_000_000.0,
+            "S12.ebitda": 150_000.0,
+            "S12.ffe_reserve": 40_000.0,
+            "S12.noi": 110_000.0,
+        }
+        result = NormalizationResult(
+            workbook_id="wb",
+            source_name="Hotel.xlsx",
+            period_label="2025 Actual",
+            period_labels={"actual": "2025 Actual"},
+            values=values,
+            period_values={"actual": values},
+            coa=coa,
+            decisions=[
+                AccountSourceDecision(
+                    coa_id="S12.total_revenue",
+                    operation=SourceOperation.DIRECT,
+                    source_rows=["Summary!10"],
+                ),
+                AccountSourceDecision(
+                    coa_id="S12.ebitda",
+                    operation=SourceOperation.DIRECT,
+                    source_rows=["Summary!20"],
+                ),
+            ],
+            accepted=True,
+        )
+
+        log = build_run_log(result)
+        calculated = {
+            item["coa_id"]: item
+            for item in log["accounts"]
+            if item["operation"] == "calculated"
+        }
+
+        self.assertEqual(log["outcome"]["accounts_calculated_deterministically"], 2)
+        self.assertEqual(log["outcome"]["accounts_with_a_decision"], 2)
+        self.assertEqual(log["outcome"]["accounts_without_a_decision"], 0)
+        self.assertEqual(log["accounts_without_a_decision"], [])
+        self.assertEqual(
+            calculated["S12.ffe_reserve"]["formula"],
+            "0.04 * S12.total_revenue",
+        )
+        self.assertEqual(
+            calculated["S12.noi"]["dependencies"],
+            ["S12.ebitda", "S12.ffe_reserve"],
+        )
+
+    def test_period_complete_equivalent_row_blocks_incomplete_selection(self) -> None:
+        plan = WorkbookSourcePlan(
+            plan_id="period-coverage",
+            workbook_id="wb",
+            strategy=WorkbookStrategy(reporting_layout="test", summary_source="Summary"),
+            decisions=[
+                AccountSourceDecision(
+                    coa_id="S1.test",
+                    operation=SourceOperation.DIRECT,
+                    source_rows=["CurrentOnly!10"],
+                )
+            ],
+        )
+        evidence = [
+            {
+                "row_key": "CurrentOnly!10",
+                "label": "Reservations Payroll",
+                "selected_values": {"current": 100.0, "prior": None},
+            },
+            {
+                "row_key": "Complete!10",
+                "label": "Reservations Payroll",
+                "selected_values": {"current": 100.0, "prior": 90.0},
+            },
+        ]
+
+        issues = _period_completeness_issues(
+            plan,
+            evidence,
+            {"current": "2025 Actual", "prior": "2024 Actual"},
+        )
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("error|period_detail_available|S1.test|", issues[0])
+        self.assertIn("candidate_row=Complete!10", issues[0])
+
+    def test_material_adjusted_residual_warns_by_absolute_threshold(self) -> None:
+        coa = {
+            "S1.parent": {"coa_id": "S1.parent"},
+            "S1.other": {
+                "coa_id": "S1.other",
+                "parent_coa_id": "S1.parent",
+                "is_residual": "true",
+            },
+        }
+        decisions = [
+            AccountSourceDecision(
+                coa_id="S1.other",
+                operation=SourceOperation.ADJUSTED_SUBTOTAL,
+                source_rows=["Sheet!10"],
+                excluded_rows=["Sheet!11"],
+            )
+        ]
+
+        warnings = _unsupported_residual_remainder_warnings(
+            {"S1.parent": 1_000_000.0, "S1.other": 20_000.0},
+            coa,
+            decisions,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("warning|unsupported_residual_remainder|S1.parent|", warnings[0])
 
 
 if __name__ == "__main__":

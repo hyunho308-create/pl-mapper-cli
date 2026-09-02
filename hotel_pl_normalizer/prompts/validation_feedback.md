@@ -189,7 +189,26 @@ contain different values even though the selected layer reconciles the mapping.
 
 Resolution: Preserve the supported selected layer, retain the cited alternate
 subtotal and computed difference in the exception record, and present the
-chosen treatment for human review. Do not make the run appear clean.
+chosen treatment for human review. Express both sides with typed operations
+(`direct`, `sum`, `adjusted_subtotal`, or `negate`) and corresponding included
+and excluded rows. The selected equation must reproduce the mapped target, and
+the two like-for-like layers must be disjoint. Do not make the run appear clean.
+
+### `invalid_source_layer_comparison`
+
+Description: The typed selected equation does not reproduce the mapped target,
+or its cited rows are not contained in that target's mapping decision.
+
+Resolution: Correct the selected and alternate operations and row sets. Do not
+retain a source-layer warning whose comparison math is invalid.
+
+### `period_detail_available`
+
+Description: A chosen source row is blank for a requested period while another
+same-label row supplies that period and agrees wherever the rows overlap.
+
+Resolution: Use the period-complete equivalent row, or combine truly
+complementary rows without double counting.
 
 ### `source_presentation_exception`
 
@@ -290,6 +309,14 @@ errors, use one focused enrichment pass for all such parents, then finish with
 the warnings preserved rather than guessing or repeatedly revisiting unavailable
 detail.
 
+### `unsupported_residual_remainder`
+
+Description: A material all-other amount was calculated as a subtotal remainder
+rather than supported by directly identified source detail.
+
+Resolution: Prefer identifiable residual source rows. If none exist, retain the
+reconciled remainder and disclose the coverage gap.
+
 ### `unresolved_ambiguity`
 
 Description: The mapping declares that two materially different treatments
@@ -303,8 +330,17 @@ decision. Do not guess or move values solely to clear the finding.
 Description: A material inclusion or exclusion decision falls outside source
 mapping and requires operator direction.
 
-Resolution: Preserve the cited source treatment and reject until the operator
-decides the intended scope. Do not silently include or exclude the amount.
+Resolution: Set `requires_human_decision=true`, preserve the cited source
+treatment, and reject until the operator decides the intended scope. Do not
+silently include or exclude the amount.
+
+### `scope_exclusion`
+
+Description: A materially populated financial schedule was excluded with strong
+workbook support for that treatment, so no operator decision is required.
+
+Resolution: Retain the exclusion with `requires_human_decision=false` and
+present a visible warning without rejecting the mapping.
 
 ### `coverage_review_not_completed`
 

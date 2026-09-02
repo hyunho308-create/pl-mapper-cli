@@ -100,6 +100,29 @@ GENERIC_VENUE_IDS = tuple(
     coa_id for slot in GENERIC_VENUE_SLOTS for coa_id in slot
 )
 RESIDUAL_AUTO_ACCEPT_RATIO = 0.05
+UNSUPPORTED_REMAINDER_ABSOLUTE_THRESHOLD = 10_000.0
+DETERMINISTIC_SUMMARY_CALCULATIONS = {
+    "S12.ffe_reserve": {
+        "formula": "0.04 * S12.total_revenue",
+        "mapped_label": "Calculated: 4% of Total Revenue.",
+        "dependencies": ("S12.total_revenue",),
+    },
+    "S12.noi": {
+        "formula": "S12.ebitda - S12.ffe_reserve",
+        "mapped_label": "Calculated: EBITDA less FF&E Reserve.",
+        "dependencies": ("S12.ebitda", "S12.ffe_reserve"),
+    },
+}
+DETERMINISTIC_SUMMARY_ACCOUNTS = frozenset(
+    DETERMINISTIC_SUMMARY_CALCULATIONS
+)
+
+
+class SourceLayerOperation(str, Enum):
+    DIRECT = "direct"
+    SUM = "sum"
+    ADJUSTED_SUBTOTAL = "adjusted_subtotal"
+    NEGATE = "negate"
 
 
 class AccountSourceDecision(StrictModel):
@@ -163,6 +186,11 @@ class MappingReviewItem(StrictModel):
     source_rows: list[str] = Field(default_factory=list)
     selected_source_rows: list[str] = Field(default_factory=list)
     alternate_source_rows: list[str] = Field(default_factory=list)
+    selected_excluded_rows: list[str] = Field(default_factory=list)
+    alternate_excluded_rows: list[str] = Field(default_factory=list)
+    selected_source_operation: SourceLayerOperation | None = None
+    alternate_source_operation: SourceLayerOperation | None = None
+    requires_human_decision: bool = False
 
     @model_validator(mode="after")
     def validate_context(self):
@@ -179,16 +207,63 @@ class MappingReviewItem(StrictModel):
                 raise ValueError(
                     "source-layer row sets are only valid for source_discrepancy"
                 )
+            if not self.selected_source_operation or not self.alternate_source_operation:
+                raise ValueError(
+                    "typed source-layer comparisons require selected and alternate operations"
+                )
             cited = set(self.source_rows)
-            structured = set(self.selected_source_rows) | set(
-                self.alternate_source_rows
+            selected = set(self.selected_source_rows) | set(
+                self.selected_excluded_rows
             )
+            alternate = set(self.alternate_source_rows) | set(
+                self.alternate_excluded_rows
+            )
+            structured = selected | alternate
             if not structured <= cited:
                 raise ValueError(
                     "source-layer row sets must also appear in source_rows"
                 )
-            if set(self.selected_source_rows) & set(self.alternate_source_rows):
+            if selected & alternate:
                 raise ValueError("selected and alternate source layers must be disjoint")
+            for side, operation, rows, excluded in (
+                (
+                    "selected",
+                    self.selected_source_operation,
+                    self.selected_source_rows,
+                    self.selected_excluded_rows,
+                ),
+                (
+                    "alternate",
+                    self.alternate_source_operation,
+                    self.alternate_source_rows,
+                    self.alternate_excluded_rows,
+                ),
+            ):
+                if operation == SourceLayerOperation.DIRECT and (
+                    len(rows) != 1 or excluded
+                ):
+                    raise ValueError(f"{side} direct layer requires exactly one row")
+                if operation == SourceLayerOperation.ADJUSTED_SUBTOTAL and not excluded:
+                    raise ValueError(
+                        f"{side} adjusted_subtotal layer requires excluded rows"
+                    )
+                if operation != SourceLayerOperation.ADJUSTED_SUBTOTAL and excluded:
+                    raise ValueError(
+                        f"{side} excluded rows require adjusted_subtotal"
+                    )
+        elif any(
+            (
+                self.selected_excluded_rows,
+                self.alternate_excluded_rows,
+                self.selected_source_operation,
+                self.alternate_source_operation,
+            )
+        ):
+            raise ValueError("source-layer operations require both source-row sets")
+        if self.requires_human_decision and self.kind != "scope_exception":
+            raise ValueError(
+                "requires_human_decision is only valid for a scope_exception"
+            )
         return self
 
 
@@ -391,7 +466,10 @@ class WorkbookMappingValidator:
 
     def _update_stop_state(self, previous, result, plan) -> None:
         review_kinds = {item.kind for item in plan.review_items}
-        if "scope_exception" in review_kinds:
+        if any(
+            item.kind == "scope_exception" and item.requires_human_decision
+            for item in plan.review_items
+        ):
             self.stop_repair = True
             self.stopped_reason = "scope_decision_required"
         elif "ambiguity" in review_kinds:
@@ -463,7 +541,10 @@ class WorkbookMappingValidator:
         replacement_ids = [item.coa_id for item in patch.replacements]
         if len(replacement_ids) != len(set(replacement_ids)):
             raise ModelToolError("patch_mapping contains duplicate replacement COA ids.")
-        unknown = sorted(set(replacement_ids) - set(self.coa))
+        unknown = sorted(
+            set(replacement_ids)
+            - (set(self.coa) - DETERMINISTIC_SUMMARY_ACCOUNTS)
+        )
         if unknown:
             raise ModelToolError("unknown replacement COA ids: " + ", ".join(unknown))
         existing = {item.coa_id: item for item in self.current_plan.decisions}
@@ -588,7 +669,16 @@ class WorkbookMappingValidator:
                 f"workbook_id must be {self.workbook_id!r}, got {plan.workbook_id!r}"
             )
         submitted = {item.coa_id for item in plan.decisions}
-        missing = sorted(set(self.coa) - submitted)
+        required_decisions = set(self.coa) - DETERMINISTIC_SUMMARY_ACCOUNTS
+        deterministic_submissions = sorted(
+            submitted & DETERMINISTIC_SUMMARY_ACCOUNTS
+        )
+        if deterministic_submissions:
+            execution_issues.append(
+                "deterministic accounts must not be submitted by the model: "
+                + ", ".join(deterministic_submissions)
+            )
+        missing = sorted(required_decisions - submitted)
         if missing:
             execution_issues.append(
                 "missing COA decisions: " + ", ".join(missing)
@@ -630,6 +720,13 @@ class WorkbookMappingValidator:
             )
         errors = list(execution_issues)
         errors.extend(_review_item_blockers(plan.review_items))
+        errors.extend(
+            _period_completeness_issues(
+                plan,
+                self.evidence,
+                self.period_labels,
+            )
+        )
         collapse_issue = _detail_collapse_issue(plan, self.evidence)
         if collapse_issue:
             errors.append(collapse_issue)
@@ -690,6 +787,17 @@ class WorkbookMappingValidator:
                     plan, self.evidence, values, period_id
                 )
             )
+            checks.extend(_source_layer_comparison_issues(
+                plan, self.evidence, values, period_id
+            ))
+            checks.extend(
+                _unsupported_residual_remainder_warnings(
+                    values,
+                    self.coa,
+                    plan.decisions,
+                )
+            )
+            checks.extend(_review_item_warnings(plan.review_items))
             errors.extend(
                 f"{label}: {item}"
                 for item in calculation_issues
@@ -876,6 +984,10 @@ class WorkbookMappingValidator:
 
     def declarations(self) -> list[dict[str, Any]]:
         string_list = {"type": "array", "items": {"type": "string"}}
+        model_coa_ids = [
+            coa_id for coa_id in self.coa
+            if coa_id not in DETERMINISTIC_SUMMARY_ACCOUNTS
+        ]
         coa_id_list = {
             "type": "array",
             "items": {"type": "string", "enum": list(self.coa)},
@@ -897,6 +1009,27 @@ class WorkbookMappingValidator:
                 "source_rows": string_list,
                 "selected_source_rows": string_list,
                 "alternate_source_rows": string_list,
+                "selected_excluded_rows": string_list,
+                "alternate_excluded_rows": string_list,
+                "selected_source_operation": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "enum": [item.value for item in SourceLayerOperation],
+                        },
+                        {"type": "null"},
+                    ],
+                },
+                "alternate_source_operation": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "enum": [item.value for item in SourceLayerOperation],
+                        },
+                        {"type": "null"},
+                    ],
+                },
+                "requires_human_decision": {"type": "boolean"},
             },
             "required": [
                 "kind",
@@ -905,13 +1038,18 @@ class WorkbookMappingValidator:
                 "source_rows",
                 "selected_source_rows",
                 "alternate_source_rows",
+                "selected_excluded_rows",
+                "alternate_excluded_rows",
+                "selected_source_operation",
+                "alternate_source_operation",
+                "requires_human_decision",
             ],
         }
         review_items = {"type": "array", "items": review_item}
         decision = {
             "type": "object",
             "properties": {
-                "coa_id": {"type": "string", "enum": list(self.coa)},
+                "coa_id": {"type": "string", "enum": model_coa_ids},
                 "operation": {
                     "type": "string",
                     "enum": [item.value for item in SourceOperation],
@@ -992,7 +1130,8 @@ class WorkbookMappingValidator:
         return [{
             "name": "validate_mapping",
             "description": (
-                f"Submit the initial complete mapping with all {len(self.coa)} COA "
+                f"Submit the initial complete mapping with all {len(model_coa_ids)} "
+                "model-mapped COA "
                 "source decisions for deterministic validation. Call this exactly "
                 "once."
             ),
@@ -1126,12 +1265,14 @@ SOURCE_EXCEPTION_RULES = {
     "source_layer_conflict",
     "source_presentation_exception",
     "small_source_reconciliation_difference",
+    "scope_exclusion",
 }
 
 COVERAGE_GAP_RULES = {
     "source_detail_incomplete",
     "coverage_unspecified",
     "large_residual_plug",
+    "unsupported_residual_remainder",
     "unresolved_negative_residual",
 }
 
@@ -1152,11 +1293,21 @@ def _review_kind(item) -> str:
     )
 
 
+def _review_requires_human_decision(item) -> bool:
+    return bool(
+        item.requires_human_decision
+        if isinstance(item, MappingReviewItem)
+        else item.get("requires_human_decision", False)
+    )
+
+
 def _review_item_blockers(review_items) -> list[str]:
     blockers = []
     for item in review_items:
         kind = _review_kind(item)
         if kind not in {"ambiguity", "scope_exception"}:
+            continue
+        if kind == "scope_exception" and not _review_requires_human_decision(item):
             continue
         coa_ids = (
             item.coa_ids
@@ -1176,13 +1327,41 @@ def _review_item_blockers(review_items) -> list[str]:
     return blockers
 
 
+def _review_item_warnings(review_items) -> list[str]:
+    warnings = []
+    for item in review_items:
+        if _review_kind(item) != "scope_exception":
+            continue
+        if _review_requires_human_decision(item):
+            continue
+        coa_ids = (
+            item.coa_ids
+            if isinstance(item, MappingReviewItem)
+            else item.get("coa_ids", [])
+        )
+        message = (
+            item.message
+            if isinstance(item, MappingReviewItem)
+            else item.get("message", "")
+        )
+        target = coa_ids[0] if coa_ids else "mapping"
+        warnings.append(
+            f"warning|scope_exclusion|{target}|"
+            f"message={str(message).replace('|', '/')}"
+        )
+    return warnings
+
+
 def _needs_coverage_review(findings) -> bool:
     return any(_finding_rule(str(item)) in COVERAGE_GAP_RULES for item in findings)
 
 
 def _outcome_from_result(result: dict[str, Any], review_items) -> MappingOutcome:
-    review_kinds = {_review_kind(item) for item in review_items}
-    if "scope_exception" in review_kinds:
+    if any(
+        _review_kind(item) == "scope_exception"
+        and _review_requires_human_decision(item)
+        for item in review_items
+    ):
         return MappingOutcome.SCOPE_EXCEPTION
     if result.get("errors") or result.get("accepted") is False:
         return MappingOutcome.REJECTED
@@ -1247,7 +1426,11 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
                 (
                     item
                     for item in review_items
-                    if _review_kind(item) == "source_discrepancy"
+                    if _review_kind(item) == (
+                        "scope_exception"
+                        if rule == "scope_exclusion"
+                        else "source_discrepancy"
+                    )
                     and target in (
                         item.coa_ids
                         if isinstance(item, MappingReviewItem)
@@ -1280,6 +1463,9 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
                 source_rows = list(matching_review.get("source_rows") or [])
             else:
                 treatment = (
+                    "Retain the supported scope exclusion and disclose it for review."
+                    if rule == "scope_exclusion"
+                    else
                     "Preserve both independently reported source values for review."
                     if rule in SOURCE_EXCEPTION_RULES
                     else "Preserve supported source detail and flag the incomplete coverage."
@@ -1312,7 +1498,7 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
 
 
 def _source_layer_conflict_warnings(plan, evidence, values, period_id):
-    """Calculate a cited alternate subtotal versus the selected mapped layer."""
+    """Calculate two typed, disjoint source equations for one COA target."""
     rows = {item["row_key"]: item for item in evidence}
     decisions = {item.coa_id: item for item in plan.decisions}
     warnings = []
@@ -1333,7 +1519,6 @@ def _source_layer_conflict_warnings(plan, evidence, values, period_id):
         }
         if not set(review.selected_source_rows) <= selected_rows:
             continue
-        alternate_rows = list(review.alternate_source_rows)
         target = next(
             (
                 coa_id
@@ -1345,28 +1530,115 @@ def _source_layer_conflict_warnings(plan, evidence, values, period_id):
         if target is None:
             continue
         try:
-            alternate_values = [
-                _row_value(rows, row, period_id=period_id)
-                for row in alternate_rows
-            ]
+            selected = _source_layer_value(
+                rows,
+                review.selected_source_rows,
+                review.selected_excluded_rows,
+                review.selected_source_operation,
+                period_id,
+            )
+            alternate = _source_layer_value(
+                rows,
+                review.alternate_source_rows,
+                review.alternate_excluded_rows,
+                review.alternate_source_operation,
+                period_id,
+            )
         except (KeyError, TypeError, ValueError):
             continue
-        if not alternate_values or any(value is None for value in alternate_values):
+        mapped = values.get(target)
+        if selected is None or alternate is None or mapped is None:
             continue
-        alternate = sum(float(value) for value in alternate_values)
-        selected = values.get(target)
-        if selected is None or alternate is None:
+        if abs(float(mapped) - selected) > _tolerance(float(mapped)):
             continue
-        variance = float(selected) - float(alternate)
-        if abs(variance) <= _tolerance(float(selected)):
+        variance = selected - alternate
+        if abs(variance) <= _tolerance(selected):
             continue
         warnings.append(
             f"warning|source_layer_conflict|{target}|"
-            f"actual={float(selected):.4f}|expected={float(alternate):.4f}|"
+            f"actual={selected:.4f}|expected={alternate:.4f}|"
             f"variance={variance:.4f}|equation=selected mapped layer versus "
-            f"alternate cited layer {' + '.join(alternate_rows)}"
+            "typed alternate cited layer"
         )
     return warnings
+
+
+def _source_layer_comparison_issues(plan, evidence, values, period_id):
+    rows = {item["row_key"]: item for item in evidence}
+    decisions = {item.coa_id: item for item in plan.decisions}
+    issues = []
+    for review in plan.review_items:
+        if (
+            review.kind != "source_discrepancy"
+            or not review.selected_source_rows
+            or not review.alternate_source_rows
+        ):
+            continue
+        target = review.coa_ids[0] if review.coa_ids else None
+        if target not in decisions or values.get(target) is None:
+            continue
+        selected_rows = set(review.selected_source_rows) | set(
+            review.selected_excluded_rows
+        )
+        decision_rows = set(decisions[target].source_rows) | set(
+            decisions[target].excluded_rows
+        )
+        if not selected_rows <= decision_rows:
+            issues.append(
+                f"error|invalid_source_layer_comparison|{target}|"
+                "selected layer is not contained in the mapped target decision"
+            )
+            continue
+        try:
+            selected = _source_layer_value(
+                rows,
+                review.selected_source_rows,
+                review.selected_excluded_rows,
+                review.selected_source_operation,
+                period_id,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            issues.append(
+                f"error|invalid_source_layer_comparison|{target}|"
+                f"selected layer cannot be calculated: {exc}"
+            )
+            continue
+        mapped = float(values[target])
+        if selected is not None and abs(mapped - selected) > _tolerance(mapped):
+            issues.append(
+                f"error|invalid_source_layer_comparison|{target}|"
+                f"mapped={mapped:.4f}|selected_equation={selected:.4f}|"
+                "typed selected layer does not equal the mapped target"
+            )
+    return issues
+
+
+def _source_layer_value(
+    rows,
+    source_rows,
+    excluded_rows,
+    operation,
+    period_id,
+):
+    if operation is None:
+        raise ValueError("missing source-layer operation")
+    included = [_row_value(rows, row, period_id=period_id) for row in source_rows]
+    excluded = [_row_value(rows, row, period_id=period_id) for row in excluded_rows]
+    if any(value is None for value in [*included, *excluded]):
+        return None
+    if operation == SourceLayerOperation.DIRECT:
+        if len(included) != 1:
+            raise ValueError("direct requires one row")
+        return float(included[0])
+    if operation == SourceLayerOperation.SUM:
+        return sum(float(value) for value in included)
+    if operation == SourceLayerOperation.ADJUSTED_SUBTOTAL:
+        return sum(float(value) for value in included) - sum(
+            float(value) for value in excluded
+        )
+    if operation == SourceLayerOperation.NEGATE:
+        return -sum(float(value) for value in included)
+    raise ValueError(f"unsupported source-layer operation {operation}")
 
 
 def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
@@ -2281,6 +2553,11 @@ def map_workbook(
                 plan, evidence, values, period_id
             )
         )
+        checks_by_period[period_id].extend(
+            _source_layer_comparison_issues(
+                plan, evidence, values, period_id
+            )
+        )
         checks_by_period[period_id] = _replace_unresolved_negative_errors(
             checks_by_period[period_id], unresolved_negative
         )
@@ -2291,9 +2568,22 @@ def map_workbook(
                 residual_plugs_by_period[period_id],
             )
         )
+        checks_by_period[period_id].extend(
+            _unsupported_residual_remainder_warnings(
+                values,
+                coa,
+                decisions,
+            )
+        )
     primary_period_id = next(iter(period_labels))
     checks_by_period[primary_period_id].extend(
         _review_item_blockers(plan.review_items)
+    )
+    checks_by_period[primary_period_id].extend(
+        _review_item_warnings(plan.review_items)
+    )
+    checks_by_period[primary_period_id].extend(
+        _period_completeness_issues(plan, evidence, period_labels)
     )
     checks_by_period[primary_period_id].extend(
         _unused_financial_schedule_issues(
@@ -2474,7 +2764,12 @@ def _primary_prompt(
     sheet_routing_context=None,
 ) -> str:
     rows = _group_rows(evidence, period_labels)
-    coa_lines = _coa_lines(coa)
+    model_coa = {
+        coa_id: metadata
+        for coa_id, metadata in coa.items()
+        if coa_id not in DETERMINISTIC_SUMMARY_ACCOUNTS
+    }
+    coa_lines = _coa_lines(model_coa)
     period_lines = []
     period_maps = periods if isinstance(periods, dict) else {"selected": periods}
     multi_period = len(period_maps) > 1
@@ -2493,7 +2788,7 @@ def _primary_prompt(
         "requested_period": requested_period,
         "period_columns": period_lines,
         "coa": coa_lines,
-        "coa_hierarchy_equations": _hierarchy_equations(coa),
+        "coa_hierarchy_equations": _hierarchy_equations(model_coa),
         "summary_equations": _summary_equation_lines(),
         "sheets_excluded_as_nonfinancial": excluded_sheets,
         "sheet_routing_context": list(sheet_routing_context or []),
@@ -2641,10 +2936,32 @@ def _execute(
                     + ",".join(missing_dependencies)
                 )
             break
-    missing = sorted(set(coa) - seen)
+    _apply_deterministic_summary_calculations(values, preserve_blanks)
+    missing = sorted(
+        (set(coa) - DETERMINISTIC_SUMMARY_ACCOUNTS) - seen
+    )
     if missing:
         issues.append(f"missing decisions: {','.join(missing)}")
     return values, issues
+
+
+def _apply_deterministic_summary_calculations(values, preserve_blanks):
+    if not DETERMINISTIC_SUMMARY_ACCOUNTS.intersection(values):
+        return
+    total_revenue = values.get("S12.total_revenue")
+    ebitda = values.get("S12.ebitda")
+    if total_revenue is None:
+        reserve = None if preserve_blanks else 0.0
+    else:
+        reserve = 0.04 * float(total_revenue)
+    if "S12.ffe_reserve" in values:
+        values["S12.ffe_reserve"] = reserve
+    if ebitda is None or reserve is None:
+        noi = None if preserve_blanks else 0.0
+    else:
+        noi = float(ebitda) - float(reserve)
+    if "S12.noi" in values:
+        values["S12.noi"] = noi
 
 
 def _coa_rollup_dependencies(coa_id):
@@ -2728,6 +3045,107 @@ def _validation_values(values):
         coa_id: (0.0 if value is None else float(value))
         for coa_id, value in values.items()
     }
+
+
+def _normalized_evidence_label(value) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _evidence_period_value(row, period_id):
+    values = row.get("selected_values") or {}
+    value = values.get(period_id)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _period_completeness_issues(plan, evidence, period_labels):
+    """Block only when a demonstrably equivalent row fills a selected-period gap.
+
+    A same-label candidate must contain the missing period and agree in every
+    overlapping selected period. This avoids treating a legitimate zero or a
+    differently scoped schedule as omitted detail.
+    """
+    if len(period_labels) < 2:
+        return []
+    rows = {str(row.get("row_key") or ""): row for row in evidence}
+    by_label: dict[str, list[dict]] = {}
+    for row in evidence:
+        label = _normalized_evidence_label(row.get("label"))
+        if label:
+            by_label.setdefault(label, []).append(row)
+    all_cited = {
+        row_key
+        for decision in plan.decisions
+        for row_key in [*decision.source_rows, *decision.excluded_rows]
+    }
+    issues = []
+    seen = set()
+    for decision in plan.decisions:
+        if decision.operation in {SourceOperation.NO_VALUE, SourceOperation.COA_ROLLUP}:
+            continue
+        for selected_key in [*decision.source_rows, *decision.excluded_rows]:
+            selected = rows.get(selected_key)
+            if not selected:
+                continue
+            label = _normalized_evidence_label(selected.get("label"))
+            if not label:
+                continue
+            selected_values = {
+                period_id: _evidence_period_value(selected, period_id)
+                for period_id in period_labels
+            }
+            populated = {
+                period_id: value
+                for period_id, value in selected_values.items()
+                if value is not None
+            }
+            missing_periods = [
+                period_id
+                for period_id, value in selected_values.items()
+                if value is None
+            ]
+            if not populated or not missing_periods:
+                continue
+            for candidate in by_label.get(label, []):
+                candidate_key = str(candidate.get("row_key") or "")
+                if not candidate_key or candidate_key in all_cited:
+                    continue
+                candidate_values = {
+                    period_id: _evidence_period_value(candidate, period_id)
+                    for period_id in period_labels
+                }
+                fills = [
+                    period_id
+                    for period_id in missing_periods
+                    if candidate_values[period_id] is not None
+                    and abs(candidate_values[period_id]) > 0.005
+                ]
+                if not fills:
+                    continue
+                overlaps = [
+                    period_id
+                    for period_id in populated
+                    if candidate_values[period_id] is not None
+                ]
+                if not overlaps or any(
+                    abs(candidate_values[period_id] - populated[period_id])
+                    > _tolerance(populated[period_id])
+                    for period_id in overlaps
+                ):
+                    continue
+                fingerprint = (decision.coa_id, selected_key, candidate_key)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                labels = ", ".join(period_labels[period_id] for period_id in fills)
+                issues.append(
+                    f"error|period_detail_available|{decision.coa_id}|"
+                    f"selected_row={selected_key}|candidate_row={candidate_key}|"
+                    f"missing_periods={labels}|candidate matches the selected row "
+                    "where both are populated and supplies missing selected-period detail"
+                )
+    return issues
 
 
 def _detail_collapse_issue(plan, evidence):
@@ -2827,6 +3245,25 @@ def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
         ):
             continue
         if any(row_key in cited_rows for row_key in active_rows):
+            continue
+        scope_review = next(
+            (
+                item
+                for item in getattr(plan, "review_items", [])
+                if _review_kind(item) == "scope_exception"
+                and any(
+                    row_key.rsplit("!", 1)[0].casefold() == sheet_name.casefold()
+                    for row_key in (
+                        item.source_rows
+                        if isinstance(item, MappingReviewItem)
+                        else item.get("source_rows", [])
+                    )
+                    if "!" in row_key
+                )
+            ),
+            None,
+        )
+        if scope_review is not None:
             continue
         if _strategy_documents_schedule(
             supporting_notes,
@@ -3605,6 +4042,38 @@ def _large_residual_plug_warnings(values, coa, plugs):
             f"warning|large_residual_plug|{parent}|"
             f"residual_id={residual_id}|plug={plug:.2f}|ratio={ratio:.4f}|"
             "remaining difference assigned to the residual before presentation"
+        )
+    return warnings
+
+
+def _unsupported_residual_remainder_warnings(values, coa, decisions):
+    """Surface material residuals calculated as a remainder, not direct detail."""
+    children = _children_by_parent(coa)
+    parent_by_child = {
+        child: parent for parent, child_ids in children.items() for child in child_ids
+    }
+    warnings = []
+    for decision in decisions:
+        if decision.operation != SourceOperation.ADJUSTED_SUBTOTAL:
+            continue
+        if not _is_residual(coa.get(decision.coa_id, {})):
+            continue
+        parent = parent_by_child.get(decision.coa_id)
+        if not parent or values.get(decision.coa_id) is None:
+            continue
+        remainder = float(values[decision.coa_id])
+        parent_value = float(values.get(parent) or 0.0)
+        ratio = _residual_plug_ratio(remainder, parent_value)
+        if (
+            abs(remainder) < UNSUPPORTED_REMAINDER_ABSOLUTE_THRESHOLD
+            and ratio < RESIDUAL_AUTO_ACCEPT_RATIO
+        ):
+            continue
+        warnings.append(
+            f"warning|unsupported_residual_remainder|{parent}|"
+            f"residual_id={decision.coa_id}|remainder={remainder:.2f}|"
+            f"ratio={ratio:.4f}|residual value is calculated from a subtotal "
+            "remainder rather than directly identified source detail"
         )
     return warnings
 
