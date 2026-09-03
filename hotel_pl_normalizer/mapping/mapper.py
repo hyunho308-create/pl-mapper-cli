@@ -288,6 +288,7 @@ class WorkbookSourcePatch(StrictModel):
     department_source_strategy: list[str] | None = None
     duplicate_or_supporting_schedules: list[str] | None = None
     operator_to_coa_hierarchy_conflicts: list[str] | None = None
+    source_detail_incomplete: list[str] | None = None
     review_items: list[MappingReviewItem] | None = None
 
     @model_validator(mode="after")
@@ -388,6 +389,7 @@ class WorkbookMappingValidator:
                     "validate_mapping is only for the initial complete plan. "
                     "Use patch_mapping for repairs."
                 )
+            arguments = _prevalidate_plan_arguments(arguments)
             try:
                 plan = WorkbookSourcePlan.model_validate(arguments)
             except ValueError as exc:
@@ -439,6 +441,19 @@ class WorkbookMappingValidator:
                 action,
             )
         )
+        if (
+            name == "patch_mapping"
+            and previous
+            and not previous.get("accepted")
+            and result.get("accepted")
+            and _needs_coverage_review(result.get("warnings", []))
+        ):
+            # A repair that moves a blocked mapping to warning-only has already
+            # performed the focused coverage review. Keep the extra review turn
+            # only for a first-pass plan that was accepted outright.
+            self.warning_cleanup_attempted = True
+            self.warning_cleanup_outcome = "completed_during_repair"
+            result["coverage_review_completed"] = True
         self._update_stop_state(previous, result, plan)
         self.current_plan = plan
         self.submissions.append(plan.model_dump(mode="json"))
@@ -530,6 +545,7 @@ class WorkbookMappingValidator:
             raise ModelToolError(
                 "patch_mapping requires an initial validate_mapping submission."
             )
+        arguments = _prevalidate_patch_arguments(arguments)
         try:
             patch = WorkbookSourcePatch.model_validate(arguments)
         except ValueError as exc:
@@ -591,6 +607,11 @@ class WorkbookMappingValidator:
                 and patch.operator_to_coa_hierarchy_conflicts
                 != self.current_plan.strategy.operator_to_coa_hierarchy_conflicts
             )
+            or (
+                patch.source_detail_incomplete is not None
+                and patch.source_detail_incomplete
+                != self.current_plan.strategy.source_detail_incomplete
+            )
         )
         changes_review = (
             patch.review_items is not None
@@ -601,6 +622,15 @@ class WorkbookMappingValidator:
             and not changes_strategy
             and not changes_review
         ):
+            if self.warning_cleanup_pending:
+                return self.current_plan, {
+                    "tool": "patch_mapping",
+                    "submitted_decision_count": 0,
+                    "submitted_coa_ids": [],
+                    "repair_hypothesis": patch.repair_hypothesis,
+                    "expected_fix": patch.expected_fix,
+                    "coverage_review_completed": True,
+                }
             raise ModelToolError(
                 "patch_mapping must change at least one mapping decision, strategy "
                 "field, or review item."
@@ -639,6 +669,10 @@ class WorkbookMappingValidator:
         if patch.operator_to_coa_hierarchy_conflicts is not None:
             strategy_updates["operator_to_coa_hierarchy_conflicts"] = (
                 patch.operator_to_coa_hierarchy_conflicts
+            )
+        if patch.source_detail_incomplete is not None:
+            strategy_updates["source_detail_incomplete"] = (
+                patch.source_detail_incomplete
             )
         if strategy_updates:
             strategy = strategy.model_copy(update=strategy_updates)
@@ -773,6 +807,14 @@ class WorkbookMappingValidator:
                 plan.review_items,
                 self.summary_only_pushdown_rows,
             )
+            checks.extend(
+                _source_layer_conflict_warnings(
+                    plan, self.evidence, values, period_id
+                )
+            )
+            checks.extend(_source_layer_comparison_issues(
+                plan, self.evidence, values, period_id
+            ))
             checks = _qualify_source_discrepancies(
                 checks,
                 plan,
@@ -782,14 +824,6 @@ class WorkbookMappingValidator:
                 label,
                 calculation_issues,
             )
-            checks.extend(
-                _source_layer_conflict_warnings(
-                    plan, self.evidence, values, period_id
-                )
-            )
-            checks.extend(_source_layer_comparison_issues(
-                plan, self.evidence, values, period_id
-            ))
             checks.extend(
                 _unsupported_residual_remainder_warnings(
                     values,
@@ -1196,6 +1230,9 @@ class WorkbookMappingValidator:
                     "operator_to_coa_hierarchy_conflicts": {
                         "anyOf": [string_list, {"type": "null"}],
                     },
+                    "source_detail_incomplete": {
+                        "anyOf": [string_list, {"type": "null"}],
+                    },
                     "review_items": review_items,
                 },
                 "required": [
@@ -1224,6 +1261,145 @@ def _substantive_decision_digest(decision: AccountSourceDecision) -> str:
         },
         sort_keys=True,
     )
+
+
+def _deduplicate_identical_decisions(values: Any) -> Any:
+    """Remove only exact repeats; conflicting decisions remain visible errors."""
+    if not isinstance(values, list):
+        return values
+    deduped = []
+    seen: dict[str, str] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            deduped.append(value)
+            continue
+        coa_id = value.get("coa_id")
+        signature = json.dumps(value, sort_keys=True, default=str)
+        if coa_id and seen.get(str(coa_id)) == signature:
+            continue
+        if coa_id:
+            seen[str(coa_id)] = signature
+        deduped.append(value)
+    return deduped
+
+
+def _prevalidate_plan_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Normalize initial-payload defects that cannot change mapping meaning."""
+    normalized = dict(arguments)
+    normalized["decisions"] = _deduplicate_identical_decisions(
+        normalized.get("decisions")
+    )
+    return normalized
+
+
+def _prevalidate_patch_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Normalize only payload defects that cannot change mapping meaning."""
+    normalized = dict(arguments)
+    normalized.setdefault(
+        "repair_hypothesis",
+        "Review the current deterministic validation findings.",
+    )
+    normalized.setdefault(
+        "expected_fix",
+        "Resolve the cited findings without changing supported mappings.",
+    )
+    normalized["replacements"] = _deduplicate_identical_decisions(
+        normalized.get("replacements")
+    )
+    normalized["review_items"] = _normalize_patch_review_items(
+        normalized.get("review_items")
+    )
+    return normalized
+
+
+def _normalize_patch_review_items(values: Any) -> Any:
+    """Keep a repair note while dropping only malformed comparison metadata.
+
+    The narrative, cited COA ids, and cited source rows still reach feedback.
+    We clear the optional typed comparison fields only when they cannot form a
+    valid, disjoint source-layer comparison and would otherwise reject the
+    entire repair payload before its mapping changes can be evaluated.
+    """
+    if not isinstance(values, list):
+        return values
+    allowed_operations = {item.value for item in SourceLayerOperation}
+    normalized_items = []
+    for value in values:
+        if not isinstance(value, dict):
+            normalized_items.append(value)
+            continue
+        item = dict(value)
+        selected = item.get("selected_source_rows") or []
+        alternate = item.get("alternate_source_rows") or []
+        selected_excluded = item.get("selected_excluded_rows") or []
+        alternate_excluded = item.get("alternate_excluded_rows") or []
+        selected_operation = item.get("selected_source_operation")
+        alternate_operation = item.get("alternate_source_operation")
+        cited = item.get("source_rows") or []
+        comparison_present = any(
+            (
+                selected,
+                alternate,
+                selected_excluded,
+                alternate_excluded,
+                selected_operation,
+                alternate_operation,
+            )
+        )
+        malformed = False
+        if comparison_present:
+            selected_set = set(selected) | set(selected_excluded)
+            alternate_set = set(alternate) | set(alternate_excluded)
+            malformed = (
+                item.get("kind") != "source_discrepancy"
+                or not selected
+                or not alternate
+                or selected_operation not in allowed_operations
+                or alternate_operation not in allowed_operations
+                or not (selected_set | alternate_set) <= set(cited)
+                or bool(selected_set & alternate_set)
+                or (
+                    selected_operation == SourceLayerOperation.DIRECT.value
+                    and (len(selected) != 1 or bool(selected_excluded))
+                )
+                or (
+                    alternate_operation == SourceLayerOperation.DIRECT.value
+                    and (len(alternate) != 1 or bool(alternate_excluded))
+                )
+                or (
+                    selected_operation
+                    == SourceLayerOperation.ADJUSTED_SUBTOTAL.value
+                    and not selected_excluded
+                )
+                or (
+                    alternate_operation
+                    == SourceLayerOperation.ADJUSTED_SUBTOTAL.value
+                    and not alternate_excluded
+                )
+                or (
+                    selected_operation
+                    != SourceLayerOperation.ADJUSTED_SUBTOTAL.value
+                    and bool(selected_excluded)
+                )
+                or (
+                    alternate_operation
+                    != SourceLayerOperation.ADJUSTED_SUBTOTAL.value
+                    and bool(alternate_excluded)
+                )
+            )
+        if malformed:
+            item.update(
+                {
+                    "selected_source_rows": [],
+                    "alternate_source_rows": [],
+                    "selected_excluded_rows": [],
+                    "alternate_excluded_rows": [],
+                    "selected_source_operation": None,
+                    "alternate_source_operation": None,
+                }
+            )
+        normalized_items.append(item)
+    return normalized_items
 
 
 def _finding_texts(result: dict | None) -> list[str]:
@@ -1917,6 +2093,7 @@ def _qualify_source_discrepancies(
     if calculation_issues or any(
         item.startswith("error|summary_math|")
         or item.startswith("error|source_row_")
+        or item.startswith("error|invalid_source_layer_comparison|")
         for item in checks
     ):
         return checks
@@ -1982,6 +2159,39 @@ def _qualify_source_discrepancies(
                 )
                 + "|component source discrepancies explain the aggregate difference"
             )
+    return _collapse_qualified_source_warnings(output)
+
+
+def _collapse_qualified_source_warnings(checks):
+    """Keep one root warning when a typed comparison proves the same mismatch."""
+    qualified = [
+        item
+        for item in checks
+        if _finding_rule(item) in {
+            "source_discrepancy",
+            "source_presentation_exception",
+        }
+    ]
+    output = []
+    for finding in checks:
+        if _finding_rule(finding) != "source_layer_conflict":
+            output.append(finding)
+            continue
+        target = _finding_target(finding)
+        variance = _numeric_detail(_finding_details(finding), "variance")
+        duplicate = any(
+            _finding_target(root) == target
+            and variance is not None
+            and (
+                root_variance := _numeric_detail(
+                    _finding_details(root), "variance"
+                )
+            ) is not None
+            and abs(root_variance - variance) <= _tolerance(variance)
+            for root in qualified
+        )
+        if not duplicate:
+            output.append(finding)
     return output
 
 
@@ -2082,7 +2292,10 @@ def _qualify_combined_ood_misc_presentation(
             for item in plan.review_items
             if item.kind == "source_discrepancy"
             and cited_ids <= set(item.coa_ids)
-            and cited_rows <= set(item.source_rows)
+            and (
+                not item.source_rows
+                or cited_rows <= set(item.source_rows)
+            )
         ),
         None,
     )
@@ -2125,7 +2338,18 @@ def _qualified_source_discrepancy_warning(
         variance = float(details["variance"])
     except (KeyError, ValueError):
         return None
-    if not _same_discrepancy_was_previously_blocking(
+    typed_current_match = any(
+        _finding_rule(item) == "source_layer_conflict"
+        and _finding_target(item) == target
+        and (
+            typed_variance := _numeric_detail(
+                _finding_details(item), "variance"
+            )
+        ) is not None
+        and abs(typed_variance - variance) <= _tolerance(variance)
+        for item in checks
+    )
+    if not typed_current_match and not _same_discrepancy_was_previously_blocking(
         history, period_label, target, variance
     ):
         return None
@@ -2539,15 +2763,6 @@ def map_workbook(
             plan.review_items,
             validator.summary_only_pushdown_rows,
         )
-        checks_by_period[period_id] = _qualify_source_discrepancies(
-            checks_by_period[period_id],
-            plan,
-            evidence,
-            coa,
-            validator.history,
-            period_labels[period_id],
-            execution_issues,
-        )
         checks_by_period[period_id].extend(
             _source_layer_conflict_warnings(
                 plan, evidence, values, period_id
@@ -2557,6 +2772,15 @@ def map_workbook(
             _source_layer_comparison_issues(
                 plan, evidence, values, period_id
             )
+        )
+        checks_by_period[period_id] = _qualify_source_discrepancies(
+            checks_by_period[period_id],
+            plan,
+            evidence,
+            coa,
+            validator.history,
+            period_labels[period_id],
+            execution_issues,
         )
         checks_by_period[period_id] = _replace_unresolved_negative_errors(
             checks_by_period[period_id], unresolved_negative
@@ -2892,6 +3116,12 @@ def _execute(
                 decision.coa_id == "S12.occupancy"
                 and values[decision.coa_id] is not None
                 and 1.0 < values[decision.coa_id] <= 100.0
+                and decision.operation == SourceOperation.DIRECT
+                and not _source_value_is_percentage_formatted(
+                    rows,
+                    decision.source_rows[0],
+                    period_id=period_id,
+                )
             ):
                 values[decision.coa_id] /= 100.0
             resolved.add(decision.coa_id)
@@ -3037,6 +3267,20 @@ def _row_value(rows, row_key, *, period_id: str | None = None):
     if text.startswith("(") and text.endswith(")"):
         text = f"-{text[1:-1]}"
     return float(text)
+
+
+def _source_value_is_percentage_formatted(
+    rows, row_key, *, period_id: str | None = None
+) -> bool:
+    """Return whether an Excel percentage is already stored as a ratio."""
+    row = rows.get(row_key) or {}
+    formats = row.get("selected_value_formats") or {}
+    number_format = (
+        formats.get(period_id)
+        if period_id is not None and period_id in formats
+        else row.get("selected_value_format")
+    )
+    return isinstance(number_format, str) and "%" in number_format
 
 
 def _validation_values(values):
@@ -3594,6 +3838,12 @@ def _source_row_reuse_allowed(left, right, coa):
         return True
     if _accounts_share_lineage(left.coa_id, right.coa_id, coa):
         return True
+    if _accounts_share_summary_department_lineage(
+        left.coa_id, right.coa_id, coa
+    ):
+        return True
+    if _accounts_share_dependency_path(left.coa_id, right.coa_id, coa):
+        return True
     if any(
         {left.coa_id, right.coa_id} == {target, source}
         for target, terms in SUMMARY_EQUATIONS.items()
@@ -3762,18 +4012,70 @@ def _enrich_adjustment_review_items(plan, coa):
 
 
 def _accounts_share_summary_department_lineage(left, right, coa):
-    for summary_id, department_root in SUMMARY_LINKS.items():
-        if left == summary_id and (
-            right == department_root
-            or _accounts_share_lineage(department_root, right, coa)
+    for summary_id, department_root in DERIVED_SUMMARY_LINKS.items():
+        left_is_summary = left == summary_id or _accounts_share_lineage(
+            summary_id, left, coa
+        )
+        right_is_summary = right == summary_id or _accounts_share_lineage(
+            summary_id, right, coa
+        )
+        left_is_department = left == department_root or _accounts_share_lineage(
+            department_root, left, coa
+        )
+        right_is_department = right == department_root or _accounts_share_lineage(
+            department_root, right, coa
+        )
+        linked_department = str(
+            coa.get(department_root, {}).get("department") or ""
+        )
+        left_is_linked_department = bool(linked_department) and str(
+            coa.get(left, {}).get("department") or ""
+        ) == linked_department
+        right_is_linked_department = bool(linked_department) and str(
+            coa.get(right, {}).get("department") or ""
+        ) == linked_department
+        if left_is_summary and (
+            right_is_department or right_is_linked_department
         ):
             return True
-        if right == summary_id and (
-            left == department_root
-            or _accounts_share_lineage(department_root, left, coa)
+        if right_is_summary and (
+            left_is_department or left_is_linked_department
         ):
             return True
     return False
+
+
+def _accounts_share_dependency_path(left, right, coa):
+    """Whether one account feeds the other through known rollup equations.
+
+    Edges point only from a child/component to its parent/total. Two siblings
+    may therefore share a downstream total without becoming mutually reusable.
+    """
+    edges = {}
+    for coa_id, metadata in coa.items():
+        parent = str(metadata.get("parent_coa_id") or "")
+        if parent:
+            edges.setdefault(coa_id, set()).add(parent)
+    for summary_id, department_id in DERIVED_SUMMARY_LINKS.items():
+        edges.setdefault(department_id, set()).add(summary_id)
+    for target, terms in SUMMARY_EQUATIONS.items():
+        for _sign, source in terms:
+            edges.setdefault(source, set()).add(target)
+
+    def reaches(source, target):
+        pending = [source]
+        visited = {source}
+        while pending:
+            current = pending.pop()
+            for candidate in edges.get(current, ()):
+                if candidate == target:
+                    return True
+                if candidate not in visited:
+                    visited.add(candidate)
+                    pending.append(candidate)
+        return False
+
+    return reaches(left, right) or reaches(right, left)
 
 
 def _accounts_share_lineage(left, right, coa):

@@ -38,6 +38,7 @@ def test_pdf_cli_dispatches_directly_without_excel_conversion(tmp_path, monkeypa
             mapping_provider="test-provider",
             period_labels={"fy": "FY Actual"},
             dropped_periods={},
+            feedback_manifest={"rendered_count": 0},
             session_calls=1,
             session_exhausted=False,
         )

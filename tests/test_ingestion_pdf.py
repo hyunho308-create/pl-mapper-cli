@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from reportlab.pdfgen import canvas
 
+from hotel_pl_normalizer.models.pdf import (
+    PdfDocumentRecord,
+    PdfPage,
+    PdfSource,
+    PdfTextLine,
+    PdfWord,
+)
 from hotel_pl_normalizer.structure.ingestion import read_pdf_document
 from hotel_pl_normalizer.structure.ingestion.pdf import parse_displayed_number
 from hotel_pl_normalizer.structure.pdf import PdfInspectionToolset, PdfToolError
@@ -129,3 +137,55 @@ def test_pdf_declared_tools_match_dispatch_and_signature(tmp_path):
     refused = toolset.dispatch("make_spreadsheet", {})
     assert refused["ok"] is False
     assert "Unknown tool" in refused["error"]
+
+
+def test_pdf_line_reads_clamp_to_the_word_budget() -> None:
+    words = []
+    lines = []
+    for line_number in (1, 2):
+        word_ids = []
+        for index in range(500):
+            word_id = f"p1:w{line_number}_{index}"
+            word_ids.append(word_id)
+            words.append(
+                PdfWord(
+                    word_id=word_id,
+                    text="value",
+                    x0=float(index),
+                    top=float(line_number),
+                    x1=float(index + 1),
+                    bottom=float(line_number + 1),
+                )
+            )
+        lines.append(
+            PdfTextLine(
+                line_id=f"p1:l{line_number}",
+                line_number=line_number,
+                text="dense line",
+                x0=0,
+                top=float(line_number),
+                x1=500,
+                bottom=float(line_number + 1),
+                word_ids=tuple(word_ids),
+            )
+        )
+    document = PdfDocumentRecord(
+        document_id="dense",
+        source=PdfSource(
+            source_id="dense",
+            original_filename="dense.pdf",
+            local_path="dense.pdf",
+            file_hash="dense",
+            ingested_at=datetime.now(timezone.utc),
+        ),
+        pages=[PdfPage(page_number=1, width=612, height=792, words=words, text_lines=lines)],
+    )
+
+    result = PdfInspectionToolset(document).read_page_lines(1, 1, 2)
+
+    assert result["ok"] is True
+    assert result["truncated"] is True
+    assert result["requested_end_line"] == 2
+    assert result["end_line"] == 1
+    assert result["word_count"] == 500
+    assert len(result["lines"]) == 1

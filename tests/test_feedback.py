@@ -202,6 +202,7 @@ def test_unknown_review_kind_is_visible_and_actionable():
     assert finding.category == UNCLASSIFIED_REVIEW
     assert finding.action_required is True
     assert finding.severity == "warning"
+    assert finding.destination == "run_notes"
     assert bundle.inputs[0].status == "rendered"
     assert bundle.unmatched_count == 0
 
@@ -279,3 +280,90 @@ def test_quantified_sentence_replaces_vague_difference_disclosure_clause():
     assert "six-dollar-tens" not in text
     assert "reported total is retained" in text
     assert "66 lower in 2025 Actual" in text
+
+
+def test_generic_coverage_instruction_is_replaced_by_the_actual_difference():
+    target = "S1.total_rooms_expenses"
+    treatment = "Preserve supported source detail and flag the incomplete coverage."
+    bundle = _compose(
+        checks={
+            "actual": [
+                _check(
+                    "source_detail_incomplete",
+                    target,
+                    20.0,
+                    parent=100.0,
+                    children=80.0,
+                )
+            ]
+        },
+        exceptions=[
+            _exception(
+                "source_detail_incomplete",
+                "actual",
+                target,
+                20.0,
+                treatment,
+            )
+        ],
+    )
+
+    finding = bundle.findings[0]
+    assert finding.destination == f"coa:{target}"
+    assert finding.rendered_text == (
+        "Coverage gap: Identified children are 20 below the parent in 2025 Actual."
+    )
+    assert treatment not in finding.rendered_text
+
+
+def test_derived_summary_link_collapses_a_proven_downstream_repeat():
+    detail = "S3.total_other_operated_departments_revenue"
+    summary = "S12.total_other_operated_departments_revenue"
+    message = "The OOD schedule differs from an alternate source presentation."
+    bundle = _compose(
+        reviews=[_review("source_discrepancy", message, [detail])],
+        exceptions=[
+            _exception("source_discrepancy", "actual", detail, 125.0, message),
+            _exception(
+                "source_discrepancy",
+                "actual",
+                summary,
+                125.0,
+                "The same source difference reaches the Summary OOD account.",
+            ),
+        ],
+    )
+
+    assert len(bundle.findings) == 1
+    assert summary in bundle.findings[0].affected_coa_ids
+    assert "also affects Total Other Operated Departments Revenue" in (
+        bundle.findings[0].rendered_text
+    )
+    assert any(item.status == "consequence_of" for item in bundle.inputs)
+
+
+def test_duplicate_equivalent_exceptions_join_one_check_without_repetition():
+    target = "S12.total_revenue"
+    exception = _exception(
+        "small_source_reconciliation_difference",
+        "actual",
+        target,
+        1.0,
+        "The reported total is retained.",
+    )
+    bundle = _compose(
+        checks={
+            "actual": [
+                _check(
+                    "small_source_reconciliation_difference",
+                    target,
+                    1.0,
+                )
+            ]
+        },
+        exceptions=[exception, dict(exception)],
+    )
+
+    assert len(bundle.findings) == 1
+    assert len(bundle.inputs) == 3
+    assert sum(item.status == "superseded_by" for item in bundle.inputs) == 1

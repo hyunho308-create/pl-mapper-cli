@@ -8,6 +8,7 @@ from importlib import resources
 from typing import Any, Callable
 
 from hotel_pl_normalizer.models.exploration import WorkbookExploration
+from hotel_pl_normalizer.models.workbook import WorkbookRecord
 
 from .reader import LazyWorkbook
 from .toolset import WorkbookExplorationToolset
@@ -46,6 +47,7 @@ def explore_workbook(
     workbook_path,
     *,
     client,
+    workbook_record: WorkbookRecord | None = None,
     # A session now owes `list_sheets`, both submissions, and a read of five
     # financial sheets before periods are accepted -- eight turns before any
     # exploration or repair. Twelve left no room: one workbook exhausted the
@@ -65,7 +67,11 @@ def explore_workbook(
     trace: list[dict] = []
 
     with LazyWorkbook(workbook_path) as workbook:
-        toolset = WorkbookExplorationToolset(workbook, max_reads=max_reads)
+        toolset = WorkbookExplorationToolset(
+            workbook,
+            workbook_record=workbook_record,
+            max_reads=max_reads,
+        )
         prompt = render_exploration_prompt(workbook.path.name)
         options: dict[str, Any] = {
             "toolset": toolset,

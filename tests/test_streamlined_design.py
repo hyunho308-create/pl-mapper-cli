@@ -24,6 +24,7 @@ from hotel_pl_normalizer.mapping.mapper import (
 from hotel_pl_normalizer.models.binding import WorkbookBindings
 from hotel_pl_normalizer.models.exploration import WorkbookExploration
 from hotel_pl_normalizer.models.period_selection import (
+    CanonicalPeriod,
     PeriodColumnSelection,
     PeriodColumnSelectionMap,
     PeriodOption,
@@ -33,6 +34,7 @@ from hotel_pl_normalizer.models.sheet_selection import SheetNameSelectionResult
 from hotel_pl_normalizer.models.workbook import (
     CellRecord,
     FileType,
+    MergedRange,
     WorkbookMetadata,
     WorkbookRecord,
     WorkbookRow,
@@ -44,11 +46,13 @@ from hotel_pl_normalizer.structure.binding import (
     bind_periods,
     binding_to_selection_maps,
 )
+from hotel_pl_normalizer.structure.binding.checks import check_bindings
 from hotel_pl_normalizer.structure.binding.toolset import PeriodBindingToolset
 from hotel_pl_normalizer.structure.exploration.agent import render_exploration_prompt
 from hotel_pl_normalizer.structure.exploration.toolset import (
     WorkbookExplorationToolset,
 )
+from hotel_pl_normalizer.structure.period_headers import period_column_problem
 
 
 def _record() -> WorkbookRecord:
@@ -162,7 +166,7 @@ class StreamlinedDesignTests(unittest.TestCase):
         self.assertIn(
             "Anchor periods, then record sheet coverage", routed["next_phase"]
         )
-        self.assertIn("Do not delete a valid", routed["next_phase"])
+        self.assertIn("confirmed on at least", routed["next_phase"])
         self.assertNotIn("Return the intersection", routed["next_phase"])
 
     def test_auxiliary_t12_summary_cannot_expand_controlling_periods(self) -> None:
@@ -211,6 +215,11 @@ class StreamlinedDesignTests(unittest.TestCase):
             "end_month": "2025-12",
             "sheets_present": ["Summary", "Rooms", "F&B", "A&G", "Engineering"],
             "evidence": ["Summary December Actual"],
+            "department_confirmation": {
+                "sheet_name": "Rooms",
+                "excel_column": "B",
+                "evidence": ["Rooms December Actual"],
+            },
         }
         incomplete = toolset.dispatch(
             "submit_periods",
@@ -256,6 +265,225 @@ class StreamlinedDesignTests(unittest.TestCase):
         structure = accepted["structure"]
         self.assertEqual(structure["controlling_summary_sheet"], "Summary")
         self.assertEqual(len(structure["periods"]), 1)
+
+    def test_monthly_spread_cannot_control_a_recurring_ptd_ytd_family(self) -> None:
+        names = ["2025 Consolidated", "SHG - P12", "QED-P12"]
+        headers = {
+            "2025 Consolidated": [
+                [
+                    f"{month} 2025"
+                    for month in (
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
+                    )
+                ]
+            ],
+            "SHG - P12": [
+                ["For the Month Ending 2025-12-31"],
+                ["CURRENT PERIOD", "YEAR TO DATE"],
+                ["Actual", "Budget", "Last Year"],
+            ],
+            "QED-P12": [
+                ["This Month", "Budget", "Last Year Actual"],
+                ["YTD", "YTD Budget", "Last Year YTD"],
+            ],
+        }
+
+        class PontchartrainLikeWorkbook:
+            path = Path("pontchartrain.xlsx")
+
+            @staticmethod
+            def sheets():
+                return [SimpleNamespace(sheet_name=name) for name in names]
+
+            @staticmethod
+            def read_rows(sheet_name, start, end=None):
+                return [
+                    [
+                        SimpleNamespace(
+                            coordinate=f"{chr(65 + column)}{row}", value=value
+                        )
+                        for column, value in enumerate(values)
+                    ]
+                    for row, values in enumerate(headers[sheet_name], start=1)
+                ]
+
+            @staticmethod
+            def merged_ranges(sheet_name):
+                return []
+
+        toolset = WorkbookExplorationToolset(PontchartrainLikeWorkbook())
+        routing = {
+            "workbook_layout": "multi_tab_department_p_and_l",
+            "sheets": [
+                {
+                    "sheet_name": name,
+                    "include_as_financial_evidence": True,
+                    "role": (
+                        "department_p_and_l" if name == "QED-P12" else "summary_p_and_l"
+                    ),
+                    "confidence": "high",
+                    "evidence": ["financial statement"],
+                }
+                for name in names
+            ],
+        }
+        assert toolset.dispatch("submit_routing", routing)["accepted"]
+        for name in ["2025 Consolidated", "QED-P12"]:
+            toolset.dispatch("read_rows", {"sheet_name": name, "start_row": 1})
+
+        result = toolset.dispatch(
+            "submit_periods",
+            {
+                "controlling_summary_sheet": "2025 Consolidated",
+                "periods": [
+                    {
+                        "scenario": "actual",
+                        "start_month": "2025-01",
+                        "end_month": "2025-12",
+                        "sheets_present": ["2025 Consolidated", "QED-P12"],
+                        "department_confirmation": {
+                            "sheet_name": "QED-P12",
+                            "excel_column": "D",
+                        },
+                    }
+                ],
+            },
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertIn("auxiliary presentation", result["error"])
+        self.assertIn("SHG - P12", result["error"])
+
+    def test_discovery_verifies_support_without_empty_template_veto(self) -> None:
+        names = ["Summary", "Rooms", "Empty Outlet"]
+
+        class HeaderWorkbook:
+            path = Path("support.xlsx")
+
+            @staticmethod
+            def sheets():
+                return [SimpleNamespace(sheet_name=name) for name in names]
+
+            @staticmethod
+            def read_rows(sheet_name, start, end=None):
+                return [
+                    [
+                        SimpleNamespace(coordinate="B1", value="YTD Actual"),
+                        SimpleNamespace(coordinate="C1", value="YTD Budget"),
+                    ]
+                ]
+
+            @staticmethod
+            def merged_ranges(sheet_name):
+                return []
+
+        def statement(name: str, actual: float, budget: float) -> WorkbookSheet:
+            return WorkbookSheet(
+                sheet_id=f"sheet:{name}",
+                sheet_name=name,
+                max_row=2,
+                max_column=3,
+                rows=[
+                    WorkbookRow(
+                        row_index=1,
+                        cells=[
+                            CellRecord(1, 1, "A1", "Account", "Account"),
+                            CellRecord(1, 2, "B1", "YTD Actual", "YTD Actual"),
+                            CellRecord(1, 3, "C1", "YTD Budget", "YTD Budget"),
+                        ],
+                    ),
+                    WorkbookRow(
+                        row_index=2,
+                        cells=[
+                            CellRecord(2, 1, "A2", "Rooms Revenue", "Rooms Revenue"),
+                            CellRecord(2, 2, "B2", actual, str(actual)),
+                            CellRecord(2, 3, "C2", budget, str(budget)),
+                        ],
+                    ),
+                ],
+            )
+
+        record = WorkbookRecord(
+            workbook_id="wb_support",
+            source=_record().source,
+            workbook_metadata=WorkbookMetadata(sheet_count=3),
+            sheets=[
+                statement("Summary", 100.0, 0.0),
+                statement("Rooms", 75.0, 0.0),
+                statement("Empty Outlet", 0.0, 0.0),
+            ],
+        )
+        toolset = WorkbookExplorationToolset(HeaderWorkbook(), workbook_record=record)
+        routing = {
+            "workbook_layout": "multi_tab_department_p_and_l",
+            "sheets": [
+                {
+                    "sheet_name": name,
+                    "include_as_financial_evidence": True,
+                    "role": (
+                        "summary_p_and_l" if name == "Summary" else "department_p_and_l"
+                    ),
+                    "confidence": "high",
+                    "evidence": ["financial statement"],
+                }
+                for name in names
+            ],
+        }
+        assert toolset.dispatch("submit_routing", routing)["accepted"]
+        for name in names:
+            toolset.dispatch("read_rows", {"sheet_name": name, "start_row": 1})
+
+        budget = toolset.dispatch(
+            "submit_periods",
+            {
+                "controlling_summary_sheet": "Summary",
+                "periods": [
+                    {
+                        "scenario": "budget",
+                        "start_month": "2025-01",
+                        "end_month": "2025-12",
+                        "sheets_present": ["Summary", "Rooms"],
+                        "department_confirmation": {
+                            "sheet_name": "Rooms",
+                            "excel_column": "C",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertFalse(budget["accepted"])
+        self.assertIn("no non-zero labelled values", budget["error"])
+
+        actual = toolset.dispatch(
+            "submit_periods",
+            {
+                "controlling_summary_sheet": "Summary",
+                "periods": [
+                    {
+                        "scenario": "actual",
+                        "start_month": "2025-01",
+                        "end_month": "2025-12",
+                        "sheets_present": ["Summary", "Rooms"],
+                        "department_confirmation": {
+                            "sheet_name": "Rooms",
+                            "excel_column": "B",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertTrue(actual["accepted"])
 
     def test_excel_monthly_controlling_summary_cannot_collapse_to_ttm_only(self) -> None:
         names = ["Summary", "Rooms", "F&B", "A&G", "Engineering"]
@@ -309,6 +537,10 @@ class StreamlinedDesignTests(unittest.TestCase):
             "end_month": "2025-09",
             "sheets_present": names,
             "evidence": ["Summary total"],
+            "department_confirmation": {
+                "sheet_name": "Rooms",
+                "excel_column": "B",
+            },
         }
         collapsed = toolset.dispatch(
             "submit_periods",
@@ -330,6 +562,10 @@ class StreamlinedDesignTests(unittest.TestCase):
                     "end_month": value,
                     "sheets_present": names,
                     "evidence": [f"Summary {value}"],
+                    "department_confirmation": {
+                        "sheet_name": "Rooms",
+                        "excel_column": "B",
+                    },
                 }
             )
         complete = toolset.dispatch(
@@ -374,6 +610,358 @@ class StreamlinedDesignTests(unittest.TestCase):
         self.assertTrue(result["accepted"])
         self.assertTrue(
             WorkbookBindings.model_validate(result["structure"]).bindings
+        )
+
+    def test_binding_rejects_budget_variance_as_a_period_column(self) -> None:
+        sheet = WorkbookSheet(
+            sheet_id="sheet:summary",
+            sheet_name="Summary",
+            max_row=6,
+            max_column=2,
+            rows=[
+                WorkbookRow(
+                    row_index=1,
+                    cells=[
+                        CellRecord(1, 1, "A1", "Statistics", "Statistics"),
+                        CellRecord(1, 2, "B1", "Actual", "Actual"),
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=2,
+                    cells=[
+                        CellRecord(2, 1, "A2", "Rooms Sold", "Rooms Sold"),
+                        CellRecord(2, 2, "B2", 80.0, "80"),
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=4,
+                    cells=[
+                        CellRecord(4, 1, "A4", "Account", "Account"),
+                        CellRecord(4, 2, "B4", "Variance", "Variance"),
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=5,
+                    cells=[
+                        CellRecord(5, 2, "B5", "YTD Budget", "YTD Budget"),
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=6,
+                    cells=[
+                        CellRecord(6, 1, "A6", "Rooms Revenue", "Rooms Revenue"),
+                        CellRecord(6, 2, "B6", 100.0, "100"),
+                    ],
+                ),
+            ],
+        )
+        workbook = WorkbookRecord(
+            workbook_id="wb_variance",
+            source=_record().source,
+            workbook_metadata=WorkbookMetadata(sheet_count=1),
+            sheets=[sheet],
+        )
+        period_id = "2025-01_2025-12_budget"
+        toolset = PeriodBindingToolset(
+            workbook,
+            period_ids=[period_id],
+            financial_sheets=["Summary"],
+            controlling_summary_sheet="Summary",
+        )
+        layout = toolset.dispatch("list_sheet_layouts", {})["layout_groups"][0]
+        toolset.dispatch("read_rows", {"sheet_name": "Summary", "start_row": 1})
+        result = toolset.dispatch(
+            "submit_layout_bindings",
+            {
+                "layout_bindings": [
+                    {
+                        "layout_id": layout["layout_id"],
+                        "period_id": period_id,
+                        "excel_column": "B",
+                    }
+                ],
+                "layout_unavailable": [],
+            },
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertIn("variance", result["error"])
+
+        final = check_bindings(
+            WorkbookBindings.model_validate(
+                {
+                    "bindings": [
+                        {
+                            "period_id": period_id,
+                            "sheet_name": "Summary",
+                            "excel_column": "B",
+                        }
+                    ]
+                }
+            ),
+            {"Summary": sheet},
+            period_ids=[period_id],
+            financial_sheets=["Summary"],
+        )
+        self.assertFalse(final.accepted)
+        self.assertTrue(any("variance" in item for item in final.rejections))
+
+    def test_kpi_rows_and_stale_por_do_not_poison_an_amount_column(self) -> None:
+        rows = [
+            WorkbookRow(
+                row_index=1,
+                cells=[
+                    CellRecord(1, 2, "B1", "% or POR", "% or POR"),
+                ],
+            ),
+            WorkbookRow(
+                row_index=2,
+                cells=[
+                    CellRecord(2, 2, "B2", "YTD Actual", "YTD Actual"),
+                ],
+            ),
+        ]
+        for row_number, (label, value) in enumerate(
+            [("Occupancy", 0.72), ("ADR", 245.0), ("RevPAR", 176.4)],
+            start=3,
+        ):
+            rows.append(
+                WorkbookRow(
+                    row_index=row_number,
+                    cells=[
+                        CellRecord(row_number, 1, f"A{row_number}", label, label),
+                        CellRecord(row_number, 2, f"B{row_number}", value, str(value)),
+                    ],
+                )
+            )
+        sheet = WorkbookSheet(
+            sheet_id="sheet:kpis",
+            sheet_name="Summary",
+            max_row=5,
+            max_column=2,
+            rows=rows,
+        )
+        result = check_bindings(
+            WorkbookBindings.model_validate(
+                {
+                    "bindings": [
+                        {
+                            "period_id": "2025-01_2025-12_actual",
+                            "sheet_name": "Summary",
+                            "excel_column": "B",
+                        }
+                    ]
+                }
+            ),
+            {"Summary": sheet},
+            period_ids=["2025-01_2025-12_actual"],
+            financial_sheets=["Summary"],
+        )
+
+        self.assertTrue(result.accepted, result.rejections)
+
+    def test_earlier_snapshot_cannot_confirm_current_controller(self) -> None:
+        sheet = WorkbookSheet(
+            sheet_id="sheet:old",
+            sheet_name="QED-P11",
+            max_row=3,
+            max_column=2,
+            rows=[
+                WorkbookRow(
+                    row_index=1,
+                    cells=[
+                        CellRecord(
+                            1,
+                            1,
+                            "A1",
+                            "For the Month Ending 2025-11-30",
+                            "For the Month Ending 2025-11-30",
+                        )
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=2,
+                    cells=[
+                        CellRecord(2, 1, "A2", "Account", "Account"),
+                        CellRecord(2, 2, "B2", "YTD Actual", "YTD Actual"),
+                    ],
+                ),
+                WorkbookRow(
+                    row_index=3,
+                    cells=[
+                        CellRecord(3, 1, "A3", "Rooms Revenue", "Rooms Revenue"),
+                        CellRecord(3, 2, "B3", 100.0, "100"),
+                    ],
+                ),
+            ],
+        )
+        problem = period_column_problem(
+            sheet,
+            CanonicalPeriod(
+                scenario=PeriodScenario.ACTUAL,
+                start_month="2025-01",
+                end_month="2025-12",
+            ),
+            "B",
+            latest_period_year=2025,
+            controller_as_of=(2025, 12),
+        )
+
+        self.assertIn("schedule ends 2025-11", problem)
+
+    def test_direct_act_headers_override_a_wide_forecast_banner(self) -> None:
+        month_headers = [
+            "January 2025 (ACT)",
+            "February 2025 (ACT)",
+            "March 2025 (ACT)",
+            "April 2025 (ACT)",
+            "May 2025 (ACT)",
+            "June 2025 (ACT)",
+            "July 2025 (ACT)",
+            "August 2025 (ACT)",
+            "September 2025 (ACT)",
+            "October 2025 (ACT)",
+            "November 2025 (ACT)",
+            "December 2025 (ACT)",
+            "Total",
+        ]
+        rows = [
+            WorkbookRow(
+                row_index=1,
+                cells=[
+                    CellRecord(
+                        1,
+                        2,
+                        "B1",
+                        "Full Year - All Department Detail",
+                        "Full Year - All Department Detail",
+                        is_merged=True,
+                        merged_parent="B1",
+                    )
+                ],
+            ),
+            WorkbookRow(
+                row_index=2,
+                cells=[
+                    CellRecord(
+                        2,
+                        2,
+                        "B2",
+                        "Year - January-December, 2025 - Primary Forecast",
+                        "Year - January-December, 2025 - Primary Forecast",
+                        is_merged=True,
+                        merged_parent="B2",
+                    )
+                ],
+            ),
+            WorkbookRow(
+                row_index=3,
+                cells=[
+                    CellRecord(3, column, f"{chr(64 + column)}3", value, value)
+                    for column, value in enumerate(month_headers, start=2)
+                ],
+            ),
+            WorkbookRow(
+                row_index=4,
+                cells=[
+                    CellRecord(4, 1, "A4", "Account", "Account"),
+                    *[
+                        CellRecord(4, column, f"{chr(64 + column)}4", "AMT", "AMT")
+                        for column in range(2, 15)
+                    ],
+                ],
+            ),
+            WorkbookRow(
+                row_index=5,
+                cells=[
+                    CellRecord(5, 1, "A5", "Rooms Revenue", "Rooms Revenue"),
+                    *[
+                        CellRecord(5, column, f"{chr(64 + column)}5", 100.0, "100")
+                        for column in range(2, 15)
+                    ],
+                ],
+            ),
+        ]
+        sheet = WorkbookSheet(
+            sheet_id="sheet:hyatt",
+            sheet_name="Summary",
+            max_row=5,
+            max_column=14,
+            rows=rows,
+            merged_ranges=[
+                MergedRange("B1:N1", 1, 2, "Full Year - All Department Detail"),
+                MergedRange(
+                    "B2:N2",
+                    2,
+                    2,
+                    "Year - January-December, 2025 - Primary Forecast",
+                ),
+            ],
+        )
+        workbook = WorkbookRecord(
+            workbook_id="wb_hyatt",
+            source=_record().source,
+            workbook_metadata=WorkbookMetadata(sheet_count=1),
+            sheets=[sheet],
+        )
+        january = "2025-01_2025-01_actual"
+        annual = "2025-01_2025-12_actual"
+        toolset = PeriodBindingToolset(
+            workbook,
+            period_ids=[january, annual],
+            financial_sheets=["Summary"],
+            controlling_summary_sheet="Summary",
+        )
+        layout = toolset.dispatch("list_sheet_layouts", {})["layout_groups"][0]
+        candidates = {
+            item["excel_column"]: item for item in layout["candidate_columns"]
+        }
+
+        self.assertEqual(candidates["B"]["scenario_hints"], ["actual"])
+        self.assertEqual(candidates["N"]["scenario_hints"], ["actual"])
+        result = toolset.dispatch(
+            "submit_layout_bindings",
+            {
+                "layout_bindings": [
+                    {
+                        "layout_id": layout["layout_id"],
+                        "period_id": january,
+                        "excel_column": "B",
+                    },
+                    {
+                        "layout_id": layout["layout_id"],
+                        "period_id": annual,
+                        "excel_column": "N",
+                    },
+                ],
+                "layout_unavailable": [],
+            },
+        )
+        self.assertTrue(result["accepted"], result)
+
+        self.assertIsNone(
+            period_column_problem(
+                sheet,
+                CanonicalPeriod(
+                    scenario=PeriodScenario.ACTUAL,
+                    start_month="2025-01",
+                    end_month="2025-01",
+                ),
+                "B",
+                latest_period_year=2025,
+            )
+        )
+        self.assertIsNone(
+            period_column_problem(
+                sheet,
+                CanonicalPeriod(
+                    scenario=PeriodScenario.ACTUAL,
+                    start_month="2025-01",
+                    end_month="2025-12",
+                ),
+                "N",
+                latest_period_year=2025,
+            )
         )
 
     def test_scripted_binding_reaches_the_period_selection_map(self) -> None:
@@ -499,6 +1087,34 @@ class StreamlinedDesignTests(unittest.TestCase):
         self.assertTrue(evidence)
         self.assertFalse(
             any(item["row_key"].startswith("Unavailable!") for item in evidence)
+        )
+
+    def test_mapping_evidence_keeps_selected_excel_number_formats(self) -> None:
+        workbook = _record()
+        workbook.sheets[0].rows[0].cells[1].number_format = "0.00%"
+        period_map = PeriodColumnSelectionMap(
+            selection_map_id="selection_test",
+            workbook_id="wb_test",
+            requested_period="2025 Actual",
+            sheet_selections=[
+                PeriodColumnSelection(
+                    sheet_name="P&L",
+                    value_column=2,
+                    excel_column="B",
+                    period_label="2025 Actual",
+                )
+            ],
+        )
+
+        evidence = compact_workbook_evidence(
+            workbook,
+            {"actual": period_map},
+            include_sheets={"P&L"},
+        )
+
+        self.assertEqual(
+            evidence[0]["selected_value_formats"],
+            {"actual": "0.00%"},
         )
 
     def test_mapper_prompt_carries_routing_without_department_ids(self) -> None:

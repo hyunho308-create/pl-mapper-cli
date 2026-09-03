@@ -10,6 +10,12 @@ and `required_department_reads`. Select one controlling core summary, read its
 header block, and read header blocks from the required number of normal
 department P&Ls. `submit_periods` is refused until you have.
 
+When sheets form a recurring monthly snapshot series, inspect the latest/current
+member of each family—the sheet whose reporting end date matches the controlling
+summary. Do not satisfy the confirmation reads with January through April when
+the proposed controller ends in December. Earlier snapshots show earlier
+periods; they do not answer what the current workbook offers.
+
 Only sheets with `include_as_financial_evidence=true` count. Excluded sheets
 hold no usable P&L evidence, so reading them tells you nothing about which
 periods this workbook reports and does not satisfy the requirement.
@@ -23,6 +29,9 @@ A separate `12Mth`, `T12`, `Monthly`, `Trend`, `Trailing`, or similar summary-on
 tab is an auxiliary view when its grain differs from the core summary and
 department schedules. You may inspect it, but it does not count as one of the
 department confirmations and it cannot add periods to the selectable catalog.
+The same rule applies to a one-off consolidated Jan-Dec/forecast view when the
+recurring summary and department family uses PTD/YTD. Choose the latest PTD/YTD
+summary in that family, not the wider auxiliary view.
 
 ## One period per column, always
 
@@ -95,15 +104,29 @@ of Income whose layout matches the ordinary department P&Ls. Its real amount
 columns—and only its columns—establish the workbook's canonical periods. Return
 its exact sheet name as `controlling_summary_sheet`.
 
-Return the periods shown on that controlling summary. **Do not delete a valid
-controlling period merely because another financial sheet lacks it.** The next
-stage binds every chosen period independently on every routed sheet and can mark
-one sheet unavailable without losing the period for the whole workbook.
+Return the periods shown on that controlling summary **and confirmed on at least
+one current, normal department P&L with matching scenario and coverage**. This
+confirmation happens before the catalog reaches the user. A period confined to
+a summary or supporting schedule is not a core-workbook choice.
 
 For each canonical period, compare the other sheets and put into
 `sheets_present` every sheet you actually opened that carries the same economic
-period. This is a coverage record, not an all-sheets admission test. Never add an
-unread sheet on the assumption that it matches.
+period. Never add an unread sheet on the assumption that it matches. For a
+multi-tab department workbook, at least one named sheet must be a normal
+department P&L, not another summary or a supporting schedule.
+
+Also set that period's `department_confirmation` to one exact current normal
+department sheet and its amount-column letter. Cite the header cells in its
+`evidence`. This is not a request to bind every sheet early; it is one cheap,
+auditable confirmation before the option reaches the user. The tool checks that
+the department schedule has the same reporting end date as the controller, the
+column contains non-zero labelled values, and it is not a variance, percentage,
+POR/PAR, or ratio subcolumn.
+
+This is not an intersection across every tab. A series such as `P01` through
+`P12` is twelve historical snapshots of one schedule family; its current `P12`
+member can confirm December PTD and full-year YTD periods. Likewise, a genuinely
+blank optional outlet/OOD/template sheet neither confirms nor vetoes a period.
 
 Compare economic identity rather than exact wording. Scenario and date coverage
 must match:
@@ -119,7 +142,8 @@ must match:
 
 Keep one canonical entry for equivalent presentations and describe the differing
 headers in its evidence. A detail sheet that lacks the period simply stays out of
-that period's `sheets_present`; mention material coverage gaps in `notes`.
+that period's `sheets_present`; mention material coverage gaps in `notes`. Remove
+a proposed period only when no current normal department family confirms it.
 
 An isolated column from another summary, T12, monthly, trend, department, or
 supporting schedule never becomes a workbook choice. Those sheets confirm
@@ -130,8 +154,11 @@ coverage and supply detail for binding; they do not expand the catalog.
 For each period, confirm that it appears on `controlling_summary_sheet`; every
 period's `sheets_present` must name it. Then verify that `sheets_present` contains only opened sheets
 where you observed either that exact header or a scenario-and-date-equivalent
-column. Uneven coverage is valid and should remain visible rather than causing
-the period to disappear.
+column. In a multi-tab department workbook, it must also name at least one
+current normal department P&L carrying a non-zero amount column for that period.
+Name that exact sheet and column in `department_confirmation`.
+Uneven coverage remains valid after this core confirmation; optional blank tabs
+and historical members of a recurring snapshot family do not remove the period.
 
 ## Never return a period you did not see
 
@@ -152,9 +179,11 @@ real choices exactly as an invented series adds false ones.
 
 ## What to return
 
-Each period contains only its deterministic `period_id`, deterministic `label`,
-`scenario`, inclusive `start_month`, inclusive `end_month`, and conditional
-`actual_months`.
+Each period contains its deterministic `period_id`, deterministic `label`,
+`scenario`, inclusive `start_month`, inclusive `end_month`, conditional
+`actual_months`, `sheets_present`, `evidence`, and (for a multi-tab department
+workbook) one `department_confirmation` containing `sheet_name`, `excel_column`,
+and concise header evidence.
 
 `scenario` is exactly `actual`, `forecast`, or `budget`. Classify Prior Year and
 Last Year columns as `actual` with their older dates. Never use an unknown,

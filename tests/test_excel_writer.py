@@ -381,7 +381,9 @@ def test_validation_checks_reach_the_feedback_column(tmp_path):
     sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
-    assert "Rollup warning: Child accounts are 10 less than the parent account." in note
+    assert note == (
+        "Needs review: Child accounts are 10 below the parent in YTD Actual."
+    )
 
 
 def test_review_items_attach_to_their_accounts(tmp_path):
@@ -488,8 +490,9 @@ def test_per_period_checks_name_their_period(tmp_path):
     sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
-    assert note.startswith("2024 YTD — ")
-    assert "Rollup warning: Child accounts are 20 less than the parent account." in note
+    assert note == (
+        "Coverage gap: Identified children are 20 below the parent in 2024 YTD."
+    )
 
 
 def test_repeated_period_rollups_are_combined_into_one_feedback_line(tmp_path):
@@ -519,8 +522,8 @@ def test_repeated_period_rollups_are_combined_into_one_feedback_line(tmp_path):
     ).value
 
     assert note == (
-        "Coverage gap: child accounts versus parent — "
-        "2025 Actual: 20 below; 2024 Actual: 15 below."
+        "Coverage gap: Identified children are 20 below the parent in 2025 Actual "
+        "and 15 below the parent in 2024 Actual."
     )
 
 
@@ -604,38 +607,35 @@ def test_large_residual_plug_warning_is_human_readable(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("actual", "expected", "message"),
+    ("target", "actual", "expected", "message"),
     [
         (
+            "S12.total_sales_and_marketing_expenses",
             1_872_364.54,
             1_441_814.20,
-            "Needs review: Summary S&M expenses exceed the detailed S&M schedule by 430,550.",
+            "Needs review: The Summary amount is 430,550 above the independently "
+            "reported department amount in YTD Actual.",
         ),
         (
+            "S12.total_administrative_and_general_expenses",
             5_143_848.14,
             5_150_329.75,
-            "Needs review: Summary A&G expenses are below the detailed A&G schedule by 6,482.",
+            "Needs review: The Summary amount is 6,482 below the independently "
+            "reported department amount in YTD Actual.",
         ),
         (
+            "S12.total_departmental_expenses",
             11_822_120.13,
             11_786_544.37,
-            "Needs review: Summary Total Departmental Expenses exceed the detailed combined Rooms, F&B, and OOD department schedule by 35,576.",
+            "Needs review: The Summary amount is 35,576 above the independently "
+            "reported department amount in YTD Actual.",
         ),
     ],
 )
 def test_summary_department_feedback_shows_direction_and_variance(
-    tmp_path, actual, expected, message
+    tmp_path, target, actual, expected, message
 ):
     ids = canonical_ids()
-    target = (
-        "S12.total_sales_and_marketing_expenses"
-        if "S&M" in message
-        else (
-            "S12.total_departmental_expenses"
-            if "Total Departmental" in message
-            else "S12.total_administrative_and_general_expenses"
-        )
-    )
     result = build_result(
         coa={i: {} for i in ids},
         checks=[
@@ -649,7 +649,7 @@ def test_summary_department_feedback_shows_direction_and_variance(
         row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL
     ).value
 
-    assert note.splitlines()[0] == message
+    assert note == message
 
 
 def test_summary_math_feedback_names_equation_and_variance(tmp_path):
@@ -671,9 +671,10 @@ def test_summary_math_feedback_names_equation_and_variance(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL
     ).value
 
-    assert note.splitlines()[0] == (
-        "Needs review: Summary Total Departmental Expenses are 35,576 greater "
-        "than Rooms, F&B, and OOD expenses combined."
+    assert note == (
+        "Needs review: The reported Summary amount is 35,576 above total rooms "
+        "expenses + total food and beverage expenses + total other operated "
+        "departments expenses in YTD Actual."
     )
 
 
@@ -752,8 +753,8 @@ def test_run_notes_lists_final_rollup_mismatches_over_ten(tmp_path):
     assert notes.row_dimensions[9].height > 14.5
 
 
-def test_run_notes_only_surfaces_rollup_mismatches(tmp_path):
-    """Unrelated validation and execution detail stays in COA feedback."""
+def test_run_notes_keeps_targetless_validation_and_execution_detail(tmp_path):
+    """A finding with no valid COA destination remains visible in Run Notes."""
     ids = canonical_ids()
     result = build_result(
         coa={i: {} for i in ids},
@@ -769,6 +770,9 @@ def test_run_notes_only_surfaces_rollup_mismatches(tmp_path):
         "No summary math errors",
         "No summary-to-department errors",
         "No material rollup warnings",
+        "Needs review: Rooms row 14 may have been assigned to unrelated accounts. "
+        "Affected periods: YTD Actual.",
+        "Needs review: Sheet 'Budget' could not be read.",
     ]
     assert all(
         cell.value in (None, "")

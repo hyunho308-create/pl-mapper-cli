@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from openpyxl.utils import get_column_letter
@@ -13,6 +12,13 @@ from hotel_pl_normalizer.models.binding import (
     WorkbookBindings,
 )
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
+from hotel_pl_normalizer.structure.period_headers import (
+    column_forbidden_markers,
+    column_scenario_markers,
+)
+from hotel_pl_normalizer.structure.period_headers import (
+    header_markers as _header_markers,
+)
 from hotel_pl_normalizer.structure.representation import (
     infer_label_layout,
     select_row_label,
@@ -42,43 +48,6 @@ MAX_HEADER_ROWS = 30
 DEFAULT_HEADER_ROWS = 15
 LAYOUT_HEADER_ROWS = 30
 MAX_LAYOUT_SUBMISSIONS = 3
-
-_MONTHS = (
-    "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    "jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
-    "nov(?:ember)?|dec(?:ember)?"
-)
-_HEADER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("actual", re.compile(r"\bactuals?\b", re.I)),
-    ("budget", re.compile(r"\bbudget\b|\bbud\b", re.I)),
-    ("forecast", re.compile(r"\bforecast\b|\bfcst\b", re.I)),
-    (
-        "prior_year",
-        re.compile(r"\bprior\s*year\b|\blast\s*year\b|\bprevious\s*year\b|\bLY\b", re.I),
-    ),
-    ("ytd", re.compile(r"\bytd\b|year\s*[- ]?to\s*[- ]?date", re.I)),
-    ("ptd", re.compile(r"\bptd\b|\bperiodic\b|period\s*[- ]?to\s*[- ]?date", re.I)),
-    ("ttm", re.compile(r"\bttm\b|\bt12\b|trailing\s*(?:twelve|12)", re.I)),
-    ("total", re.compile(r"\btotal\b|\bannual\b|\bfull\s*year\b|\bfy\b", re.I)),
-    ("amount", re.compile(r"\bamount\b|\bamt\b", re.I)),
-    ("percent", re.compile(r"%|\bpercent\b|\bpct\b", re.I)),
-    ("variance", re.compile(r"\bvariance\b|\bvar\b|fav\s*/?\s*\(?unfav", re.I)),
-    ("ratio", re.compile(r"\b(?:r?por|par|margin|occupancy|adr|revpar)\b", re.I)),
-)
-_MONTH_NUMBERS = {
-    "jan": 1,
-    "feb": 2,
-    "mar": 3,
-    "apr": 4,
-    "may": 5,
-    "jun": 6,
-    "jul": 7,
-    "aug": 8,
-    "sep": 9,
-    "oct": 10,
-    "nov": 11,
-    "dec": 12,
-}
 
 
 def _layout_binding_submission_schema() -> dict[str, Any]:
@@ -440,6 +409,9 @@ class PeriodBindingToolset:
                         "scenario_hints": _column_scenario_hints(
                             representative, column
                         ),
+                        "forbidden_hints": sorted(
+                            column_forbidden_markers(representative, column)
+                        ),
                         "sheets_with_numbers": len(numeric),
                         "sheets_with_nonzero": len(nonzero),
                     }
@@ -789,6 +761,14 @@ class PeriodBindingToolset:
                         f"{layout_id} has no listed numeric candidate column {column!r}.",
                         "submit_layout_bindings",
                     )
+                forbidden_hints = set(candidates[column]["forbidden_hints"])
+                if forbidden_hints:
+                    return self._reject(
+                        f"{layout_id} column {column} is explicitly marked as "
+                        f"{', '.join(sorted(forbidden_hints))}, so it is not a "
+                        "period amount column.",
+                        "submit_layout_bindings",
+                    )
                 scenario_hints = set(candidates[column]["scenario_hints"])
                 allowed_hints = _allowed_scenario_hints(period_id)
                 if scenario_hints and not scenario_hints & allowed_hints:
@@ -818,6 +798,18 @@ class PeriodBindingToolset:
                             return self._reject(
                                 f"Sheet override for {sheet_name!r} requires a valid "
                                 "Excel column.",
+                                "submit_layout_bindings",
+                            )
+                        override_forbidden = column_forbidden_markers(
+                            self.sheets[sheet_name],
+                            _excel_column_number(override_column),
+                        )
+                        if override_forbidden:
+                            return self._reject(
+                                f"Sheet override {sheet_name!r} column "
+                                f"{override_column} is explicitly marked as "
+                                f"{', '.join(sorted(override_forbidden))}, so it is "
+                                "not a period amount column.",
                                 "submit_layout_bindings",
                             )
                         override_hints = set(
@@ -1315,27 +1307,6 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
-def _header_markers(value: str) -> tuple[str, ...]:
-    text = " ".join(value.split())
-    markers = [name for name, pattern in _HEADER_PATTERNS if pattern.search(text)]
-    lowered = text.lower()
-    for match in re.finditer(rf"\b({_MONTHS})\b", lowered, re.I):
-        markers.append(f"month:{_MONTH_NUMBERS[match.group(1)[:3].lower()]:02d}")
-    for match in re.finditer(r"\b(?:19|20)\d{2}\b", text):
-        markers.append(f"year:{match.group(0)}")
-    for match in re.finditer(
-        r"\b(0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])[/.-]((?:19|20)\d{2})\b",
-        text,
-    ):
-        markers.extend((f"month:{int(match.group(1)):02d}", f"year:{match.group(2)}"))
-    for match in re.finditer(
-        r"\b((?:19|20)\d{2})-(0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?=T|\b)",
-        text,
-    ):
-        markers.extend((f"month:{int(match.group(2)):02d}", f"year:{match.group(1)}"))
-    return tuple(dict.fromkeys(markers))
-
-
 def _sheet_header_signature(sheet) -> tuple[Any, ...]:
     header_end = _header_end_row(sheet)
     markers: list[tuple[int, tuple[str, ...]]] = []
@@ -1409,14 +1380,7 @@ def _column_header_text(sheet, column: int) -> list[str]:
 
 
 def _column_scenario_hints(sheet, column: int) -> list[str]:
-    hints: set[str] = set()
-    for value in _column_header_text(sheet, column):
-        hints.update(
-            marker
-            for marker in _header_markers(value)
-            if marker in {"actual", "budget", "forecast", "prior_year"}
-        )
-    return sorted(hints)
+    return sorted(column_scenario_markers(sheet, column))
 
 
 def _allowed_scenario_hints(period_id: str) -> set[str]:

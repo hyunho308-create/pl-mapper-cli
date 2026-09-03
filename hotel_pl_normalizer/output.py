@@ -48,6 +48,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.views import Selection
 
 from hotel_pl_normalizer.atomic import replace_atomically
+from hotel_pl_normalizer.feedback import compose_result_feedback
 from hotel_pl_normalizer.mapping import (
     DETERMINISTIC_SUMMARY_CALCULATIONS,
     GENERIC_VENUE_SLOTS,
@@ -723,6 +724,43 @@ def _feedback(
     return by_account, orphans
 
 
+def _canonical_feedback(
+    result: NormalizationResult,
+    known_ids: set[str],
+) -> tuple[dict[str, list[tuple[int, str]]], list[str]]:
+    """Route each canonical finding once, to one account or Run Notes."""
+    bundle = compose_result_feedback(result)
+    result.feedback_manifest = bundle.to_dict()
+    by_account: dict[str, list[tuple[int, str]]] = {}
+    orphans: list[str] = []
+    priorities = {"error": 0, "warning": 1, "info": 2}
+
+    for finding in bundle.findings:
+        if finding.destination == "run_notes":
+            orphans.append(finding.rendered_text)
+            continue
+        coa_id = finding.primary_coa_id
+        if not coa_id or coa_id not in known_ids:
+            raise OutputTemplateError(
+                f"Feedback destination {finding.destination!r} is not in the output COA."
+            )
+        by_account.setdefault(coa_id, []).append(
+            (priorities[finding.severity], finding.rendered_text)
+        )
+
+    decided = {
+        str(_field(decision, "coa_id", ""))
+        for decision in result.decisions or []
+    }
+    deterministic = set(DETERMINISTIC_SUMMARY_CALCULATIONS)
+    missing_count = len(known_ids - deterministic - decided)
+    if missing_count and (not result.accepted or bool(result.decisions)):
+        orphans.append(
+            f"Mapping incomplete: {missing_count} COA accounts have no submitted mapping decision."
+        )
+    return by_account, list(dict.fromkeys(orphans))
+
+
 def _validation_findings(
     result: NormalizationResult,
     periods: list[tuple[str, str, dict]],
@@ -1030,10 +1068,7 @@ def _write_run_notes(book, result, orphans, periods) -> None:
             sheet.row_dimensions[row_number].height = 30.0
 
     note_lines = _run_note_mismatches(result, periods)
-    incomplete = list(dict.fromkeys(
-        note for note in orphans if note.startswith("Mapping incomplete:")
-    ))
-    note_lines.extend(incomplete)
+    note_lines.extend(dict.fromkeys(orphans))
     label_cell = sheet.cell(row=9, column=2, value="Notes")
     label_cell._style = copy(sheet.cell(row=8, column=2)._style)
     label_cell.alignment = Alignment(horizontal="left", vertical="bottom")
@@ -1132,7 +1167,7 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
         str(row.get("row_key")): row for row in (result.evidence or [])
     }
     known_ids = set(canonical)
-    feedback, orphans = _feedback(result, known_ids, periods)
+    feedback, orphans = _canonical_feedback(result, known_ids)
     venues = _venue_names(by_account, evidence_by_key)
     mapped_label_period = _mapped_label_period(periods)
     sheet.cell(
@@ -1194,7 +1229,7 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
             sheet.cell(
                 row=row,
                 column=FEEDBACK_COL,
-                value="\n".join(dict.fromkeys(ordered))[:2_000],
+                value="\n".join(dict.fromkeys(ordered)),
             )
 
         if coa_id in venues:

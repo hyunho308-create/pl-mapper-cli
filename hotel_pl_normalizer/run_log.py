@@ -29,10 +29,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hotel_pl_normalizer.feedback import compose_result_feedback
 from hotel_pl_normalizer.mapping import DETERMINISTIC_SUMMARY_CALCULATIONS
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
-LOG_VERSION = 3
+LOG_VERSION = 4
 
 
 def _plain(value: Any) -> Any:
@@ -75,6 +76,10 @@ def _token_totals(calls: list[dict]) -> dict[str, int]:
 
 def build_run_log(result: NormalizationResult) -> dict[str, Any]:
     """Assemble the full record for one run."""
+    feedback_manifest = dict(result.feedback_manifest or {})
+    if not feedback_manifest:
+        feedback_manifest = compose_result_feedback(result).to_dict()
+        result.feedback_manifest = feedback_manifest
     period_values = result.period_values or {"selected": result.values}
     period_labels = result.period_labels or {"selected": result.period_label}
     evidence_by_key = {
@@ -193,6 +198,9 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
             "checks_raised": len(result.checks),
             "execution_issues": len(result.execution_issues),
             "review_items": len(result.review_items),
+            "feedback_findings": int(
+                feedback_manifest.get("rendered_count", 0)
+            ),
         },
         "latency": {
             "total_ms": result.duration_ms,
@@ -232,6 +240,7 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         "dropped_periods": dict(result.dropped_periods),
         "review_items": [_plain(item) for item in result.review_items],
         "exceptions": list(result.exceptions),
+        "feedback_manifest": feedback_manifest,
     }
 
 

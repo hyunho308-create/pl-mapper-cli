@@ -18,10 +18,16 @@ from hotel_pl_normalizer.models.exploration import (
     WorkbookPeriods,
     WorkbookRouting,
 )
+from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.providers.base import tool_parameter_schema
 from hotel_pl_normalizer.structure.monthly_spread import (
     MONTHLY_SPREAD_THRESHOLD,
     explicit_month_years,
+)
+from hotel_pl_normalizer.structure.period_headers import (
+    latest_header_month,
+    period_column_problem,
+    period_layout_kind,
 )
 
 from .reader import MAX_ROWS_PER_READ, LazyWorkbook
@@ -54,8 +60,18 @@ class WorkbookExplorationToolset:
     MAX_DEPARTMENT_SHEETS_TO_CONFIRM = 4
     CONTROLLING_HEADER_ROWS = 40
 
-    def __init__(self, workbook: LazyWorkbook, *, max_reads: int = 40) -> None:
+    def __init__(
+        self,
+        workbook: LazyWorkbook,
+        *,
+        workbook_record: WorkbookRecord | None = None,
+        max_reads: int = 40,
+    ) -> None:
         self.workbook = workbook
+        self.workbook_record = workbook_record
+        self._record_sheets = {
+            sheet.sheet_name: sheet for sheet in (workbook_record.sheets if workbook_record else [])
+        }
         self.max_reads = max_reads
         self.reads = 0
         self.routing: WorkbookRouting | None = None
@@ -66,6 +82,7 @@ class WorkbookExplorationToolset:
         self.read_sheets: set[str] = set()
         self.rejections: list[str] = []
         self._sheet_names = [sheet.sheet_name for sheet in workbook.sheets()]
+        self._header_value_cache: dict[str, list[str]] = {}
 
     def signature(self) -> str:
         return f"exploration:{self.workbook.path.name}"
@@ -386,8 +403,9 @@ class WorkbookExplorationToolset:
         The schema is checked first. Then the chosen controlling summary must be
         an included summary P&L that was opened, up to four included department
         P&Ls must have been opened, and every submitted period must cite the
-        controlling summary in `sheets_present`. These checks constrain the
-        source of the catalog without interpreting header text in Python.
+        controlling summary in `sheets_present`. Narrow deterministic checks
+        also reject an auxiliary monthly controller over a PTD/YTD family and
+        verify one exact current department amount column per period.
         """
         if self.routing is None:
             return {
@@ -412,16 +430,32 @@ class WorkbookExplorationToolset:
         summaries = self._routed_sheets("summary_p_and_l")
         anchor = found.controlling_summary_sheet
         if anchor not in summaries:
+            routed = next(
+                (
+                    item
+                    for item in self.routing.sheets
+                    if item.sheet_name == anchor
+                    and item.include_as_financial_evidence
+                ),
+                None,
+            )
+            received_role = routed.role.value if routed is not None else "not included"
             message = (
                 f"controlling_summary_sheet must name an included summary_p_and_l; "
-                f"received {anchor!r}. Candidates: {', '.join(summaries) or 'none'}."
+                f"received {anchor!r} with role {received_role!r}. Candidates: "
+                f"{', '.join(summaries) or 'none'}."
             )
             self.rejections.append(message)
             return {
                 "ok": True,
                 "accepted": False,
                 "error": message,
-                "instruction": "Choose the controlling core summary and resubmit.",
+                "instruction": (
+                    "Choose the controlling core summary and resubmit. If this is "
+                    "a hotel-wide statement that routing misclassified, correct its "
+                    "role with submit_routing first; do not call a hotel-wide monthly "
+                    "snapshot a department merely to change the controller."
+                ),
             }
         if anchor not in self.read_sheets:
             message = (
@@ -435,35 +469,6 @@ class WorkbookExplorationToolset:
                 "error": message,
                 "instruction": "Read that sheet's header block and resubmit.",
             }
-
-        explicit_months = explicit_month_years(
-            cell.value
-            for row in self.workbook.read_rows(
-                anchor, 1, self.CONTROLLING_HEADER_ROWS
-            )
-            for cell in row
-        )
-        if len(explicit_months) >= MONTHLY_SPREAD_THRESHOLD:
-            submitted_months = {
-                period.start_month
-                for period in found.periods
-                if period.start_month == period.end_month
-            }
-            missing_months = sorted(explicit_months - submitted_months)
-            if missing_months:
-                message = (
-                    "The controlling summary has an explicit monthly spread, but the "
-                    "period catalog omits displayed months. Return every monthly amount "
-                    "period and keep any displayed annual/TTM Total as an additional "
-                    f"aggregate. Missing month headers: {missing_months}."
-                )
-                self.rejections.append(message)
-                return {
-                    "ok": True,
-                    "accepted": False,
-                    "error": message,
-                    "instruction": "Add the controlling summary's displayed months and resubmit.",
-                }
 
         departments = self._routed_sheets("department_p_and_l")
         required_departments = min(
@@ -492,6 +497,36 @@ class WorkbookExplorationToolset:
                 "instruction": "Read those department headers and resubmit.",
             }
 
+        controller_problem = self._controller_layout_problem(
+            anchor, seen_departments
+        )
+        if controller_problem is not None:
+            self.rejections.append(controller_problem["error"])
+            return controller_problem
+
+        explicit_months = explicit_month_years(self._header_values(anchor))
+        if len(explicit_months) >= MONTHLY_SPREAD_THRESHOLD:
+            submitted_months = {
+                period.start_month
+                for period in found.periods
+                if period.start_month == period.end_month
+            }
+            missing_months = sorted(explicit_months - submitted_months)
+            if missing_months:
+                message = (
+                    "The controlling summary has an explicit monthly spread, but the "
+                    "period catalog omits displayed months. Return every monthly amount "
+                    "period and keep any displayed annual/TTM Total as an additional "
+                    f"aggregate. Missing month headers: {missing_months}."
+                )
+                self.rejections.append(message)
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "error": message,
+                    "instruction": "Add the controlling summary's displayed months and resubmit.",
+                }
+
         periods, corrected = self._with_true_evidence(found.periods)
         unanchored = [
             period.period_id
@@ -510,6 +545,32 @@ class WorkbookExplorationToolset:
                 "accepted": False,
                 "error": message,
                 "instruction": "Resubmit only periods anchored on the controlling summary.",
+            }
+
+        unsupported = self._unsupported_core_periods(
+            periods,
+            departments,
+            controller_as_of=latest_header_month(self._header_values(anchor)),
+        )
+        if unsupported:
+            details = "; ".join(
+                f"{period_id}: {reason}" for period_id, reason in unsupported.items()
+            )
+            message = (
+                "These proposed periods were not confirmed on a normal, populated "
+                f"department P&L with matching scenario and coverage: {details}"
+            )
+            self.rejections.append(message)
+            return {
+                "ok": True,
+                "accepted": False,
+                "error": message,
+                "instruction": (
+                    "If the controlling summary belongs to a recurring statement "
+                    "series, read its latest/current member and a department member "
+                    "with the same reporting end date. Resubmit only periods confirmed "
+                    "there. Empty optional template tabs do not need to confirm a period."
+                ),
             }
         notes = [
             *getattr(self.workbook, "compatibility_warnings", []),
@@ -537,6 +598,145 @@ class WorkbookExplorationToolset:
             "accepted": True,
             "structure": self.submission.model_dump(mode="json"),
         }
+
+    def _header_values(self, sheet_name: str) -> list[str]:
+        """Header text used only by deterministic layout checks."""
+
+        if sheet_name not in self._header_value_cache:
+            self._header_value_cache[sheet_name] = [
+                cell.value
+                for row in self.workbook.read_rows(
+                    sheet_name, 1, self.CONTROLLING_HEADER_ROWS
+                )
+                for cell in row
+            ]
+        return self._header_value_cache[sheet_name]
+
+    def _controller_layout_problem(
+        self, anchor: str, seen_departments: list[str]
+    ) -> dict[str, Any] | None:
+        """Reject a one-off monthly spread over a recurring PTD/YTD family.
+
+        This is deliberately narrower than generic layout matching. Summary and
+        department schedules often differ cosmetically. The unsafe case is the
+        one observed on CMI and Pontchartrain: a wide Jan-Dec/T12-style summary
+        is chosen even though the operating statement family is PTD/YTD.
+        """
+
+        if (
+            self.routing is None
+            or self.routing.workbook_layout.value != "multi_tab_department_p_and_l"
+        ):
+            return None
+        anchor_kind = period_layout_kind(self._header_values(anchor))
+        department_kinds = Counter(
+            period_layout_kind(self._header_values(name))
+            for name in seen_departments
+        )
+        if (
+            anchor_kind != "monthly_spread"
+            or department_kinds["ptd_ytd"] <= department_kinds["monthly_spread"]
+        ):
+            return None
+
+        compatible = [
+            name
+            for name in self._routed_sheets("summary_p_and_l")
+            if period_layout_kind(self._header_values(name)) == "ptd_ytd"
+        ]
+        dated = [
+            (latest_header_month(self._header_values(name)), index, name)
+            for index, name in enumerate(compatible)
+        ]
+        latest = max(
+            (item for item in dated if item[0] is not None),
+            default=None,
+        )
+        latest_hint = latest[2] if latest is not None else None
+        message = (
+            f"{anchor!r} is a wide monthly/annual summary, while the normal "
+            "department schedules inspected use a PTD/YTD layout. It is an "
+            "auxiliary presentation for period discovery and cannot control the "
+            "catalog in this workbook."
+        )
+        if latest_hint:
+            message += f" The latest compatible PTD/YTD summary appears to be {latest_hint!r}."
+        elif compatible:
+            message += " Compatible PTD/YTD summaries include: " + ", ".join(compatible[:8]) + "."
+        return {
+            "ok": True,
+            "accepted": False,
+            "error": message,
+            "instruction": (
+                "Read the latest/current PTD/YTD summary and a normal department "
+                "schedule with the same ending date, then derive the selectable "
+                "PTD/YTD Actual, Budget, Forecast, and Prior/Last-Year periods from "
+                "that core layout."
+            ),
+        }
+
+    def _unsupported_core_periods(
+        self,
+        periods: list[DiscoveredPeriod],
+        departments: list[str],
+        *,
+        controller_as_of: tuple[int, int] | None,
+    ) -> dict[str, str]:
+        """Require per-period confirmation without intersecting every tab.
+
+        Repeating monthly snapshots are one schedule family, so a period need
+        not appear on every historical member. One current, normal department
+        statement with the same period is sufficient. A fully empty outlet or
+        optional template contributes neither support nor a veto.
+        """
+
+        if (
+            self.routing is None
+            or self.routing.workbook_layout.value != "multi_tab_department_p_and_l"
+            or not departments
+            or not periods
+        ):
+            return {}
+
+        latest_year = max(int(period.end_month[:4]) for period in periods)
+        unsupported: dict[str, str] = {}
+        department_set = set(departments)
+        for period in periods:
+            confirmation = period.department_confirmation
+            if confirmation is None:
+                unsupported[period.period_id] = (
+                    "no exact department_confirmation was supplied"
+                )
+                continue
+            name = confirmation.sheet_name
+            if name not in department_set:
+                unsupported[period.period_id] = (
+                    f"{name!r} is not a routed department_p_and_l"
+                )
+                continue
+            if name not in self.read_sheets or name not in period.sheets_present:
+                unsupported[period.period_id] = (
+                    f"{name!r} must be opened and included in sheets_present"
+                )
+                continue
+            if not self._record_sheets:
+                continue
+            sheet = self._record_sheets.get(name)
+            if sheet is None:
+                unsupported[period.period_id] = f"{name!r} is absent from ingestion"
+                continue
+            problem = period_column_problem(
+                sheet,
+                period,
+                confirmation.excel_column,
+                latest_period_year=latest_year,
+                controller_as_of=controller_as_of,
+            )
+            if problem:
+                unsupported[period.period_id] = (
+                    f"{name!r} {confirmation.excel_column.upper()}: {problem}"
+                )
+        return unsupported
 
     def _with_true_evidence(
         self, periods: list[DiscoveredPeriod]

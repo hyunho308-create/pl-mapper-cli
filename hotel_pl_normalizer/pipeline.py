@@ -65,6 +65,7 @@ class NormalizationResult:
     tool_trace: list[dict] = field(default_factory=list)
     mapping_selection: dict[str, Any] = field(default_factory=dict)
     structure_stages: list[dict] = field(default_factory=list)
+    feedback_manifest: dict[str, Any] = field(default_factory=dict)
 
     @property
     def mapped_account_count(self) -> int:

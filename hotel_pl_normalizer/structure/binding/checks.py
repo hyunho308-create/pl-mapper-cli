@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from hotel_pl_normalizer.models.binding import PeriodBinding, WorkbookBindings
 from hotel_pl_normalizer.models.workbook import WorkbookSheet
+from hotel_pl_normalizer.structure.period_headers import column_forbidden_markers
 
 
 @dataclass
@@ -89,6 +90,15 @@ def check_bindings(
                 "no numeric values at all. Read the sheet and bind a column "
                 "that carries figures, or mark this sheet unavailable for "
                 f"{binding.period_id!r}."
+            )
+            continue
+        forbidden = column_forbidden_markers(sheet, column)
+        if forbidden:
+            result.rejections.append(
+                f"Column {binding.excel_column} on {binding.sheet_name!r} is "
+                f"explicitly marked as {', '.join(sorted(forbidden))}; a "
+                "variance, percentage, POR/PAR, or ratio column cannot bind a "
+                "financial period."
             )
             continue
         claimed.setdefault(binding.sheet_name, []).append(binding)

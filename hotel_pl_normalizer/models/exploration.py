@@ -18,6 +18,14 @@ class ExploredSheet(FinancialEvidenceClassification):
     sheet_name: str
 
 
+class PeriodDepartmentConfirmation(StrictModel):
+    """One exact department amount column confirming a selectable period."""
+
+    sheet_name: str
+    excel_column: str
+    evidence: list[str] = []
+
+
 class DiscoveredPeriod(CanonicalPeriod):
     """A period the workbook offers.
 
@@ -30,6 +38,11 @@ class DiscoveredPeriod(CanonicalPeriod):
     # schedule does not, and binding handles that sheet independently.
     sheets_present: list[str] = []
     evidence: list[str] = []
+    # Multi-tab department workbooks must supply one exact, current department
+    # amount column. The discovery tool verifies its current reporting date,
+    # column semantics, and non-zero labelled values before the period reaches
+    # the user's picker.
+    department_confirmation: PeriodDepartmentConfirmation | None = None
 
 
 class WorkbookRouting(StrictModel):

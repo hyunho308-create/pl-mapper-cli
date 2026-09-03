@@ -277,7 +277,11 @@ class WorkbookStructureAnalyzer:
         stage_started_at: str,
         stage_started: float,
     ) -> StageRun:
-        output = explore_workbook(workbook_path, client=self.client)
+        output = explore_workbook(
+            workbook_path,
+            client=self.client,
+            workbook_record=workbook,
+        )
         catalog = exploration_to_period_catalog(
             output.structure, workbook_id=workbook.workbook_id
         )

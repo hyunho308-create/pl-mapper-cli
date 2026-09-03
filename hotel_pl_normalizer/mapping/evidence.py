@@ -97,6 +97,7 @@ def compact_workbook_evidence(
         for row in sheet.rows:
             selected_columns = {}
             selected_values = {}
+            selected_value_formats = {}
             for period_id in period_maps:
                 value_column = (
                     None
@@ -107,13 +108,19 @@ def compact_workbook_evidence(
                     )
                 )
                 selected_columns[period_id] = value_column
-                selected_values[period_id] = next(
+                selected_cell = next(
                     (
-                        cell.raw_value
+                        cell
                         for cell in row.cells
                         if cell.column == value_column
                     ),
                     None,
+                )
+                selected_values[period_id] = (
+                    selected_cell.raw_value if selected_cell is not None else None
+                )
+                selected_value_formats[period_id] = (
+                    selected_cell.number_format if selected_cell is not None else None
                 )
             text_cells = [
                 cell
@@ -143,6 +150,7 @@ def compact_workbook_evidence(
                     "label": label,
                     "selected_value_columns": selected_columns,
                     "selected_values": selected_values,
+                    "selected_value_formats": selected_value_formats,
                     # Kept for single-period callers and existing audit consumers.
                     "selected_value_column": selected_columns[first_period],
                     "selected_value": selected_values[first_period],

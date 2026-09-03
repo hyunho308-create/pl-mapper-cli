@@ -78,12 +78,15 @@ unavailable instead of guessing.
 - **Variance columns.** Anything comparing two things: `Variance`, `Var`,
   `Fav/(Unfav)`, `B/(W)`, `vs. Budget`, `vs. Prior`, `Better/Worse`, or a column
   of differences beside two amount columns.
-- **Statistics and ratios.** `POR`, `RPOR`, `CPOR`, per-occupied-room anything,
-  `margin`, `% of Revenue`, `% of Income`, `% of Sales`, `Rev / Cost`, occupancy,
-  ADR, RevPAR.
-- **Any percentage column** — unless the header genuinely names an Actual period
-  that is also YTD, MTD or a named period, in which case read it carefully rather
-  than dismissing it.
+- **Explicit ratio subcolumns.** Headers marked `Ratio`, `POR`, `RPOR`, `CPOR`,
+  `PAR`, `% of Revenue`, `% of Income`, `% of Sales`, or `Rev / Cost`.
+- **Any explicitly marked percentage column.** A stale `%` or `% or POR` export
+  control above a later explicit period header does not control; the later
+  period header wins.
+
+Occupancy, ADR and RevPAR often appear as rows inside an otherwise valid
+Actual/Budget amount column. Their presence as row labels does not disqualify
+that period column.
 - **Query metadata.** Tokens such as `%,C`, `[Date].`, `[Version].`,
   `Prior Year GL Period`, `<<001/` are Hyperion or SmartView export plumbing, not
   headers. A column carrying these and only a handful of numbers, on a sheet where

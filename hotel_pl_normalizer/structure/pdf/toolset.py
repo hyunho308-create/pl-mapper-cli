@@ -106,22 +106,38 @@ class PdfInspectionToolset:
             raise PdfToolError(
                 f"One read is limited to {MAX_LINES_PER_READ} lines; request a smaller range."
             )
-        selected = [
+        requested_end_line = end_line
+        candidates = [
             line
             for line in page.text_lines
             if start_line <= line.line_number <= end_line
         ]
-        word_count = sum(len(line.word_ids) for line in selected)
-        if word_count > MAX_REGION_WORDS:
-            raise PdfToolError(
-                f"Line range contains {word_count} words, above the {MAX_REGION_WORDS}-word "
-                "limit. Request fewer lines."
-            )
+        selected = []
+        word_count = 0
+        for line in candidates:
+            line_words = len(line.word_ids)
+            if word_count + line_words > MAX_REGION_WORDS:
+                if not selected:
+                    raise PdfToolError(
+                        f"Line {line.line_number} alone contains {line_words} words, "
+                        f"above the {MAX_REGION_WORDS}-word limit."
+                    )
+                break
+            selected.append(line)
+            word_count += line_words
+        returned_end_line = (
+            selected[-1].line_number if selected else min(end_line, len(page.text_lines))
+        )
         return {
             "ok": True,
             "page_number": page_number,
             "page_width": page.width,
             "page_height": page.height,
+            "start_line": start_line,
+            "end_line": returned_end_line,
+            "requested_end_line": requested_end_line,
+            "word_count": word_count,
+            "truncated": returned_end_line < requested_end_line,
             "lines": [self._line_payload(line) for line in selected],
         }
 

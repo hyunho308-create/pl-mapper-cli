@@ -283,6 +283,9 @@ def main() -> None:
         "dropped_periods": result.dropped_periods,
         "session_calls": result.session_calls,
         "session_exhausted": result.session_exhausted,
+        "feedback_findings": int(
+            result.feedback_manifest.get("rendered_count", 0)
+        ),
     }
     if is_pdf:
         summary["source_format"] = "pdf"

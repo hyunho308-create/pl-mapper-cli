@@ -126,6 +126,11 @@ mapping, and validation. It requires one of these mutually exclusive roles:
 - `unknown`: potentially financial but still ambiguous after inspection. This
   role is always included.
 
+A dated series of monthly snapshots of the same hotel-wide statement remains a
+series of `summary_p_and_l` sheets. Do not relabel its historical members as
+departments merely because only the latest/current member should control period
+discovery.
+
 `include_as_financial_evidence=false` excludes the sheet from period binding and
 mapping. It requires one of these roles:
 
