@@ -463,6 +463,162 @@ class MappingOutcomeTests(unittest.TestCase):
             )
         )
 
+    def test_combined_ood_misc_allows_declared_summary_only_row_overlap(self) -> None:
+        summary_ood = "S12.total_other_operated_departments_revenue"
+        summary_misc = "S12.total_miscellaneous_income"
+        detail_ood = "S3.total_other_operated_departments_revenue"
+        detail_misc = "S4.total_miscellaneous_income"
+        coa = {
+            coa_id: {}
+            for coa_id in (summary_ood, summary_misc, detail_ood, detail_misc)
+        }
+        plan = WorkbookSourcePlan(
+            plan_id="combined-summary-only",
+            workbook_id="wb",
+            strategy=WorkbookStrategy(
+                reporting_layout="test",
+                summary_source="Summary",
+                ood_misc_summary_mode=OodMiscSummaryMode.COMBINED_IN_MISC,
+                structural_scenarios=[
+                    {
+                        "scenario": "summary_only_department",
+                        "reason": "Retail rent has no separate detail schedule.",
+                        "source_rows": ["Summary!23", "Detail!152"],
+                    }
+                ],
+            ),
+            decisions=[
+                AccountSourceDecision(
+                    coa_id=summary_ood,
+                    operation=SourceOperation.NO_VALUE,
+                ),
+                AccountSourceDecision(
+                    coa_id=summary_misc,
+                    operation=SourceOperation.SUM,
+                    source_rows=["Summary!22", "Summary!23"],
+                ),
+                AccountSourceDecision(
+                    coa_id=detail_ood,
+                    operation=SourceOperation.DIRECT,
+                    source_rows=["Detail!145"],
+                ),
+                AccountSourceDecision(
+                    coa_id=detail_misc,
+                    operation=SourceOperation.SUM,
+                    source_rows=["Detail!147", "Summary!23"],
+                ),
+            ],
+            review_items=[
+                MappingReviewItem(
+                    kind="source_discrepancy",
+                    message="Summary combines OOD and Miscellaneous Income.",
+                    coa_ids=[summary_ood, summary_misc, detail_ood, detail_misc],
+                )
+            ],
+        )
+        checks = [
+            f"error|summary_department|{summary_ood}|actual=0|expected=30|"
+            f"variance=-30|equation={detail_ood}",
+            f"error|summary_department|{summary_misc}|actual=40|expected=10|"
+            f"variance=30|equation={detail_misc}",
+        ]
+        history = [
+            {
+                "errors": [
+                    f"January 2025 Actual: {finding}" for finding in checks
+                ]
+            }
+        ]
+
+        qualified = _qualify_source_discrepancies(
+            checks,
+            plan,
+            [],
+            coa,
+            history,
+            "January 2025 Actual",
+            [],
+        )
+
+        self.assertTrue(
+            all(
+                finding.startswith("warning|source_presentation_exception|")
+                for finding in qualified
+            )
+        )
+
+    def test_combined_ood_misc_blocks_undeclared_summary_detail_overlap(self) -> None:
+        summary_ood = "S12.total_other_operated_departments_revenue"
+        summary_misc = "S12.total_miscellaneous_income"
+        detail_ood = "S3.total_other_operated_departments_revenue"
+        detail_misc = "S4.total_miscellaneous_income"
+        coa = {
+            coa_id: {}
+            for coa_id in (summary_ood, summary_misc, detail_ood, detail_misc)
+        }
+        plan = WorkbookSourcePlan(
+            plan_id="combined-unauthorized-overlap",
+            workbook_id="wb",
+            strategy=WorkbookStrategy(
+                reporting_layout="test",
+                summary_source="Summary",
+                ood_misc_summary_mode=OodMiscSummaryMode.COMBINED_IN_MISC,
+            ),
+            decisions=[
+                AccountSourceDecision(
+                    coa_id=summary_ood,
+                    operation=SourceOperation.NO_VALUE,
+                ),
+                AccountSourceDecision(
+                    coa_id=summary_misc,
+                    operation=SourceOperation.SUM,
+                    source_rows=["Summary!22", "Summary!23"],
+                ),
+                AccountSourceDecision(
+                    coa_id=detail_ood,
+                    operation=SourceOperation.DIRECT,
+                    source_rows=["Detail!145"],
+                ),
+                AccountSourceDecision(
+                    coa_id=detail_misc,
+                    operation=SourceOperation.SUM,
+                    source_rows=["Detail!147", "Summary!23"],
+                ),
+            ],
+            review_items=[
+                MappingReviewItem(
+                    kind="source_discrepancy",
+                    message="Summary combines OOD and Miscellaneous Income.",
+                    coa_ids=[summary_ood, summary_misc, detail_ood, detail_misc],
+                )
+            ],
+        )
+        checks = [
+            f"error|summary_department|{summary_ood}|actual=0|expected=30|"
+            f"variance=-30|equation={detail_ood}",
+            f"error|summary_department|{summary_misc}|actual=40|expected=10|"
+            f"variance=30|equation={detail_misc}",
+        ]
+        history = [
+            {
+                "errors": [
+                    f"January 2025 Actual: {finding}" for finding in checks
+                ]
+            }
+        ]
+
+        qualified = _qualify_source_discrepancies(
+            checks,
+            plan,
+            [],
+            coa,
+            history,
+            "January 2025 Actual",
+            [],
+        )
+
+        self.assertEqual(qualified, checks)
+
     def test_identical_duplicate_initial_decisions_are_safely_deduplicated(
         self,
     ) -> None:

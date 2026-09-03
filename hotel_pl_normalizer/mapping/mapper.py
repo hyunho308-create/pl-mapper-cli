@@ -2277,10 +2277,16 @@ def _qualify_combined_ood_misc_presentation(
         return checks
     summary_rows = _decision_source_set(active_summary)
     detail_row_sets = [_decision_source_set(item) for item in detail_decisions]
+    summary_detail_overlap = summary_rows & set().union(*detail_row_sets)
     if (
         not summary_rows
         or any(not rows for rows in detail_row_sets)
-        or any(summary_rows & rows for rows in detail_row_sets)
+        or (
+            summary_detail_overlap
+            and not _summary_only_overlap_is_authorized(
+                plan, summary_detail_overlap
+            )
+        )
         or detail_row_sets[0] & detail_row_sets[1]
     ):
         return checks
@@ -2320,6 +2326,17 @@ def _qualify_combined_ood_misc_presentation(
         )
         for item in checks
     ]
+
+
+def _summary_only_overlap_is_authorized(plan, overlap_rows):
+    """Allow only source rows explicitly declared as summary-only evidence."""
+    authorized_rows = {
+        row
+        for scenario in plan.strategy.structural_scenarios
+        if scenario.scenario == StructuralScenario.SUMMARY_ONLY_DEPARTMENT
+        for row in scenario.source_rows
+    }
+    return overlap_rows <= authorized_rows
 
 
 DEPARTMENTAL_EXPENSE_SUMMARY_TARGETS = {
