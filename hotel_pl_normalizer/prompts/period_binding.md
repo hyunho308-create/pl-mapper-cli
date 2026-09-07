@@ -28,9 +28,10 @@ singleton layouts.
 
 Return exactly one binding or unavailable outcome for every layout and selected
 period. Python expands the layout choice to every member sheet and then applies
-the existing exact per-sheet verifier. If the chosen column is blank or all zero
-on one member, Python records that member as unavailable instead of forcing a
-false binding.
+the existing exact per-sheet verifier. A missing shared column returns a named
+member exception: inspect that member's own header and submit its actual column
+as a sheet override. A shared-column miss does not prove that the period is
+absent. Columns with numeric values that are all zero remain unavailable.
 
 Use `sheet_bindings` or `sheet_unavailable` only for a verified member exception.
 Do not enumerate ordinary member sheets. The compact submission permits one
@@ -42,7 +43,8 @@ initial answer and at most two repairs.
 profiles for every layout in one call. Usually that is enough. When it is not:
 
 - Use `read_rows` on the representative sheet when its header sits deeper than
-  the returned semantic cells.
+  the returned semantic cells. A dated title followed by room/cover statistics
+  may precede the real period/scenario headers; continue through those statistics.
 - Use `column_stats` where you need to distinguish amounts from ratios.
 - Read a named member sheet only before creating a sheet-specific override.
 

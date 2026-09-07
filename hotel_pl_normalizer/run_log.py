@@ -26,14 +26,25 @@ financial data and store or delete it under the same policy as the source workbo
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from hotel_pl_normalizer.feedback import compose_result_feedback
+from hotel_pl_normalizer.atomic import replace_atomically
+from hotel_pl_normalizer.feedback import (
+    FeedbackCompositionError,
+    compose_result_feedback,
+    fallback_feedback_manifest,
+)
 from hotel_pl_normalizer.mapping import DETERMINISTIC_SUMMARY_CALCULATIONS
+from hotel_pl_normalizer.mapping.findings import ensure_finding
+from hotel_pl_normalizer.models.evidence import (
+    audit_evidence_dict,
+    ensure_evidence_rows,
+)
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
-LOG_VERSION = 4
+LOG_VERSION = 5
 
 
 def _plain(value: Any) -> Any:
@@ -49,6 +60,20 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _review_plain(value: Any) -> Any:
+    payload = _plain(value)
+    review_item_id = getattr(value, "review_item_id", None)
+    if review_item_id is None and isinstance(value, dict):
+        review_item_id = value.get("review_item_id")
+    if isinstance(payload, dict) and review_item_id:
+        payload["review_item_id"] = str(review_item_id)
+    return payload
+
+
+def _finding_plain(value: Any, period_id: str | None = None) -> dict[str, Any]:
+    return ensure_finding(value, period_id=period_id).to_dict()
 
 
 def _token_totals(calls: list[dict]) -> dict[str, int]:
@@ -78,13 +103,21 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
     """Assemble the full record for one run."""
     feedback_manifest = dict(result.feedback_manifest or {})
     if not feedback_manifest:
-        feedback_manifest = compose_result_feedback(result).to_dict()
-        result.feedback_manifest = feedback_manifest
+        try:
+            feedback_manifest = compose_result_feedback(result).to_dict()
+            result.feedback_manifest = feedback_manifest
+        except (
+            FeedbackCompositionError,
+            KeyError,
+            StopIteration,
+            TypeError,
+            ValueError,
+        ) as exc:
+            feedback_manifest = fallback_feedback_manifest(result, exc)
     period_values = result.period_values or {"selected": result.values}
     period_labels = result.period_labels or {"selected": result.period_label}
-    evidence_by_key = {
-        str(row.get("row_key")): row for row in (result.evidence or [])
-    }
+    evidence_rows = ensure_evidence_rows(result.evidence or [])
+    evidence_by_key = {row.row_key: row for row in evidence_rows}
 
     accounts = []
     for decision in result.decisions:
@@ -97,16 +130,24 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         def resolve(keys: Any) -> list[dict[str, Any]]:
             resolved = []
             for key in keys or []:
-                row = evidence_by_key.get(str(key), {})
+                row = evidence_by_key.get(str(key))
                 item = {
                     "row_key": key,
-                    "label": row.get("label"),
-                    "value": row.get("selected_value"),
-                    "indent": row.get("indent"),
-                    "bold": row.get("bold"),
-                    "found": bool(row),
+                    "label": row.get("label") if row is not None else None,
+                    "value": (
+                        row.get("selected_value") if row is not None else None
+                    ),
+                    "indent": row.get("indent") if row is not None else None,
+                    "bold": row.get("bold") if row is not None else None,
+                    "found": row is not None,
                 }
-                if len(period_values) > 1:
+                if row is not None:
+                    item["locator"] = row.locator.to_dict()
+                    item["anchors_by_period"] = {
+                        period_id: anchor.to_dict() if anchor is not None else None
+                        for period_id, anchor in row.anchors_by_period.items()
+                    }
+                if len(period_values) > 1 and row is not None:
                     item["values"] = row.get("selected_values") or {}
                 resolved.append(item)
             return resolved
@@ -224,7 +265,7 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         # The rows the model was shown, verbatim. This is "what came in raw" as far
         # as the model is concerned -- the workbook has more, but nothing else
         # reached the prompt, so nothing else could have influenced the answer.
-        "evidence_rows": list(result.evidence or []),
+        "evidence_rows": [audit_evidence_dict(row) for row in evidence_rows],
         "accounts": accounts,
         "accounts_without_a_decision": unmapped,
         "values": dict(result.values),
@@ -232,13 +273,27 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         "residual_plugs_by_period": result.residual_plugs_by_period,
         "checks": [_plain(check) for check in result.checks],
         "checks_by_period": result.checks_by_period,
+        # Typed records are additive. Legacy string fields above remain the
+        # compatibility contract for log versions 2-4 and older readers.
+        "findings": [
+            _finding_plain(finding, period_id)
+            for period_id, findings in result.checks_by_period.items()
+            for finding in findings
+        ],
+        "findings_by_period": {
+            period_id: [
+                _finding_plain(finding, period_id) for finding in findings
+            ]
+            for period_id, findings in result.checks_by_period.items()
+        },
         "execution_issues": list(result.execution_issues),
         "execution_issues_by_period": result.execution_issues_by_period,
         # A run that mapped some of the periods asked for is not the same as one
         # that mapped all of them, and the log is where that difference has to
         # be visible: the values below simply would not mention the missing one.
         "dropped_periods": dict(result.dropped_periods),
-        "review_items": [_plain(item) for item in result.review_items],
+        "review_items": [_review_plain(item) for item in result.review_items],
+        "source_controls": [_plain(item) for item in result.source_controls],
         "exceptions": list(result.exceptions),
         "feedback_manifest": feedback_manifest,
     }
@@ -248,7 +303,20 @@ def write_run_log(result: NormalizationResult, path: Path) -> Path:
     """Write the record as pretty JSON, so it is greppable and diffable."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(build_run_log(result), indent=2, default=str), encoding="utf-8"
+    payload = json.dumps(build_run_log(result), indent=2, default=str)
+    handle = tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.stem}.",
+        suffix=".json",
+        delete=False,
+        mode="w",
+        encoding="utf-8",
     )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(payload)
+        replace_atomically(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path

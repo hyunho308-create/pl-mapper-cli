@@ -39,6 +39,23 @@ def _add_defined_names(path: Path, names: list[tuple[str, str]]) -> None:
     staged.replace(path)
 
 
+def _set_worksheet_dimension(path: Path, dimension: str) -> None:
+    """Replace the first worksheet's declared bounds without changing cells."""
+    staged = path.with_suffix(".dimension.xlsx")
+    namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(staged, "w") as target:
+        for entry in source.infolist():
+            payload = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(payload)
+                node = root.find(f"{{{namespace}}}dimension")
+                assert node is not None
+                node.set("ref", dimension)
+                payload = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            target.writestr(entry, payload)
+    staged.replace(path)
+
+
 def test_read_xlsx_workbook_returns_used_range_workbook_record(tmp_path: Path):
     path = tmp_path / "sample.xlsx"
     wb = openpyxl.Workbook()
@@ -77,6 +94,29 @@ def test_read_xlsx_workbook_returns_used_range_workbook_record(tmp_path: Path):
     # value actually lives -- that has not changed.
     assert sheet.rows[0].cells[0].raw_value == "Hotel P&L"
     assert sheet.rows[2].cells[2].raw_value == 100
+
+
+def test_read_xlsx_recovers_cells_beyond_an_undersized_declared_dimension(
+    tmp_path: Path,
+):
+    path = tmp_path / "undersized_dimension.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = "Account"
+    workbook.active["C4"] = 1234.0
+    workbook.save(path)
+    _set_worksheet_dimension(path, "A1:A1")
+
+    record = read_excel_workbook(path)
+
+    sheet = record.sheets[0]
+    assert sheet.max_row == 4
+    assert sheet.max_column == 3
+    assert sheet.rows[3].cells[2].raw_value == 1234.0
+    assert any(
+        "undersized used range" in warning.message
+        and warning.sheet_name == sheet.sheet_name
+        for warning in record.ingestion_warnings
+    )
 
 
 def test_read_excel_workbook_supports_xlsx_directly(tmp_path: Path):

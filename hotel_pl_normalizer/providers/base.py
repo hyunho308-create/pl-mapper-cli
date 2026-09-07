@@ -19,6 +19,7 @@ from typing import Any, Protocol, TypeVar
 from pydantic import BaseModel
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+TerminalT = TypeVar("TerminalT")
 
 
 def utc_now() -> str:
@@ -76,6 +77,85 @@ class ModelToolset(Protocol):
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict: ...
 
+    def terminal_result(
+        self,
+        name: str,
+        result: dict[str, Any],
+    ) -> Any | None: ...
+
+    def final_response_error(self, result: BaseModel) -> str | None: ...
+
+
+class AgentToolset:
+    """Minimal shared lifecycle mechanics for stateful model toolsets.
+
+    Tool declarations intentionally remain domain-owned. Consolidating their
+    generation is a separately gated follow-up: the current domain models are
+    not schema-equivalent, and every declaration byte baseline must stay fixed.
+    """
+
+    def __init__(self, *, max_reads: int | None = None) -> None:
+        self.rejections: list[str] = []
+        self._named_counters: dict[str, int] = {}
+        self._terminal_value: Any | None = None
+        self._has_read_budget = max_reads is not None
+        if max_reads is not None:
+            self.max_reads = max_reads
+            self.reads = 0
+
+    def read_budget_result(self, *, instruction: str) -> dict[str, Any] | None:
+        """Return the caller's existing exhaustion payload, when configured."""
+
+        if not self._has_read_budget:
+            raise RuntimeError("This toolset has no global read budget.")
+        if self.reads < self.max_reads:
+            return None
+        return {
+            "ok": False,
+            "error": f"Read budget of {self.max_reads} calls is spent.",
+            "instruction": instruction,
+        }
+
+    def record_read(self) -> int:
+        """Consume one configured read and preserve the public ``reads`` count."""
+
+        if not self._has_read_budget:
+            raise RuntimeError("This toolset has no global read budget.")
+        self.reads += 1
+        return self.reads
+
+    def record_rejection(self, message: str) -> str:
+        self.rejections.append(message)
+        return message
+
+    def increment_counter(self, name: str) -> int:
+        value = self._named_counters.get(name, 0) + 1
+        self._named_counters[name] = value
+        return value
+
+    def counter_value(self, name: str) -> int:
+        return self._named_counters.get(name, 0)
+
+    def store_terminal(self, value: TerminalT) -> TerminalT:
+        self._terminal_value = value
+        return value
+
+    @property
+    def terminal_value(self) -> Any | None:
+        return self._terminal_value
+
+    def terminal_result(
+        self,
+        name: str,
+        result: dict[str, Any],
+    ) -> Any | None:
+        del name, result
+        return self.terminal_value
+
+    def final_response_error(self, result: BaseModel) -> str | None:
+        del result
+        return None
+
 
 class ModelClient(ABC):
     """The complete model surface required by the current workflow."""
@@ -84,7 +164,6 @@ class ModelClient(ABC):
     model_name: str
     usage_history: list[dict]
     last_tool_trace: list[dict] | None
-    last_validation_result: dict | None
 
     @staticmethod
     def _prompt_with_schema(prompt: str, response_model: type[BaseModel]) -> str:

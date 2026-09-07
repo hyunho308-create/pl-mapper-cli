@@ -28,6 +28,7 @@ def exploration_to_period_catalog(
             start_month=period.start_month,
             end_month=period.end_month,
             actual_months=period.actual_months,
+            department_confirmation=period.department_confirmation,
         )
         for period in exploration.periods
     ]

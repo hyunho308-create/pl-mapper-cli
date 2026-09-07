@@ -1,9 +1,14 @@
 from datetime import datetime, timezone
 
 import pytest
+from openpyxl.utils import get_column_letter
 
 from hotel_pl_normalizer.models.binding import WorkbookBindings
-from hotel_pl_normalizer.models.period_selection import PeriodOption
+from hotel_pl_normalizer.models.exploration import WorkbookExploration
+from hotel_pl_normalizer.models.period_selection import (
+    PeriodDepartmentConfirmation,
+    PeriodOption,
+)
 from hotel_pl_normalizer.models.workbook import (
     CellRecord,
     FileType,
@@ -16,7 +21,13 @@ from hotel_pl_normalizer.models.workbook import (
 from hotel_pl_normalizer.structure.binding.adapters import binding_to_selection_maps
 from hotel_pl_normalizer.structure.binding.agent import bind_periods
 from hotel_pl_normalizer.structure.binding.checks import check_bindings
-from hotel_pl_normalizer.structure.binding.toolset import PeriodBindingToolset
+from hotel_pl_normalizer.structure.binding.toolset import (
+    PeriodBindingToolset,
+    _header_end_row,
+)
+from hotel_pl_normalizer.structure.exploration.adapters import (
+    exploration_to_period_catalog,
+)
 
 
 def _sheet(name: str, value: float = 100.0) -> WorkbookSheet:
@@ -80,6 +91,31 @@ def _workbook() -> WorkbookRecord:
         ),
         workbook_metadata=WorkbookMetadata(sheet_count=3),
         sheets=[_sheet("Summary"), _sheet("Rooms"), _sheet("Excluded")],
+    )
+
+
+def _table_sheet(name, rows):
+    return WorkbookSheet(
+        sheet_id=f"sheet:{name}",
+        sheet_name=name,
+        max_row=len(rows),
+        max_column=max(column for cells in rows for column in cells),
+        rows=[
+            WorkbookRow(
+                row_index=index,
+                cells=[
+                    CellRecord(
+                        row=index,
+                        column=column,
+                        address=f"{get_column_letter(column)}{index}",
+                        raw_value=value,
+                        display_value=str(value),
+                    )
+                    for column, value in cells.items()
+                ],
+            )
+            for index, cells in enumerate(rows, start=1)
+        ],
     )
 
 
@@ -191,6 +227,35 @@ def test_binding_adapter_never_creates_a_modal_default_column():
         period_ids=["p1"],
     )
     assert maps["p1"].default_selection is None
+
+
+def test_period_catalog_retains_discoverys_department_confirmation():
+    exploration = WorkbookExploration.model_validate(
+        {
+            "controlling_summary_sheet": "Summary",
+            "periods": [
+                {
+                    "scenario": "actual",
+                    "start_month": "2025-01",
+                    "end_month": "2025-12",
+                    "department_confirmation": {
+                        "sheet_name": "Rooms",
+                        "excel_column": "B",
+                        "evidence": ["Rooms!B1 Actual"],
+                    },
+                }
+            ],
+        }
+    )
+
+    option = exploration_to_period_catalog(
+        exploration,
+        workbook_id="wb_binding_cleanup",
+    ).options[0]
+
+    assert option.department_confirmation is not None
+    assert option.department_confirmation.sheet_name == "Rooms"
+    assert option.department_confirmation.excel_column == "B"
 
 
 def test_exhausted_coverage_retries_fail_closed_without_a_default_column():
@@ -334,6 +399,149 @@ def test_identical_excel_headers_form_one_compact_layout():
     layout = result["layout_groups"][0]
     assert layout["sheet_names"] == ["Summary", "Rooms"]
     assert any(item["excel_column"] == "B" for item in layout["candidate_columns"])
+    assert toolset.opened_sheets == set()
+
+
+def test_preliminary_statistics_do_not_hide_shifted_period_headers():
+    workbook = _workbook()
+    workbook.sheets = [
+        _table_sheet(
+            name,
+            [
+                {1: "As of December 31, 2025"},
+                {1: "Total Rooms Available", 3: 36500, column: 36500},
+                {1: "Occupancy %", 3: 0.8, column: 0.8},
+                {},
+                {3: "Current Period", column: "Year-To-Date"},
+                {3: "Actual", column: "Actual", column + 2: "Prior Year"},
+                {1: "Revenue"},
+                {1: "Food Revenue", 3: 500, column: 5000, column + 2: 4000},
+            ],
+        )
+        for name, column in [("Outlet East", 6), ("Outlet West", 7)]
+    ]
+    toolset = PeriodBindingToolset(workbook, period_ids=["p1"])
+
+    layouts = toolset.dispatch("list_sheet_layouts", {})["layout_groups"]
+
+    assert [_header_end_row(sheet) for sheet in workbook.sheets] == [7, 7]
+    assert len(layouts) == 2
+    assert {item["at"] for item in layouts[1]["header_cells"]} >= {"G5", "G6"}
+    assert any(
+        item["excel_column"] == "G" and item["scenario_hints"] == ["actual"]
+        for item in layouts[1]["candidate_columns"]
+    )
+
+
+def test_common_report_date_alone_does_not_group_sheets():
+    workbook = _workbook()
+    workbook.sheets = [
+        _table_sheet(
+            name,
+            [{1: "December 31, 2025"}, {1: "Revenue", column: 10000}],
+        )
+        for name, column in [("East", 3), ("West", 4)]
+    ]
+    toolset = PeriodBindingToolset(workbook, period_ids=["p1"])
+
+    layouts = toolset.dispatch("list_sheet_layouts", {})["layout_groups"]
+
+    assert len(layouts) == 2
+    assert all(layout["candidate_columns"] for layout in layouts)
+
+
+def test_dated_amount_columns_can_still_form_a_shared_layout():
+    workbook = _workbook()
+    workbook.sheets = [
+        _table_sheet(
+            name,
+            [{2: 2025, 3: 2024}, {1: "Revenue", 2: 10000, 3: 9000}],
+        )
+        for name in ["East", "West"]
+    ]
+    toolset = PeriodBindingToolset(workbook, period_ids=["p1"])
+
+    assert len(toolset.dispatch("list_sheet_layouts", {})["layout_groups"]) == 1
+
+
+@pytest.mark.parametrize("caption", ["Revenue", "Total Revenue"])
+def test_amounts_between_1900_and_2099_are_not_year_headers(caption):
+    workbook = _workbook()
+    workbook.sheets = [
+        _table_sheet(
+            "Operating Schedule",
+            [{2: "Actual", 3: "Budget"}, {1: caption, 2: 2000, 3: 1900}],
+        )
+    ]
+    toolset = PeriodBindingToolset(workbook, period_ids=["p1"])
+
+    layouts = toolset.dispatch("list_sheet_layouts", {})["layout_groups"]
+
+    assert _header_end_row(workbook.sheets[0]) == 1
+    assert {column["excel_column"] for column in layouts[0]["candidate_columns"]} == {"B", "C"}
+
+
+def test_missing_shared_column_returns_all_member_exceptions_for_repair():
+    workbook = _workbook()
+    for name, column in [("Rooms", 3), ("Excluded", 4)]:
+        workbook.sheets[[sheet.sheet_name for sheet in workbook.sheets].index(name)] = (
+            _table_sheet(name, [{2: "Actual"}, {1: "Revenue", column: 200}])
+        )
+    toolset = PeriodBindingToolset(workbook, period_ids=["p1"])
+    layout = toolset.dispatch("list_sheet_layouts", {})["layout_groups"][0]
+    assert layout["sheet_names"] == ["Summary", "Rooms", "Excluded"]
+    toolset.dispatch("read_headers", {"sheet_names": layout["sheet_names"]})
+    payload = {
+        "layout_bindings": [
+            {"layout_id": layout["layout_id"], "period_id": "p1", "excel_column": "B"}
+        ],
+        "layout_unavailable": [],
+    }
+
+    rejected = toolset.dispatch("submit_layout_bindings", payload)
+
+    assert rejected["accepted"] is False
+    assert {item["sheet_name"] for item in rejected["member_exceptions"]} == {
+        "Rooms", "Excluded"
+    }
+    assert toolset.submission is None
+    assert "sheet_bindings" in rejected["error"]
+
+    payload["sheet_bindings"] = [
+        {"sheet_name": name, "period_id": "p1", "excel_column": column}
+        for name, column in [("Rooms", "C"), ("Excluded", "D")]
+    ]
+    repaired = toolset.dispatch("submit_layout_bindings", payload)
+
+    assert repaired["accepted"] is True
+    assert repaired["structure"]["unavailable"] == []
+    assert len(repaired["structure"]["bindings"]) == 3
+
+
+def test_layout_listing_does_not_satisfy_the_explicit_read_gate():
+    toolset = PeriodBindingToolset(
+        _workbook(),
+        period_ids=["p1"],
+        financial_sheets=["Summary", "Rooms"],
+    )
+    layout = toolset.dispatch("list_sheet_layouts", {})["layout_groups"][0]
+
+    result = toolset.dispatch(
+        "submit_layout_bindings",
+        {
+            "layout_bindings": [
+                {
+                    "layout_id": layout["layout_id"],
+                    "period_id": "p1",
+                    "excel_column": "B",
+                }
+            ],
+            "layout_unavailable": [],
+        },
+    )
+
+    assert result["accepted"] is False
+    assert "have not been opened" in result["error"]
 
 
 def test_compact_excel_layout_expands_and_excludes_an_all_zero_member():
@@ -345,6 +553,9 @@ def test_compact_excel_layout_expands_and_excludes_an_all_zero_member():
         financial_sheets=["Summary", "Rooms"],
     )
     layout = toolset.dispatch("list_sheet_layouts", {})["layout_groups"][0]
+    toolset.dispatch(
+        "read_headers", {"sheet_names": ["Summary", "Rooms"]}
+    )
 
     result = toolset.dispatch(
         "submit_layout_bindings",
@@ -362,6 +573,9 @@ def test_compact_excel_layout_expands_and_excludes_an_all_zero_member():
     )
 
     assert result["accepted"] is True
+    terminal = toolset.terminal_result("submit_layout_bindings", result)
+    assert terminal == result["structure"]
+    assert toolset.terminal_value == result["structure"]
     structure = WorkbookBindings.model_validate(result["structure"])
     assert [(item.sheet_name, item.excel_column) for item in structure.bindings] == [
         ("Summary", "B")
@@ -391,6 +605,9 @@ def test_compact_excel_layout_allows_one_verified_sheet_override():
     )
     layouts = toolset.dispatch("list_sheet_layouts", {})["layout_groups"]
     assert len(layouts) == 1
+    toolset.dispatch(
+        "read_headers", {"sheet_names": ["Summary", "Rooms"]}
+    )
 
     result = toolset.dispatch(
         "submit_layout_bindings",
@@ -419,6 +636,86 @@ def test_compact_excel_layout_allows_one_verified_sheet_override():
         ("Summary", "B"),
         ("Rooms", "C"),
     }
+
+
+def test_binding_must_retain_discoverys_exact_department_confirmation():
+    workbook = _workbook()
+    period = PeriodOption(
+        scenario="actual",
+        start_month="2025-01",
+        end_month="2025-12",
+        department_confirmation=PeriodDepartmentConfirmation(
+            sheet_name="Rooms",
+            excel_column="B",
+            evidence=["Rooms!B1 Actual"],
+        ),
+    )
+    wrong = check_bindings(
+        WorkbookBindings.model_validate(
+            {
+                "bindings": [
+                    {
+                        "period_id": period.period_id,
+                        "sheet_name": "Summary",
+                        "excel_column": "B",
+                    }
+                ],
+                "unavailable": [
+                    {
+                        "period_id": period.period_id,
+                        "sheet_name": "Rooms",
+                        "reason": "claimed absent",
+                    }
+                ],
+            }
+        ),
+        {sheet.sheet_name: sheet for sheet in workbook.sheets},
+        period_ids=[period.period_id],
+        financial_sheets=["Summary", "Rooms"],
+        periods=[period],
+    )
+
+    assert wrong.accepted is False
+    assert any("retain that exact department location" in item for item in wrong.rejections)
+
+
+def test_binding_verifier_rejects_a_wrong_year_amount_column():
+    workbook = _workbook()
+    workbook.sheets[0].rows[0].cells[1].raw_value = "2024 Actual"
+    workbook.sheets[0].rows[0].cells[1].display_value = "2024 Actual"
+    period = PeriodOption(
+        scenario="actual",
+        start_month="2025-01",
+        end_month="2025-12",
+    )
+
+    result = check_bindings(
+        WorkbookBindings.model_validate(
+            {
+                "bindings": [
+                    {
+                        "period_id": period.period_id,
+                        "sheet_name": "Summary",
+                        "excel_column": "B",
+                    }
+                ],
+                "unavailable": [
+                    {
+                        "period_id": period.period_id,
+                        "sheet_name": "Rooms",
+                        "reason": "not displayed",
+                    }
+                ],
+            }
+        ),
+        {sheet.sheet_name: sheet for sheet in workbook.sheets},
+        period_ids=[period.period_id],
+        financial_sheets=["Summary", "Rooms"],
+        periods=[period],
+    )
+
+    assert result.accepted is False
+    assert any("2024" in item and "2025" in item for item in result.rejections)
 
 
 def test_compact_excel_requires_one_outcome_per_layout_period():
@@ -484,8 +781,14 @@ def test_compact_excel_stops_after_two_repairs():
 
     for _ in range(3):
         assert toolset.dispatch("submit_layout_bindings", incomplete)["accepted"] is False
+    assert toolset.layout_submission_count == 3
+    assert toolset.layout_repair_count == 2
+    assert toolset.counter_value("layout_submissions") == 3
+    assert toolset.counter_value("layout_repairs") == 2
     with pytest.raises(RuntimeError, match="one initial submission and two repairs"):
         toolset.dispatch("submit_layout_bindings", incomplete)
+    assert toolset.layout_submission_count == 4
+    assert toolset.layout_repair_count == 3
 
 
 def test_compact_excel_requires_every_period_on_the_controlling_summary():

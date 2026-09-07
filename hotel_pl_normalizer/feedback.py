@@ -12,19 +12,26 @@ input reaches exactly one workbook destination.
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
+import math
 import re
-from collections import deque
 from dataclasses import asdict, dataclass, field
-from importlib import resources
 from typing import Any, Iterable, Literal
 
-from hotel_pl_normalizer.mapping.mapper import (
-    DERIVED_SUMMARY_LINKS,
-    SUMMARY_EQUATIONS,
+from hotel_pl_normalizer.mapping.coa import (
+    children_by_parent,
+    dependency_coefficient,
+    load_coa,
 )
+from hotel_pl_normalizer.mapping.findings import Finding, ensure_finding
+from hotel_pl_normalizer.mapping.reviews import normalize_review_items
+from hotel_pl_normalizer.mapping.rules import get_rule_policy
+from hotel_pl_normalizer.mapping.tolerances import (
+    feedback_match_tolerance,
+    reconciliation_tolerance,
+)
+from hotel_pl_normalizer.models.evidence import evidence_display_map
 
 SOURCE_PRESENTATION = "Source presentation"
 MAPPING_TREATMENT = "Mapping treatment"
@@ -39,11 +46,6 @@ DERIVED_SUMMARY_FALLBACK = (
     "No conventional Summary section was found; Summary accounts were derived "
     "from mapped department totals and checked against available whole-P&L totals."
 )
-
-GENERIC_COVERAGE_EXPLANATIONS = {
-    "Preserve supported source detail and flag the incomplete coverage.",
-    "The source supports the parent total but does not identify all expected child detail.",
-}
 
 SECTION_LABELS = {
     "S1": "Rooms",
@@ -60,30 +62,6 @@ SECTION_LABELS = {
     "S12": "Summary",
 }
 
-USER_FEEDBACK_CATEGORIES = (
-    SOURCE_PRESENTATION,
-    MAPPING_TREATMENT,
-    COVERAGE_GAP,
-    SCOPE_EXCLUSION,
-    RECONCILIATION_DIFFERENCE,
-)
-
-SOURCE_RULES = {
-    "source_discrepancy",
-    "source_layer_conflict",
-    "source_presentation_exception",
-}
-RECONCILIATION_RULES = {"small_source_reconciliation_difference"}
-COVERAGE_RULES = {
-    "source_detail_incomplete",
-    "coverage_unspecified",
-    "large_residual_plug",
-    "unsupported_residual_remainder",
-    "unresolved_negative_residual",
-}
-SCOPE_RULES = {"scope_exclusion"}
-
-
 @dataclass(frozen=True, slots=True)
 class PeriodComparison:
     period_id: str
@@ -93,6 +71,9 @@ class PeriodComparison:
     variance: float | None = None
     amount: float | None = None
     ratio: float | None = None
+    occupancy: float | None = None
+    rooms_sold: float | None = None
+    rooms_available: float | None = None
 
 
 @dataclass(slots=True)
@@ -149,6 +130,23 @@ class FeedbackCompositionError(RuntimeError):
     """A canonical feedback manifest failed its non-loss contract."""
 
 
+def fallback_feedback_manifest(result: Any, error: Exception) -> dict[str, Any]:
+    """Record a renderer failure without discarding the raw feedback inputs."""
+    manifest = {
+        "mode": "fallback",
+        "composition_error": f"{type(error).__name__}: {error}",
+        "rendered_count": 0,
+        "unmatched_count": (
+            len(getattr(result, "checks", None) or [])
+            + len(getattr(result, "review_items", None) or [])
+            + len(getattr(result, "execution_issues", None) or [])
+            + len(getattr(result, "exceptions", None) or [])
+        ),
+    }
+    result.feedback_manifest = manifest
+    return manifest
+
+
 @dataclass(slots=True)
 class _Input:
     input_id: str
@@ -165,8 +163,10 @@ class _Check:
     severity: str
     rule: str
     target: str
-    details: dict[str, str]
+    details: dict[str, Any]
     raw: str
+    review_item_id: str | None
+    note: str | None = None
 
 
 @dataclass(slots=True)
@@ -179,6 +179,8 @@ class _Review:
     selected_source_rows: list[str]
     alternate_source_rows: list[str]
     requires_human_decision: bool
+    review_item_id: str | None
+    mapping_treatment: str | None = None
 
 
 @dataclass(slots=True)
@@ -193,6 +195,7 @@ class _Exception:
     variance: float | None
     treatment: str
     source_rows: list[str]
+    review_item_id: str | None
 
 
 @dataclass(slots=True)
@@ -229,6 +232,8 @@ class _FindingBuilder:
 
 
 def _plain(value: Any) -> Any:
+    if isinstance(value, Finding):
+        return value.to_dict()
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if isinstance(value, dict):
@@ -288,27 +293,26 @@ def _parse_checks(
     raw_periods = []
     for period_id, checks in checks_by_period.items():
         for check in checks or []:
-            raw_values.append(str(check))
+            raw_values.append(check)
             raw_periods.append(period_id)
     inputs = _inputs("check", raw_values, periods=raw_periods)
     records = []
     for source in inputs:
-        raw = str(source.payload)
-        parts = [part for part in raw.split("|") if part != ""]
-        severity = parts[0].strip().lower() if parts else "error"
-        rule = parts[1].strip() if len(parts) > 1 else "execution"
-        target = parts[2].strip() if len(parts) > 2 else "mapping"
+        finding = ensure_finding(source.payload, period_id=source.period_id)
+        raw = finding.to_legacy_string()
         period_id = source.period_id or "selected"
         records.append(
             _Check(
                 source=source,
                 period_id=period_id,
                 period_label=period_labels.get(period_id, period_id),
-                severity=severity if severity in {"error", "warning"} else "error",
-                rule=rule,
-                target=target,
-                details=_parse_details(parts[3:]),
+                severity=finding.severity,
+                rule=finding.rule,
+                target=finding.target,
+                details=dict(finding.details),
                 raw=raw,
+                review_item_id=finding.review_item_id,
+                note=finding.note,
             )
         )
     return records, inputs
@@ -318,24 +322,23 @@ def _parse_reviews(values: Iterable[Any]) -> tuple[list[_Review], list[_Input]]:
     materialized = list(values or [])
     inputs = _inputs("review_item", materialized)
     records = []
-    for source in inputs:
-        value = source.payload
+    for source, value in zip(inputs, normalize_review_items(materialized)):
         records.append(
             _Review(
                 source=source,
-                kind=str(_field(value, "kind", "") or ""),
-                message=str(_field(value, "message", "") or "").strip(),
-                coa_ids=list(_field(value, "coa_ids", []) or []),
-                source_rows=list(_field(value, "source_rows", []) or []),
-                selected_source_rows=list(
-                    _field(value, "selected_source_rows", []) or []
-                ),
-                alternate_source_rows=list(
-                    _field(value, "alternate_source_rows", []) or []
-                ),
-                requires_human_decision=bool(
-                    _field(value, "requires_human_decision", False)
-                ),
+                kind=value.kind,
+                message=value.message.strip(),
+                mapping_treatment=value.mapping_treatment,
+                coa_ids=value.coa_ids,
+                source_rows=list(dict.fromkeys([
+                    *value.source_rows, *value.selected_source_rows,
+                    *value.alternate_source_rows, *value.selected_excluded_rows,
+                    *value.alternate_excluded_rows,
+                ])),
+                selected_source_rows=value.selected_source_rows,
+                alternate_source_rows=value.alternate_source_rows,
+                requires_human_decision=value.requires_human_decision,
+                review_item_id=value.review_item_id,
             )
         )
     return records, inputs
@@ -371,6 +374,9 @@ def _parse_exceptions(values: Iterable[Any]) -> tuple[list[_Exception], list[_In
                 variance=_number(_field(value, "variance")),
                 treatment=str(_field(value, "treatment", "") or "").strip(),
                 source_rows=list(_field(value, "source_rows", []) or []),
+                review_item_id=(
+                    str(_field(value, "review_item_id", "") or "") or None
+                ),
             )
         )
     return records, inputs
@@ -379,40 +385,47 @@ def _parse_exceptions(values: Iterable[Any]) -> tuple[list[_Exception], list[_In
 def _category_for_rule(rule: str, severity: str) -> str:
     if severity == "error":
         return VALIDATION_ERROR
-    if rule in SOURCE_RULES:
-        return SOURCE_PRESENTATION
-    if rule in RECONCILIATION_RULES:
-        return RECONCILIATION_DIFFERENCE
-    if rule in COVERAGE_RULES:
-        return COVERAGE_GAP
-    if rule in SCOPE_RULES:
-        return SCOPE_EXCLUSION
-    return VALIDATION_WARNING
+    try:
+        return get_rule_policy(rule).category
+    except KeyError:
+        return VALIDATION_WARNING
 
 
 def _category_for_exception(rule: str) -> str:
-    if rule in SOURCE_RULES:
-        return SOURCE_PRESENTATION
-    if rule in RECONCILIATION_RULES:
-        return RECONCILIATION_DIFFERENCE
-    if rule in COVERAGE_RULES:
-        return COVERAGE_GAP
-    if rule in SCOPE_RULES:
-        return SCOPE_EXCLUSION
-    return UNCLASSIFIED_REVIEW
+    try:
+        return get_rule_policy(rule).category
+    except KeyError:
+        return UNCLASSIFIED_REVIEW
 
 
 def _expected_review_kind(rule: str) -> str | None:
     if rule == "scope_exclusion":
         return "scope_exception"
-    if rule in SOURCE_RULES:
+    if _category_for_exception(rule) == SOURCE_PRESENTATION:
         return "source_discrepancy"
     return None
 
 
 def _match_review(exception: _Exception, reviews: list[_Review]) -> _Review | None:
+    if exception.review_item_id:
+        return next(
+            (
+                review
+                for review in reviews
+                if review.review_item_id == exception.review_item_id
+            ),
+            None,
+        )
     expected = _expected_review_kind(exception.rule)
     if expected is None:
+        # Historical coverage exceptions sometimes already contain the exact
+        # source-review explanation but lack its ID. Never fuzzy-match prose.
+        matches = [review for review in reviews if exception.treatment
+                   and review.message == exception.treatment
+                   and exception.target in review.coa_ids
+                   and review.kind == "source_discrepancy"]
+        if len(matches) == 1:
+            return matches[0]
         return None
     scored = []
     for index, review in enumerate(reviews):
@@ -465,6 +478,9 @@ def _comparison_from_check(check: _Check) -> PeriodComparison:
             check.details.get("remainder", check.details.get("plug"))
         ),
         ratio=_number(check.details.get("ratio")),
+        occupancy=_number(check.details.get("occupancy")),
+        rooms_sold=_number(check.details.get("rooms_sold")),
+        rooms_available=_number(check.details.get("rooms_available")),
     )
 
 
@@ -494,6 +510,9 @@ def _merge_comparison(
             existing.amount if existing.amount is not None else incoming.amount
         ),
         ratio=existing.ratio if existing.ratio is not None else incoming.ratio,
+        occupancy=incoming.occupancy if incoming.occupancy is not None else existing.occupancy,
+        rooms_sold=incoming.rooms_sold if incoming.rooms_sold is not None else existing.rooms_sold,
+        rooms_available=incoming.rooms_available if incoming.rooms_available is not None else existing.rooms_available,
     )
 
 
@@ -509,16 +528,22 @@ def _default_explanation(category: str, rule: str) -> str:
             return "A material remaining difference was assigned to the available all-other account."
         if rule == "unresolved_negative_residual":
             return "A material negative remainder was not forced into an all-other account."
-        return "The source supports the parent total but does not identify all expected child detail."
+        return "The mapped child accounts do not fully explain the mapped parent total."
     if category == SCOPE_EXCLUSION:
         return "A materially populated item was excluded from the Standard COA based on the workbook's supported scope."
     return rule.replace("_", " ").strip().capitalize() or "A finding requires review."
 
 
 def _check_explanation(check: _Check, coa: dict[str, dict]) -> str:
+    if check.rule == "source_control_difference":
+        return f"{check.details.get('label', 'Source subtotal')} ({check.details.get('total_row', '')})."
+    if check.rule == "source_control_unverified":
+        return f"{check.details.get('label', 'Source subtotal')} ({check.details.get('total_row', '')}): missing source values prevent checking this subtotal."
     message = str(check.details.get("message") or "").strip()
     if message:
         return message
+    if check.rule in {"occupancy_above_capacity", "invalid_rooms_available", "non_residual_plug"} and check.note:
+        return check.note
     category = _category_for_rule(check.rule, check.severity)
     if check.rule == "summary_math":
         equation = str(check.details.get("equation") or "").strip()
@@ -563,6 +588,7 @@ def _clean_message(
     source_refs: list[str],
     *,
     quantified: bool = False,
+    source_ref_displays: dict[str, str] | None = None,
 ) -> str:
     output = str(text or "").strip()
     for coa_id in sorted(coa, key=len, reverse=True):
@@ -596,7 +622,8 @@ def _clean_message(
         if "!" not in source_ref:
             continue
         sheet, row = source_ref.rsplit("!", 1)
-        output = output.replace(source_ref, f"{sheet} row {row}")
+        display = (source_ref_displays or {}).get(source_ref, f"{sheet} row {row}")
+        output = output.replace(source_ref, display)
     output = re.sub(r"\b([\w&.-]+)!(\d+)\b", r"\1 row \2", output)
     output = output.replace("no_value", "left blank")
     output = re.sub(
@@ -653,6 +680,49 @@ def _join_phrases(values: list[str]) -> str:
     return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
+VARIANCE_PHRASES = {
+    "summary_department": (
+        "{amount} above the independently reported department amount in {period}",
+        "{amount} below the independently reported department amount in {period}",
+        "equal to the independently reported department amount in {period}",
+    ),
+    "summary_math": (
+        "{amount} above the required equation in {period}",
+        "{amount} below the required equation in {period}",
+        "equal to the required equation in {period}",
+    ),
+    "hierarchy": (
+        "{amount} below the parent in {period}",
+        "{amount} above the parent in {period}",
+        "equal to the parent in {period}",
+    ),
+    "relative": (
+        "{amount} higher in {period}",
+        "{amount} lower in {period}",
+        "equal in {period}",
+    ),
+}
+
+
+def _variance_phrases(
+    periods: list[PeriodComparison], phrase_kind: str
+) -> list[str]:
+    positive, negative, equal = VARIANCE_PHRASES[phrase_kind]
+    return [
+        (
+            positive
+            if item.variance > 0
+            else negative
+            if item.variance < 0
+            else equal
+        ).format(
+            amount=_rounded_number(item.variance),
+            period=item.period_label,
+        )
+        for item in periods
+    ]
+
+
 def _period_sentence(
     category: str,
     periods: list[PeriodComparison],
@@ -661,6 +731,25 @@ def _period_sentence(
     explanation: str = "",
 ) -> str:
     rules = rules or set()
+    if "occupancy_above_capacity" in rules:
+        return " ".join(
+            f"Occupancy is {item.occupancy:.2%} in {item.period_label}, above 100%."
+            for item in periods if item.occupancy is not None
+        )
+    if "invalid_rooms_available" in rules:
+        return " ".join(
+            f"{item.period_label}: {item.rooms_sold:,.0f} rooms sold against "
+            f"{item.rooms_available:,.0f} available room nights. Review source capacity."
+            for item in periods if item.rooms_sold is not None and item.rooms_available is not None
+        )
+    if "source_control_difference" in rules:
+        return " ".join(
+            f"{item.period_label}: reported ${item.selected_value:,.2f} versus "
+            f"components ${item.comparison_value:,.2f}, a ${abs(item.variance):,.2f} "
+            f"{'shortfall' if item.variance < 0 else 'excess'}."
+            for item in periods if item.variance is not None
+            and item.comparison_value is not None and not _below_reconciliation_tolerance(item)
+        )
     if category == COVERAGE_GAP and rules & {
         "large_residual_plug",
         "unsupported_residual_remainder",
@@ -689,8 +778,13 @@ def _period_sentence(
             "identified source detail."
         )
     quantified = [item for item in periods if item.variance is not None]
+    if category in {SOURCE_PRESENTATION, RECONCILIATION_DIFFERENCE} and quantified:
+        quantified = [item for item in quantified if not _below_reconciliation_tolerance(item)]
+        if not quantified:
+            return ""
     if not quantified:
         if periods and category in {
+            SOURCE_PRESENTATION,
             VALIDATION_ERROR,
             VALIDATION_WARNING,
             UNCLASSIFIED_REVIEW,
@@ -701,88 +795,34 @@ def _period_sentence(
         return ""
     if category in {VALIDATION_ERROR, VALIDATION_WARNING}:
         if "summary_department" in rules:
-            phrases = [
-                (
-                    f"{_rounded_number(item.variance)} above the independently reported department amount in {item.period_label}"
-                    if item.variance > 0
-                    else f"{_rounded_number(item.variance)} below the independently reported department amount in {item.period_label}"
-                    if item.variance < 0
-                    else f"equal to the independently reported department amount in {item.period_label}"
-                )
-                for item in quantified
-            ]
+            phrases = _variance_phrases(quantified, "summary_department")
             return f"The Summary amount is {_join_phrases(phrases)}."
         if "summary_math" in rules:
-            phrases = [
-                (
-                    f"{_rounded_number(item.variance)} above the required equation in {item.period_label}"
-                    if item.variance > 0
-                    else f"{_rounded_number(item.variance)} below the required equation in {item.period_label}"
-                    if item.variance < 0
-                    else f"equal to the required equation in {item.period_label}"
-                )
-                for item in quantified
-            ]
+            phrases = _variance_phrases(quantified, "summary_math")
             return f"The reported Summary amount is {_join_phrases(phrases)}."
         if rules & {
             "hierarchy_complete",
             "hierarchy_partial_with_residual",
         }:
-            phrases = [
-                (
-                    f"{_rounded_number(item.variance)} below the parent in {item.period_label}"
-                    if item.variance > 0
-                    else f"{_rounded_number(item.variance)} above the parent in {item.period_label}"
-                    if item.variance < 0
-                    else f"equal to the parent in {item.period_label}"
-                )
-                for item in quantified
-            ]
+            phrases = _variance_phrases(quantified, "hierarchy")
             return f"Child accounts are {_join_phrases(phrases)}."
     if category == SOURCE_PRESENTATION:
-        phrases = [
-            (
-                f"{_rounded_number(item.variance)} higher in {item.period_label}"
-                if item.variance > 0
-                else f"{_rounded_number(item.variance)} lower in {item.period_label}"
-                if item.variance < 0
-                else f"equal in {item.period_label}"
-            )
-            for item in quantified
-        ]
+        phrases = _variance_phrases(quantified, "relative")
         return (
             "Compared with the alternate source, the selected amount is "
             f"{_join_phrases(phrases)}."
         )
     if category == COVERAGE_GAP:
-        phrases = [
-            (
-                f"{_rounded_number(item.variance)} below the parent in {item.period_label}"
-                if item.variance > 0
-                else f"{_rounded_number(item.variance)} above the parent in {item.period_label}"
-                if item.variance < 0
-                else f"equal to the parent in {item.period_label}"
-            )
-            for item in quantified
-        ]
+        if all(item.comparison_value == 0 for item in quantified):
+            return "No child breakdown mapped: " + _join_phrases([
+                f"{_rounded_number(item.selected_value)} in {item.period_label}"
+                for item in quantified if item.selected_value is not None
+            ]) + "."
+        phrases = _variance_phrases(quantified, "hierarchy")
         return f"Identified children are {_join_phrases(phrases)}."
     if category == RECONCILIATION_DIFFERENCE:
-        phrases = [
-            (
-                f"{_rounded_number(item.variance)} higher in {item.period_label}"
-                if item.variance > 0
-                else f"{_rounded_number(item.variance)} lower in {item.period_label}"
-                if item.variance < 0
-                else f"equal in {item.period_label}"
-            )
-            for item in quantified
-        ]
-        retained = (
-            ""
-            if "retain" in explanation.casefold()
-            else "; the reported values were retained"
-        )
-        return f"The reported total is {_join_phrases(phrases)}{retained}."
+        phrases = _variance_phrases(quantified, "relative")
+        return f"The reported total is {_join_phrases(phrases)}."
     if category in {VALIDATION_ERROR, VALIDATION_WARNING, UNCLASSIFIED_REVIEW}:
         phrases = [
             f"{item.period_label}: {_rounded_number(item.variance)} difference"
@@ -798,13 +838,24 @@ def _account_name(coa_id: str | None, coa: dict[str, dict]) -> str:
     return str(coa.get(coa_id, {}).get("account_name") or coa_id)
 
 
-def _render(builder: _FindingBuilder, coa: dict[str, dict]) -> str:
+def _render(
+    builder: _FindingBuilder,
+    coa: dict[str, dict],
+    source_ref_displays: dict[str, str] | None = None,
+) -> str:
     quantified = any(item.variance is not None for item in builder.periods.values())
+    if quantified and builder.category in {SOURCE_PRESENTATION, COVERAGE_GAP, RECONCILIATION_DIFFERENCE} and not builder.review_input_ids:
+        # Numeric findings state what was measured, not a model's diagnosis of
+        # why the source or mapping differs. Raw explanations remain in the log.
+        explanation_text = _default_explanation(builder.category, next(iter(sorted(builder.rules)), ""))
+    else:
+        explanation_text = builder.explanation
     explanation = _clean_message(
-        builder.explanation,
+        explanation_text,
         coa,
         builder.source_refs,
         quantified=quantified,
+        source_ref_displays=source_ref_displays,
     )
     prefix = "Needs review" if builder.severity == "error" else builder.category
     first = f"{prefix}: {explanation}" if explanation else f"{prefix}."
@@ -815,12 +866,14 @@ def _render(builder: _FindingBuilder, coa: dict[str, dict]) -> str:
         rules=builder.rules,
         explanation=explanation,
     )
-    if (
-        builder.category == COVERAGE_GAP
-        and period_sentence
-        and explanation in GENERIC_COVERAGE_EXPLANATIONS
-    ):
+    if period_sentence and builder.rules & {"occupancy_above_capacity", "invalid_rooms_available"}:
         return f"{prefix}: {period_sentence}"
+    if period_sentence and "source_control_difference" in builder.rules:
+        label = _clean_message(builder.explanation, coa, builder.source_refs, source_ref_displays=source_ref_displays)
+        return f"{prefix}: {label} {period_sentence}"
+    if period_sentence and builder.category in {COVERAGE_GAP, RECONCILIATION_DIFFERENCE}:
+        # Treatment, if present, is added by the structured merge below.
+        return f"{prefix}: {period_sentence}" + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
     if (
         period_sentence
         and builder.rules & {"summary_department", "hierarchy_complete"}
@@ -853,35 +906,29 @@ def _render(builder: _FindingBuilder, coa: dict[str, dict]) -> str:
     return " ".join(value for value in sentences if value).strip()
 
 
-def _primary_for_review(review: _Review, coa: dict[str, dict]) -> str | None:
+def _primary_for_review(review: _Review, coa: dict[str, dict], values_by_period=None) -> str | None:
     candidates = [coa_id for coa_id in review.coa_ids if coa_id in coa]
     if not candidates:
         return None
+    populated = [item for item in candidates if any(
+        values.get(item) not in (None, 0) for values in (values_by_period or {}).values()
+    )]
+    if populated:
+        candidates = populated
     if review.kind == "unusual_convention":
         summary = [item for item in candidates if item.startswith("S12.")]
         if summary and "summary" in review.message.casefold():
             return summary[0]
         non_summary = [item for item in candidates if not item.startswith("S12.")]
         if non_summary:
-            return max(
-                non_summary,
-                key=lambda item: _coa_depth(item, coa),
-            )
+            # COA IDs are ordered responsible-account first. Older runs often
+            # cite the parent followed by blank descendants; never pick the
+            # deepest child merely because it is most specific.
+            return non_summary[0]
     return candidates[0]
 
 
-def _coa_depth(coa_id: str, coa: dict[str, dict]) -> int:
-    depth = 0
-    seen = {coa_id}
-    parent = coa.get(coa_id, {}).get("parent_coa_id")
-    while parent and parent in coa and parent not in seen:
-        seen.add(parent)
-        depth += 1
-        parent = coa[parent].get("parent_coa_id")
-    return depth
-
-
-def _details_shape(details: dict[str, str]) -> tuple[tuple[str, str], ...]:
+def _details_shape(details: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     numeric_keys = {
         "actual",
         "expected",
@@ -898,7 +945,7 @@ def _details_shape(details: dict[str, str]) -> tuple[tuple[str, str], ...]:
 def _same_number(left: float | None, right: float | None) -> bool:
     if left is None or right is None:
         return left is right
-    tolerance = max(0.01, abs(left) * 0.00001, abs(right) * 0.00001)
+    tolerance = feedback_match_tolerance(left, right)
     return abs(left - right) <= tolerance
 
 
@@ -908,6 +955,9 @@ def _match_check_exception(
 ) -> _Exception | None:
     matches = []
     for exception in exceptions:
+        if check.review_item_id or exception.review_item_id:
+            if check.review_item_id != exception.review_item_id:
+                continue
         if (
             exception.period_id != check.period_id
             or exception.rule != check.rule
@@ -936,45 +986,12 @@ def _match_check_exception(
     return None
 
 
-def _dependency_edges(coa: dict[str, dict]) -> dict[str, list[tuple[str, int]]]:
-    edges: dict[str, list[tuple[str, int]]] = {}
-    for coa_id, metadata in coa.items():
-        parent = str(metadata.get("parent_coa_id") or "")
-        if parent:
-            edges.setdefault(coa_id, []).append((parent, 1))
-    for summary, detail in DERIVED_SUMMARY_LINKS.items():
-        edges.setdefault(detail, []).append((summary, 1))
-    for target, terms in SUMMARY_EQUATIONS.items():
-        for sign, source in terms:
-            edges.setdefault(source, []).append((target, int(sign)))
-    return edges
-
-
 def _dependency_coefficient(
     source: str | None,
     target: str | None,
     coa: dict[str, dict],
-) -> int | None:
-    if not source or not target:
-        return None
-    if source == target:
-        return 1
-    queue = deque([(source, 1, 0)])
-    seen = {(source, 1)}
-    edges = _dependency_edges(coa)
-    while queue:
-        current, coefficient, depth = queue.popleft()
-        if depth >= 10:
-            continue
-        for next_target, sign in edges.get(current, []):
-            next_coefficient = coefficient * sign
-            if next_target == target:
-                return next_coefficient
-            state = (next_target, next_coefficient)
-            if state not in seen:
-                seen.add(state)
-                queue.append((next_target, next_coefficient, depth + 1))
-    return None
+) -> int | float | None:
+    return dependency_coefficient(source, target, coa)
 
 
 def _is_downstream_consequence(
@@ -1001,9 +1018,12 @@ def _is_downstream_consequence(
         return False
     for period_id, comparison in downstream.periods.items():
         source = upstream.periods.get(period_id)
-        if source is None or source.variance is None or comparison.variance is None:
+        difference = comparison.variance
+        if difference is None and upstream.primary_coa_id == downstream.primary_coa_id:
+            difference = comparison.amount
+        if source is None or source.variance is None or difference is None:
             return False
-        if not _same_number(source.variance * coefficient, comparison.variance):
+        if not _same_number(source.variance * coefficient, difference):
             return False
     return True
 
@@ -1060,6 +1080,139 @@ def _check_accounts(check: _Check, coa: dict[str, dict]) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+def _review_comparisons(
+    review: _Review,
+    rows: dict[str, Any],
+    labels: dict[str, str],
+) -> dict[str, PeriodComparison]:
+    """Use the existing source arithmetic; never infer a difference from prose."""
+    from hotel_pl_normalizer.mapping.mapper import MappingReviewItem, _source_layer_value
+
+    if review.kind != "source_discrepancy" or not labels:
+        return {}
+    value = normalize_review_items([review.source.payload])[0]
+    if not value.selected_source_rows or not value.alternate_source_rows:
+        return {}
+    try:
+        MappingReviewItem.model_validate({
+            key: item for key, item in asdict(value).items() if key != "review_item_id"
+        })
+    except ValueError:
+        return {}
+    cited = {
+        *value.selected_source_rows, *value.alternate_source_rows,
+        *value.selected_excluded_rows, *value.alternate_excluded_rows,
+    }
+    comparisons = {}
+    for period_id, label in labels.items():
+        # The legacy arithmetic falls back to the primary value when a period
+        # key is missing. That cannot prove a difference is small in this period.
+        if any(
+            row not in rows
+            or (
+                period_id not in (rows[row].get("selected_values") or {})
+                and (rows[row].get("selected_values") or len(labels) != 1)
+            )
+            for row in cited
+        ):
+            return {}
+        try:
+            selected = _source_layer_value(
+                rows, value.selected_source_rows, value.selected_excluded_rows,
+                value.selected_source_operation, period_id,
+            )
+            alternate = _source_layer_value(
+                rows, value.alternate_source_rows, value.alternate_excluded_rows,
+                value.alternate_source_operation, period_id,
+            )
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if selected is None or alternate is None or not all(
+            math.isfinite(number) for number in (selected, alternate)
+        ):
+            return {}
+        comparisons[period_id] = PeriodComparison(
+            period_id=period_id, period_label=label,
+            selected_value=selected, comparison_value=alternate,
+            variance=selected - alternate,
+        )
+    return comparisons
+
+
+def _below_reconciliation_tolerance(comparison: PeriodComparison) -> bool:
+    return (
+        comparison.selected_value is not None
+        and comparison.variance is not None
+        and math.isfinite(comparison.selected_value)
+        and math.isfinite(comparison.variance)
+        and abs(comparison.variance) <= reconciliation_tolerance(comparison.selected_value)
+    )
+
+
+def _same_adjustment(
+    treatment: _Review,
+    discrepancy: _Review,
+    comparisons: dict[str, PeriodComparison],
+    rows: dict[str, Any],
+) -> bool:
+    """Link a treatment only when its cited adjustment explains the conflict."""
+    from hotel_pl_normalizer.mapping.mapper import _source_layer_value
+
+    if not treatment.source_rows or not set(treatment.coa_ids) & set(discrepancy.coa_ids):
+        return False
+    value = normalize_review_items([discrepancy.source.payload])[0]
+    adjustment_rows = set(treatment.source_rows)
+    if adjustment_rows & set(value.alternate_source_rows + value.alternate_excluded_rows):
+        return False
+    if adjustment_rows <= set(value.selected_excluded_rows):
+        sign = -1
+    elif adjustment_rows <= set(value.selected_source_rows):
+        sign = -1 if value.selected_source_operation == "negate" else 1
+    else:
+        return False
+    if not comparisons or not any(item.variance for item in comparisons.values()):
+        return False
+    for period_id, comparison in comparisons.items():
+        try:
+            adjustment = _source_layer_value(rows, treatment.source_rows, [], "sum", period_id)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if adjustment is None or comparison.variance is None or not _same_number(
+            sign * adjustment, comparison.variance
+        ):
+            return False
+    return True
+
+
+def _review_treatment(review: _Review, rows: dict[str, Any]) -> str | None:
+    """Prefer separate treatment; recover legacy adjusted equations from rows."""
+    if review.mapping_treatment and review.mapping_treatment.strip():
+        return review.mapping_treatment.strip()
+    value = normalize_review_items([review.source.payload])[0]
+    if not value.selected_excluded_rows or value.selected_source_operation != "adjusted_subtotal":
+        return None
+    cited = value.selected_source_rows + value.selected_excluded_rows
+    if not all(rows.get(key, {}).get("label") for key in cited):
+        return None
+    included = _join_phrases([str(rows[key]["label"]) for key in value.selected_source_rows])
+    excluded = _join_phrases([str(rows[key]["label"]) for key in value.selected_excluded_rows])
+    return f"Mapped from {included}, less {excluded}."
+
+
+def _merge_builder(target, prior, builders, dispositions, status="superseded_by"):
+    target.add_accounts(prior.affected_coa_ids)
+    target.add_refs(prior.source_refs)
+    target.rules.update(prior.rules)
+    for input_id in prior.source_input_ids:
+        if input_id not in target.source_input_ids:
+            target.source_input_ids.append(input_id)
+        dispositions[input_id] = (target.key, status)
+    target.review_input_ids.extend(
+        item for item in prior.review_input_ids if item not in target.review_input_ids
+    )
+    builders.pop(prior.key)
+
+
 def compose_feedback(
     *,
     checks_by_period: dict[str, list[Any]] | None,
@@ -1069,6 +1222,9 @@ def compose_feedback(
     execution_issues_by_period: dict[str, list[str]] | None,
     period_labels: dict[str, str] | None,
     coa: dict[str, dict],
+    source_ref_displays: dict[str, str] | None = None,
+    evidence_rows: Iterable[Any] | None = None,
+    values_by_period: dict[str, dict[str, float | None]] | None = None,
 ) -> FeedbackBundle:
     """Join every final feedback input into one non-lossy finding bundle."""
     labels = dict(period_labels or {})
@@ -1076,6 +1232,11 @@ def compose_feedback(
     reviews, review_inputs = _parse_reviews(review_items or [])
     exception_records, exception_inputs = _parse_exceptions(exceptions or [])
     derived_summary_supersessions = _derived_summary_supersessions(reviews)
+    rows = {row["row_key"]: row for row in evidence_rows or [] if _field(row, "row_key")}
+    review_comparisons = {
+        review.source.input_id: _review_comparisons(review, rows, labels)
+        for review in reviews
+    }
 
     # The mapper exposes both period-native issues and a flattened, labelled
     # compatibility list.  Build from the period-native records first and add
@@ -1162,7 +1323,7 @@ def compose_feedback(
             severity="warning",
             action_required=False,
             primary=exception.target or (
-                _primary_for_review(matched_review, coa)
+                _primary_for_review(matched_review, coa, values_by_period)
                 if matched_review is not None
                 else None
             ),
@@ -1186,8 +1347,8 @@ def compose_feedback(
             finding.add_refs(matched_review.source_rows)
             dispositions[matched_review.source.input_id] = (key, "rendered")
 
-    # Every model review survives, even if it did not produce a structured
-    # exception.  This is the non-loss fallback missing from the old renderer.
+    # Every model review survives in the audit, including those whose cited
+    # arithmetic is below tolerance and does not need a visible warning.
     for review in reviews:
         if review.source.input_id in dispositions:
             continue
@@ -1209,13 +1370,42 @@ def compose_feedback(
             category=category,
             severity=severity,
             action_required=action,
-            primary=_primary_for_review(review, coa),
+            primary=_primary_for_review(review, coa, values_by_period),
             explanation=review.message or "A model review item requires attention.",
         )
         finding.add_input(review.source, review=True)
         finding.add_accounts(review.coa_ids)
         finding.add_refs(review.source_rows)
+        finding.periods.update(review_comparisons[review.source.input_id])
         dispositions[review.source.input_id] = (key, "rendered")
+
+    # Combine source presentation and mapping treatment of the same proven
+    # adjustment into one explanation; preserve both raw review input IDs.
+    for treatment in reviews:
+        if treatment.kind != "unusual_convention" or treatment.requires_human_decision or treatment.source.input_id not in dispositions:
+            continue
+        matches = [
+            review for review in reviews
+            if review.kind == "source_discrepancy"
+            and not review.requires_human_decision
+            and _same_adjustment(treatment, review, review_comparisons[review.source.input_id], rows)
+        ]
+        if len(matches) != 1:
+            continue
+        if sum(
+            other.kind == "unusual_convention"
+            and _same_adjustment(other, matches[0], review_comparisons[matches[0].source.input_id], rows)
+            for other in reviews
+        ) != 1:
+            continue
+        key, _ = dispositions[matches[0].source.input_id]
+        old_key, _ = dispositions[treatment.source.input_id]
+        if key == old_key or old_key not in builders:
+            continue
+        finding, prior = builders[key], builders[old_key]
+        finding.explanation = treatment.message
+        finding.periods.update(review_comparisons[matches[0].source.input_id])
+        _merge_builder(finding, prior, builders, dispositions)
 
     for fallback_id, replacement_id in derived_summary_supersessions.items():
         if replacement_id not in dispositions:
@@ -1237,6 +1427,8 @@ def compose_feedback(
         if matched_exception is not None:
             key = exception_builder[matched_exception.source.input_id]
             finding = builders[key]
+            if check.rule in {"occupancy_above_capacity", "invalid_rooms_available"}:
+                finding.explanation = _check_explanation(check, coa)
             finding.add_input(check.source)
             finding.rules.add(check.rule)
             comparison = _comparison_from_check(check)
@@ -1262,7 +1454,11 @@ def compose_feedback(
             (
                 item
                 for item in reviews
-                if item.kind == expected_kind and check.target in item.coa_ids
+                if (
+                    item.review_item_id == check.review_item_id
+                    if check.review_item_id
+                    else item.kind == expected_kind and check.target in item.coa_ids
+                )
             ),
             None,
         )
@@ -1308,6 +1504,9 @@ def compose_feedback(
             for key_name, value in check.details.items()
             if key_name.endswith("row") or key_name.endswith("_row")
         )
+        if check.rule.startswith("source_control_"):
+            finding.add_refs(json.loads(str(check.details.get("component_rows") or "[]")))
+            finding.add_refs(json.loads(str(check.details.get("excluded_rows") or "[]")))
         finding.rules.add(check.rule)
         finding.periods[check.period_id] = _comparison_from_check(check)
         dispositions[check.source.input_id] = (key, "rendered")
@@ -1337,6 +1536,50 @@ def compose_feedback(
                 period_label=str(period_label),
             )
         dispositions[source.input_id] = (key, "rendered")
+
+    # Prefer factual, code-quantified source comparisons to model-authored
+    # diagnoses. A separate mapping treatment survives independently of math.
+    for finding in builders.values():
+        source_reviews = [review for review in reviews if review.source.input_id in finding.review_input_ids]
+        if (finding.category == SOURCE_PRESENTATION and source_reviews
+                and all(review.kind == "source_discrepancy" for review in source_reviews)
+                and any(item.variance is not None for item in finding.periods.values())):
+            treatments = list(dict.fromkeys(filter(None, (
+                _review_treatment(review, rows) for review in source_reviews
+            ))))
+            finding.explanation = " ".join(treatments) or "The mapped amount differs from the cited source comparison."
+
+    # Attach an unsplit-parent explanation to that parent's coverage note.
+    # This is deliberately structural, not a similarity match over prose.
+    children = children_by_parent(coa)
+    kpi_ids = {"S12.rooms_available", "S12.rooms_sold", "S12.occupancy", "S12.adr", "S12.revpar"}
+    for treatment in list(builders.values()):
+        if treatment.key not in builders or treatment.category != MAPPING_TREATMENT:
+            continue
+        parent = treatment.primary_coa_id
+        child_ids = children.get(parent, [])
+        candidates = [finding for finding in builders.values()
+                      if finding.key != treatment.key
+                      and finding.category == COVERAGE_GAP
+                      and finding.primary_coa_id == parent
+                      and "source_detail_incomplete" in finding.rules]
+        if (values_by_period and child_ids
+                and not any(values.get(child) not in (None, 0)
+                            for values in values_by_period.values() for child in child_ids)
+                and len(candidates) == 1):
+            candidates[0].consequences.append(_clean_message(
+                treatment.explanation, coa, treatment.source_refs,
+                source_ref_displays=source_ref_displays,
+            ))
+            _merge_builder(candidates[0], treatment, builders, dispositions)
+        elif set(treatment.affected_coa_ids) <= kpi_ids and not treatment.source_refs:
+            # Legacy KPI commentary often repeats ratios with the wrong units.
+            # The typed KPI checks, when present, carry the actual facts.
+            candidates = [finding for finding in builders.values()
+                          if finding.rules & {"occupancy_above_capacity", "invalid_rooms_available"}
+                          and finding.primary_coa_id in treatment.affected_coa_ids]
+            if candidates:
+                _merge_builder(candidates[0], treatment, builders, dispositions)
 
     # Collapse only deterministically proven downstream consequences.  A shared
     # amount without a known dependency path is intentionally insufficient.
@@ -1389,6 +1632,44 @@ def compose_feedback(
         finding.add_input(source)
         dispositions[source.input_id] = (key, "rendered")
 
+    # Suppress only numerically proven financial differences. Missing period
+    # evidence, invalid comparisons, human decisions, and KPI issues stay visible.
+    internal_keys = set()
+    kpi_ids = {"S12.rooms_available", "S12.rooms_sold", "S12.occupancy", "S12.adr", "S12.revpar"}
+    for key, finding in builders.items():
+        source_reviews = [review for review in reviews if review.source.input_id in finding.source_input_ids]
+        if (
+            finding.category not in {SOURCE_PRESENTATION, RECONCILIATION_DIFFERENCE}
+            or finding.severity == "error"
+            or finding.rules - {"source_layer_conflict", "source_discrepancy", "small_source_reconciliation_difference", "source_control_difference"}
+            or set(finding.affected_coa_ids) & kpi_ids
+            or any(review.requires_human_decision or review.kind != "source_discrepancy" for review in source_reviews)
+        ):
+            continue
+        comparisons = dict(finding.periods)
+        for review in source_reviews:
+            comparisons.update(review_comparisons[review.source.input_id])
+        if (
+            comparisons
+            and all(_below_reconciliation_tolerance(item) for item in finding.periods.values())
+            and (not source_reviews or set(labels) <= comparisons.keys())
+            and all(_below_reconciliation_tolerance(item) for item in comparisons.values())
+        ):
+            treatments = list(dict.fromkeys(filter(None, (
+                _review_treatment(review, rows) for review in source_reviews
+            ))))
+            if treatments:
+                finding.category = MAPPING_TREATMENT
+                finding.severity = "info"
+                finding.explanation = " ".join(treatments)
+                # Retain the comparisons in the audit, but an informational
+                # treatment must not acquire a rounding-warning sentence.
+                continue
+            internal_keys.add(key)
+            finding.periods = comparisons
+            for input_id in finding.source_input_ids:
+                dispositions[input_id] = (key, "internal_only")
+
     final_findings = []
     key_to_id = {}
     for finding in sorted(
@@ -1412,9 +1693,8 @@ def compose_feedback(
                 severity=finding.severity,
                 action_required=finding.action_required,
                 destination=(
-                    f"coa:{primary_coa_id}"
-                    if primary_coa_id
-                    else "run_notes"
+                    "internal_only" if finding.key in internal_keys
+                    else f"coa:{primary_coa_id}" if primary_coa_id else "run_notes"
                 ),
                 primary_coa_id=primary_coa_id,
                 affected_coa_ids=finding.affected_coa_ids,
@@ -1426,12 +1706,13 @@ def compose_feedback(
                         item.variance is not None
                         for item in finding.periods.values()
                     ),
+                    source_ref_displays=source_ref_displays,
                 ),
                 source_refs=finding.source_refs,
                 periods=list(finding.periods.values()),
                 consequences=finding.consequences,
                 source_input_ids=list(dict.fromkeys(finding.source_input_ids)),
-                rendered_text=_render(finding, coa),
+                rendered_text=_render(finding, coa, source_ref_displays),
             )
         )
 
@@ -1453,7 +1734,7 @@ def compose_feedback(
     bundle = FeedbackBundle(
         findings=final_findings,
         inputs=input_dispositions,
-        rendered_count=len(final_findings),
+        rendered_count=sum(item.destination != "internal_only" for item in final_findings),
         unmatched_count=len(unmatched),
     )
     assert_feedback_invariants(bundle)
@@ -1478,6 +1759,15 @@ def compose_result_feedback(result: Any) -> FeedbackBundle:
         ),
         period_labels=period_labels,
         coa=dict(_field(result, "coa", {}) or {}),
+        evidence_rows=_field(result, "evidence", []) or [],
+        values_by_period=_field(result, "period_values", {}) or {},
+        source_ref_displays=evidence_display_map(
+            [
+                row
+                for row in (_field(result, "evidence", []) or [])
+                if _field(row, "row_key")
+            ]
+        ),
     )
 
 
@@ -1489,7 +1779,7 @@ def assert_feedback_invariants(bundle: FeedbackBundle) -> None:
         raise FeedbackCompositionError("canonical finding IDs are not unique")
     if len(input_ids) != len(set(input_ids)):
         raise FeedbackCompositionError("feedback input IDs are not unique")
-    if bundle.rendered_count != len(bundle.findings):
+    if bundle.rendered_count != sum(item.destination != "internal_only" for item in bundle.findings):
         raise FeedbackCompositionError(
             "rendered feedback count does not equal canonical finding count"
         )
@@ -1506,7 +1796,7 @@ def assert_feedback_invariants(bundle: FeedbackBundle) -> None:
             if finding.primary_coa_id
             else "run_notes"
         )
-        if finding.destination != expected_destination:
+        if finding.destination not in {expected_destination, "internal_only"}:
             raise FeedbackCompositionError(
                 f"{finding.finding_id} does not have exactly one destination"
             )
@@ -1526,13 +1816,14 @@ def assert_feedback_invariants(bundle: FeedbackBundle) -> None:
             raise FeedbackCompositionError(
                 f"{disposition.input_id} points to a missing canonical finding"
             )
+        if (finding.destination == "internal_only") != (disposition.status == "internal_only"):
+            raise FeedbackCompositionError("internal feedback must have an internal-only disposition")
 
 
 def load_canonical_coa() -> dict[str, dict]:
     """Load just enough canonical metadata for saved-run shadow composition."""
-    source = resources.files("hotel_pl_normalizer.data").joinpath("coa_v2.csv")
-    with source.open("r", encoding="utf-8-sig", newline="") as handle:
-        return {row["coa_id"]: row for row in csv.DictReader(handle)}
+
+    return load_coa()
 
 
 def compose_run_log_feedback(
@@ -1549,14 +1840,29 @@ def compose_run_log_feedback(
     }
     if not labels:
         labels = {"selected": str(source.get("period") or "Selected period")}
+    typed_by_period = run_log.get("findings_by_period")
+    if not typed_by_period and run_log.get("findings"):
+        typed_by_period = {}
+        for finding in run_log["findings"]:
+            period_id = str(_field(finding, "period_id", "selected") or "selected")
+            typed_by_period.setdefault(period_id, []).append(finding)
     return compose_feedback(
-        checks_by_period=run_log.get("checks_by_period") or {
-            "selected": run_log.get("checks") or []
-        },
+        checks_by_period=typed_by_period
+        or run_log.get("checks_by_period")
+        or {"selected": run_log.get("checks") or []},
         review_items=run_log.get("review_items") or [],
         exceptions=run_log.get("exceptions") or [],
         execution_issues=run_log.get("execution_issues") or [],
         execution_issues_by_period=run_log.get("execution_issues_by_period") or {},
         period_labels=labels,
         coa=coa or load_canonical_coa(),
+        evidence_rows=run_log.get("evidence_rows") or [],
+        values_by_period=run_log.get("values_by_period") or {},
+        source_ref_displays=evidence_display_map(
+            [
+                row
+                for row in (run_log.get("evidence_rows") or [])
+                if _field(row, "row_key")
+            ]
+        ),
     )

@@ -19,7 +19,9 @@ from hotel_pl_normalizer.pipeline import (
     discover_workbook_periods,
     normalize_pdf,
     normalize_workbook,
+    shared_pdf_document,
     shared_workbook,
+    validated_pdf_period_ids,
     validated_period_ids,
 )
 from hotel_pl_normalizer.run_log import write_run_log
@@ -144,6 +146,222 @@ def _prompt_for_period_ids(
         )
 
 
+def _result_summary(result, selected_ids: list[str]) -> dict:
+    """Build the shared success/failure summary for a completed mapping."""
+    return {
+        "accepted": result.accepted,
+        "outcome": result.outcome,
+        "stopped_reason": result.stopped_reason,
+        "exceptions": result.exceptions,
+        "accounts_mapped": result.mapped_account_count,
+        "cost_usd": result.cost_usd,
+        "duration_ms": result.duration_ms,
+        "mapping_model": result.mapping_model,
+        "mapping_provider": result.mapping_provider,
+        "requested_period_ids": selected_ids,
+        "mapped_period_ids": sorted(result.period_labels),
+        "selected_period_labels": result.period_labels,
+        "dropped_periods": result.dropped_periods,
+        "session_calls": result.session_calls,
+        "session_exhausted": result.session_exhausted,
+        "feedback_findings": int(
+            result.feedback_manifest.get("rendered_count", 0)
+        ),
+        "feedback_mode": result.feedback_manifest.get("mode", "canonical"),
+    }
+
+
+def _write_summary(path: Path, summary: dict) -> None:
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def _write_result_artifacts(
+    result,
+    *,
+    output_dir: Path,
+    source_path: Path,
+    selected_ids: list[str],
+    is_pdf: bool,
+    work_dir: Path,
+) -> dict:
+    """Checkpoint paid mapping state before rendering the workbook."""
+    run_log_path = output_dir / "run_log.json"
+    summary_path = output_dir / "summary.json"
+    summary = _result_summary(result, selected_ids)
+    if is_pdf:
+        summary["source_format"] = "pdf"
+        summary["pdf_structure_dir"] = str(work_dir / "pdf_structure")
+
+    try:
+        write_run_log(result, run_log_path)
+    except Exception as exc:
+        summary.update(
+            {
+                "accepted": False,
+                "outcome": "artifact_failure",
+                "mapping_outcome": result.outcome,
+                "delivery_status": "failed",
+                "failure_stage": "result_checkpoint",
+                "failure": f"{type(exc).__name__}: {exc}",
+                "mapping_result_saved": False,
+            }
+        )
+        _write_summary(summary_path, summary)
+        raise
+
+    # Feedback fallback may have been established while building the run log.
+    summary.update(_result_summary(result, selected_ids))
+    try:
+        write_normalized_workbook(
+            result,
+            output_dir / mapped_output_name(source_path.name),
+        )
+    except Exception as exc:
+        summary.update(
+            {
+                "accepted": False,
+                "outcome": "artifact_failure",
+                "mapping_outcome": result.outcome,
+                "delivery_status": "failed",
+                "failure_stage": "workbook_output",
+                "failure": f"{type(exc).__name__}: {exc}",
+                "mapping_result_saved": True,
+                "run_log_path": str(run_log_path),
+            }
+        )
+        _write_summary(summary_path, summary)
+        raise
+
+    summary["delivery_status"] = "complete"
+    summary["mapping_result_saved"] = True
+    summary["run_log_path"] = str(run_log_path)
+    _write_summary(summary_path, summary)
+    return summary
+
+
+def _write_unhandled_failure_summary(
+    output_dir: Path,
+    source_path: Path,
+    exc: Exception,
+) -> None:
+    """Guarantee a user-facing failure summary for pipeline-stage exceptions."""
+    diagnostic = f"{type(exc).__name__}: {exc}"
+    summary_path = output_dir / "summary.json"
+    existing: dict = {}
+    if summary_path.is_file():
+        try:
+            candidate = json.loads(summary_path.read_text(encoding="utf-8"))
+            if candidate.get("failure") == diagnostic:
+                existing = candidate
+        except (OSError, ValueError, TypeError):
+            pass
+    existing.update(
+        {
+            "accepted": False,
+            "outcome": existing.get("outcome", "stage_failure"),
+            "stopped_reason": diagnostic,
+            "failure": diagnostic,
+            "failure_stage": existing.get("failure_stage", "pipeline"),
+            "delivery_status": "failed",
+            "mapping_result_saved": bool(
+                existing.get("mapping_result_saved", False)
+            ),
+            "source_name": source_path.name,
+        }
+    )
+    failure_artifact = output_dir / "work" / "failure.json"
+    if failure_artifact.is_file():
+        existing["stage_failure_path"] = str(failure_artifact)
+    _write_summary(summary_path, existing)
+
+
+def _run_cli_workflow(args) -> dict:
+    """Execute the paid workflow after argument validation."""
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = args.output_dir / "work"
+    source_path = args.workbook
+    is_pdf = source_path.suffix.lower() == ".pdf"
+    if is_pdf:
+        parsed_pdf = shared_pdf_document(source_path)
+        discovery = discover_pdf_periods(
+            source_path,
+            output_dir=work_dir / "discovery",
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed_pdf,
+        )
+        catalog = {
+            "options": [
+                period.model_dump(mode="json")
+                for period in discovery.exploration.periods
+            ]
+        }
+        valid_ids = validated_pdf_period_ids(discovery)
+        selected_ids = (
+            _validate_period_ids(catalog, valid_ids, args.period_id)
+            if args.period_id
+            else _prompt_for_period_ids(catalog, valid_ids)
+        )
+        result = normalize_pdf(
+            source_path,
+            output_dir=work_dir,
+            selected_period_ids=selected_ids,
+            source_name=source_path.name,
+            progress=lambda message: print(message, flush=True),
+            on_activity=lambda message: print(f"  · {message}", flush=True),
+            discovery=discovery,
+            parsed=parsed_pdf,
+        )
+    else:
+        parsed = shared_workbook(source_path)
+        discovery = discover_workbook_periods(
+            source_path,
+            output_dir=work_dir / "discovery",
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed,
+        )
+        catalog = _catalog(discovery)
+        valid_ids = validated_period_ids(discovery)
+        selected_ids = (
+            _validate_period_ids(catalog, valid_ids, args.period_id)
+            if args.period_id
+            else _prompt_for_period_ids(catalog, valid_ids)
+        )
+        labels = {
+            item["period_id"]: item["label"] for item in catalog["options"]
+        }
+        print(
+            "Selected period(s): "
+            + ", ".join(f"{labels[item]} [{item}]" for item in selected_ids),
+            flush=True,
+        )
+        structure = analyze_workbook_structure(
+            source_path,
+            output_dir=work_dir / "upstream",
+            discovery_run=discovery,
+            selected_period_ids=selected_ids,
+            progress=lambda message: print(message, flush=True),
+            parsed=parsed,
+        )
+        result = normalize_workbook(
+            source_path,
+            output_dir=work_dir,
+            prior_run=structure,
+            selected_period_ids=selected_ids,
+            source_name=source_path.name,
+            progress=lambda message: print(message, flush=True),
+            on_activity=lambda message: print(f"  · {message}", flush=True),
+            parsed=parsed,
+        )
+    return _write_result_artifacts(
+        result,
+        output_dir=args.output_dir,
+        source_path=source_path,
+        selected_ids=selected_ids,
+        is_pdf=is_pdf,
+        work_dir=work_dir,
+    )
+
+
 def main() -> None:
     # The progress feed carries typographic characters, and a Windows console
     # defaults to cp1252, which turns them into replacement marks. Nothing is
@@ -185,114 +403,16 @@ def main() -> None:
     if args.workbook.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
         parser.error("input must be an .xlsx, .xlsm, .xls, or .pdf file")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    work_dir = args.output_dir / "work"
-    source_path = args.workbook
-    is_pdf = source_path.suffix.lower() == ".pdf"
-    if is_pdf:
-        discovery = discover_pdf_periods(
-            source_path,
-            output_dir=work_dir / "discovery",
-            progress=lambda message: print(message, flush=True),
-        )
-        catalog = {
-            "options": [
-                period.model_dump(mode="json")
-                for period in discovery.exploration.periods
-            ]
-        }
-        valid_ids = {item["period_id"] for item in catalog["options"]}
-        selected_ids = (
-            _validate_period_ids(catalog, valid_ids, args.period_id)
-            if args.period_id
-            else _prompt_for_period_ids(catalog, valid_ids)
-        )
-        result = normalize_pdf(
-            source_path,
-            output_dir=work_dir,
-            selected_period_ids=selected_ids,
-            source_name=source_path.name,
-            progress=lambda message: print(message, flush=True),
-            on_activity=lambda message: print(f"  · {message}", flush=True),
-            discovery=discovery,
-        )
-    else:
-        # Discovery, structure analysis and evidence extraction all borrow this
-        # same parsed record. Mapping releases it once compact evidence exists.
-        parsed = shared_workbook(source_path)
-        discovery = discover_workbook_periods(
-            source_path,
-            output_dir=work_dir / "discovery",
-            progress=lambda message: print(message, flush=True),
-            parsed=parsed,
-        )
-        catalog = _catalog(discovery)
-        valid_ids = validated_period_ids(discovery)
-        selected_ids = (
-            _validate_period_ids(catalog, valid_ids, args.period_id)
-            if args.period_id
-            else _prompt_for_period_ids(catalog, valid_ids)
-        )
-        labels = {
-            item["period_id"]: item["label"] for item in catalog["options"]
-        }
-        print(
-            "Selected period(s): "
-            + ", ".join(f"{labels[item]} [{item}]" for item in selected_ids),
-            flush=True,
-        )
-        structure = analyze_workbook_structure(
-            source_path,
-            output_dir=work_dir / "upstream",
-            discovery_run=discovery,
-            selected_period_ids=selected_ids,
-            progress=lambda message: print(message, flush=True),
-            parsed=parsed,
-        )
-        result = normalize_workbook(
-            source_path,
-            output_dir=work_dir,
-            prior_run=structure,
-            selected_period_ids=selected_ids,
-            source_name=source_path.name,
-            progress=lambda message: print(message, flush=True),
-            on_activity=lambda message: print(f"  · {message}", flush=True),
-            parsed=parsed,
-        )
-    write_normalized_workbook(
-        result, args.output_dir / mapped_output_name(source_path.name)
-    )
-    write_run_log(result, args.output_dir / "run_log.json")
-    summary = {
-        "accepted": result.accepted,
-        "outcome": result.outcome,
-        "stopped_reason": result.stopped_reason,
-        "exceptions": result.exceptions,
-        "accounts_mapped": result.mapped_account_count,
-        "cost_usd": result.cost_usd,
-        "duration_ms": result.duration_ms,
-        "mapping_model": result.mapping_model,
-        "mapping_provider": result.mapping_provider,
-        # What was asked for, and what came back. These diverge now that a
-        # period binding cannot refuse is dropped rather than failing the run:
-        # reporting the request as though it were the outcome told one rerun it
-        # had mapped a Budget period whose column is empty.
-        "requested_period_ids": selected_ids,
-        "mapped_period_ids": sorted(result.period_labels),
-        "selected_period_labels": result.period_labels,
-        "dropped_periods": result.dropped_periods,
-        "session_calls": result.session_calls,
-        "session_exhausted": result.session_exhausted,
-        "feedback_findings": int(
-            result.feedback_manifest.get("rendered_count", 0)
-        ),
-    }
-    if is_pdf:
-        summary["source_format"] = "pdf"
-        summary["pdf_structure_dir"] = str(work_dir / "pdf_structure")
-    (args.output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
+    try:
+        summary = _run_cli_workflow(args)
+    except Exception as exc:
+        try:
+            _write_unhandled_failure_summary(args.output_dir, args.workbook, exc)
+        except OSError:
+            # Never replace the useful root exception with a secondary disk
+            # error while trying to report it.
+            pass
+        raise
     print(json.dumps(summary), flush=True)
 
 

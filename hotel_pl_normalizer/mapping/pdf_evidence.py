@@ -15,6 +15,13 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any
 
+from hotel_pl_normalizer.models.evidence import (
+    EvidenceLocatorKind,
+    EvidenceRow,
+    PdfLineLocator,
+    PdfValueAnchor,
+    ensure_evidence_rows,
+)
 from hotel_pl_normalizer.models.pdf import (
     PdfDocumentRecord,
     PdfPage,
@@ -68,7 +75,7 @@ def compact_pdf_evidence(
     bindings: PdfBindings,
     *,
     period_ids: list[str],
-) -> list[dict[str, Any]]:
+) -> list[EvidenceRow]:
     """Return one auditable mapper row for each useful visual PDF line."""
     anchors: dict[tuple[str, int], float] = {}
     for binding in bindings.bindings:
@@ -77,7 +84,7 @@ def compact_pdf_evidence(
         for page_number in range(binding.start_page, binding.end_page + 1):
             anchors[(binding.period_id, page_number)] = binding.right_edge
 
-    evidence: list[dict[str, Any]] = []
+    evidence: list[EvidenceRow] = []
     for page in document.pages:
         page_anchors = {
             period_id: anchors.get((period_id, page.page_number))
@@ -95,8 +102,20 @@ def compact_pdf_evidence(
         }
         label_layout = _infer_page_label_layout(page, lines, runs_by_line)
         anchor_tolerance = _anchor_tolerance(page)
+        labels = {
+            line.line_number: _select_line_label(
+                line, runs_by_line[line.line_number], label_layout
+            )
+            for line, _words in lines
+        }
+        joined_lines = _join_wrapped_labels(page, lines, labels, label_layout)
+        caption_lines = {
+            line_ids[0] for line_ids in joined_lines.values()
+        }
 
         for line, words in lines:
+            if line.line_id in caption_lines:
+                continue
             selected_words = {
                 period_id: _word_at_anchor(words, anchor, anchor_tolerance)
                 for period_id, anchor in page_anchors.items()
@@ -105,11 +124,7 @@ def compact_pdf_evidence(
                 period_id: word.numeric_value if word is not None else None
                 for period_id, word in selected_words.items()
             }
-            label_selection = _select_line_label(
-                line,
-                runs_by_line[line.line_number],
-                label_layout,
-            )
+            label_selection = labels[line.line_number]
             label_run = label_selection.run
             label = label_run.text if label_run is not None else ""
             bold = label_run.bold if label_run is not None else False
@@ -129,8 +144,7 @@ def compact_pdf_evidence(
                 period_id: None if anchor is None else f"x={anchor:.3f}"
                 for period_id, anchor in page_anchors.items()
             }
-            evidence.append(
-                {
+            legacy_row = {
                     "row_key": f"Page {page.page_number:03d}!{line.line_number}",
                     "label": label,
                     "selected_value_columns": selected_columns,
@@ -153,17 +167,104 @@ def compact_pdf_evidence(
                         "top": round(line.top, 3),
                     },
                 }
+            if line.line_number in joined_lines:
+                legacy_row["pdf_source"]["label_line_ids"] = list(
+                    joined_lines[line.line_number]
+                )
+            evidence.append(
+                EvidenceRow.from_legacy_dict(
+                    legacy_row,
+                    locator_kind=EvidenceLocatorKind.PDF,
+                    anchors_by_period={
+                        period_id: (
+                            PdfValueAnchor(right_edge=anchor)
+                            if anchor is not None
+                            else None
+                        )
+                        for period_id, anchor in page_anchors.items()
+                    },
+                    primary_period_id=first_period,
+                )
             )
     return evidence
 
 
-def pdf_evidence_stats(evidence: list[dict[str, Any]]) -> dict[str, int]:
-    pages = {str(item["row_key"]).split("!", 1)[0] for item in evidence}
+def _join_wrapped_labels(
+    page: PdfPage,
+    lines: list[tuple[PdfTextLine, list[PdfWord]]],
+    labels: dict[int, PdfLabelSelection],
+    layout: PdfLabelLayout,
+) -> dict[int, tuple[str, str]]:
+    """Attach a close caption-only line to its amount-bearing continuation.
+
+    The amount row keeps its identity and all values. Both physical label-line
+    locators travel with that row; the caption never becomes another amount.
+    """
+    joined: dict[int, tuple[str, str]] = {}
+    for (caption, caption_words), (line, words) in zip(lines, lines[1:]):
+        previous = labels[caption.line_number]
+        current = labels[line.line_number]
+        first, second = previous.run, current.run
+        if first is None or second is None or first.bold or second.bold:
+            continue
+        if any(word.numeric_value is not None for word in caption_words):
+            continue
+        if not any(_is_amount(word) for word in words):
+            continue
+        # New account codes, headings, lane changes and rules are boundaries,
+        # even when a nearby caption happens to have no selected-period value.
+        if re.match(r"\d[\d.\-/]{3,}", second.text) or re.match(
+            r"(?:total|subtotal)\b", second.text, re.IGNORECASE
+        ):
+            continue
+        if first.text.endswith(":") or re.match(
+            r"(?:total|subtotal)\b", first.text, re.IGNORECASE
+        ):
+            continue
+        if abs(first.x0 - second.x0) > layout.primary_tolerance:
+            continue
+        height = min(caption.bottom - caption.top, line.bottom - line.top)
+        gap = line.top - caption.bottom
+        if height <= 0 or not 0 <= gap <= height * 0.6:
+            continue
+        if any(
+            rule.orientation == "horizontal"
+            and caption.bottom <= rule.top <= line.top
+            and rule.x0 <= max(first.x1, second.x1)
+            and rule.x1 >= min(first.x0, second.x0)
+            for rule in page.rules
+        ):
+            continue
+        labels[line.line_number] = PdfLabelSelection(
+            run=PdfLabelRun(
+                words=(*first.words, *second.words),
+                text=f"{first.text} {second.text}",
+                x0=first.x0,
+                x1=max(first.x1, second.x1),
+                bold=False,
+            ),
+            context=(*previous.context, *current.context),
+            status="selected",
+            rule="wrapped_continuation",
+        )
+        joined[line.line_number] = (caption.line_id, line.line_id)
+    return joined
+
+
+def pdf_evidence_stats(
+    evidence: list[EvidenceRow | dict[str, Any]],
+) -> dict[str, int]:
+    rows = ensure_evidence_rows(evidence)
+    pages = {
+        item.locator.page_number
+        for item in rows
+        if isinstance(item.locator, PdfLineLocator)
+    }
     value_rows = sum(
         any(value is not None for value in item.get("selected_values", {}).values())
-        for item in evidence
+        for item in rows
     )
-    return {"pages": len(pages), "rows": len(evidence), "value_rows": value_rows}
+    return {"pages": len(pages), "rows": len(rows), "value_rows": value_rows}
 
 
 def _infer_page_label_layout(

@@ -26,6 +26,7 @@ from hotel_pl_normalizer.mapping.mapper import (
     _validation_score,
 )
 from hotel_pl_normalizer.pipeline import NormalizationResult
+from hotel_pl_normalizer.providers.base import ModelToolError
 from hotel_pl_normalizer.run_log import build_run_log
 
 
@@ -306,6 +307,9 @@ class MappingOutcomeTests(unittest.TestCase):
         self.assertTrue(repaired["coverage_review_completed"])
         self.assertTrue(validator.warning_cleanup_attempted)
         self.assertEqual(completion["status"], "accepted")
+        self.assertEqual(validator.counter_value("mapping_submissions"), 2)
+        self.assertEqual(validator.counter_value("mapping_repairs"), 1)
+        self.assertEqual(validator.terminal_value, completion)
 
     def test_identical_duplicate_patch_replacements_are_safely_deduplicated(
         self,
@@ -345,7 +349,7 @@ class MappingOutcomeTests(unittest.TestCase):
         self.assertEqual(action["submitted_coa_ids"], ["S1.test"])
         self.assertEqual(plan.decisions[0].source_rows, ["Sheet!10"])
 
-    def test_malformed_optional_repair_comparison_keeps_its_review_note(self) -> None:
+    def test_malformed_new_repair_comparison_requires_numeric_evidence(self) -> None:
         validator = WorkbookMappingValidator("wb", [], {"S1.test": {}})
         validator.current_plan = WorkbookSourcePlan(
             plan_id="initial",
@@ -362,31 +366,26 @@ class MappingOutcomeTests(unittest.TestCase):
             ],
         )
 
-        plan, _ = validator._apply_patch(
-            {
-                "patch_id": "repair",
-                "workbook_id": "wb",
-                "replacements": [],
-                "review_items": [
-                    {
-                        "kind": "source_discrepancy",
-                        "message": "Keep this source presentation note.",
-                        "coa_ids": ["S1.test"],
-                        "source_rows": ["Sheet!10"],
-                        "selected_source_rows": ["Sheet!10"],
-                        "alternate_source_rows": [],
-                        "selected_source_operation": "direct",
-                        "alternate_source_operation": "ratio",
-                    }
-                ],
-            }
-        )
-
-        review = plan.review_items[0]
-        self.assertEqual(review.message, "Keep this source presentation note.")
-        self.assertEqual(review.source_rows, ["Sheet!10"])
-        self.assertEqual(review.selected_source_rows, [])
-        self.assertIsNone(review.selected_source_operation)
+        payload = {
+            "patch_id": "repair",
+            "workbook_id": "wb",
+            "replacements": [],
+            "review_items": [
+                {
+                    "kind": "source_discrepancy",
+                    "message": "Keep this source presentation note.",
+                    "coa_ids": ["S1.test"],
+                    "source_rows": ["Sheet!10"],
+                    "selected_source_rows": ["Sheet!10"],
+                    "alternate_source_rows": [],
+                    "selected_source_operation": "direct",
+                    "alternate_source_operation": "ratio",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ModelToolError, "Provide the cited numeric comparison"):
+            validator._apply_patch(payload)
+        self.assertEqual(validator.current_plan.review_items, [])
 
     def test_combined_ood_misc_review_can_reuse_decision_source_rows(self) -> None:
         summary_ood = "S12.total_other_operated_departments_revenue"
@@ -428,6 +427,11 @@ class MappingOutcomeTests(unittest.TestCase):
                     kind="source_discrepancy",
                     message="Summary combines the two independently mapped layers.",
                     coa_ids=[summary_ood, summary_misc, detail_ood, detail_misc],
+                    source_rows=["Summary!22", "OOD!10", "Misc!10"],
+                    selected_source_rows=["Summary!22"],
+                    alternate_source_rows=["OOD!10", "Misc!10"],
+                    selected_source_operation="direct",
+                    alternate_source_operation="sum",
                 )
             ],
         )
@@ -513,6 +517,11 @@ class MappingOutcomeTests(unittest.TestCase):
                     kind="source_discrepancy",
                     message="Summary combines OOD and Miscellaneous Income.",
                     coa_ids=[summary_ood, summary_misc, detail_ood, detail_misc],
+                    source_rows=["Summary!22", "Summary!23", "Detail!145", "Detail!147"],
+                    selected_source_rows=["Summary!22"],
+                    alternate_source_rows=["Detail!145", "Detail!147"],
+                    selected_source_operation="direct",
+                    alternate_source_operation="sum",
                 )
             ],
         )
@@ -590,6 +599,11 @@ class MappingOutcomeTests(unittest.TestCase):
                     kind="source_discrepancy",
                     message="Summary combines OOD and Miscellaneous Income.",
                     coa_ids=[summary_ood, summary_misc, detail_ood, detail_misc],
+                    source_rows=["Summary!22", "Summary!23", "Detail!145", "Detail!147"],
+                    selected_source_rows=["Summary!22"],
+                    alternate_source_rows=["Detail!145", "Detail!147"],
+                    selected_source_operation="direct",
+                    alternate_source_operation="sum",
                 )
             ],
         )
@@ -883,6 +897,10 @@ class MappingOutcomeTests(unittest.TestCase):
             message="Preserve the independently reported Summary and IT values.",
             coa_ids=["S12.it", "S6.it"],
             source_rows=["Summary!59", "IT!3117"],
+            selected_source_rows=["Summary!59"],
+            alternate_source_rows=["IT!3117"],
+            selected_source_operation="direct",
+            alternate_source_operation="direct",
         )
         checks = {
             "actual": [
@@ -1112,7 +1130,7 @@ class MappingOutcomeTests(unittest.TestCase):
 
         log = build_run_log(result)
 
-        self.assertEqual(log["log_version"], 4)
+        self.assertEqual(log["log_version"], 5)
         self.assertEqual(log["outcome"]["feedback_findings"], 1)
         self.assertEqual(log["feedback_manifest"]["rendered_count"], 1)
         self.assertEqual(

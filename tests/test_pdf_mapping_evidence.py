@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from hotel_pl_normalizer.mapping.pdf_evidence import compact_pdf_evidence
 from hotel_pl_normalizer.models.pdf import (
     PdfDocumentRecord,
     PdfPage,
+    PdfRule,
     PdfSource,
     PdfTextLine,
     PdfWord,
@@ -236,3 +239,60 @@ def test_adjacent_indentation_and_stable_local_override_are_supported():
     assert evidence[1]["label_rule"] == "adjacent_indent"
     assert evidence[3]["label_rule"] == "local_override"
     assert evidence[4]["label_rule"] == "local_override"
+
+
+def test_wrapped_caption_is_joined_once_with_both_line_locators():
+    page = _page(
+        [_word("caption", "601230-Promotional Expense", 220, 335, top=20)],
+        [
+            _word("ptd", "25", 70, 100, value=25.0, top=32),
+            _word("label", "General", 220, 250, top=32),
+            _word("actual", "1,250", 450, 490, value=1250.0, top=32),
+            _word("budget", "1,000", 520, 560, value=1000.0, top=32),
+        ],
+    )
+
+    evidence = compact_pdf_evidence(
+        _document(page), _bindings(actual=490, budget=560),
+        period_ids=["actual", "budget"],
+    )
+
+    assert len(evidence) == 1
+    row = evidence[0]
+    assert row.row_key == "Page 001!2"
+    assert row.label == "601230-Promotional Expense General"
+    assert row.values_by_period == {"actual": 1250.0, "budget": 1000.0}
+    assert row.label_rule == "wrapped_continuation"
+    assert row.to_audit_dict()["pdf_source"]["label_line_ids"] == ["p1:l1", "p1:l2"]
+    assert row.to_audit_dict()["locator"]["line_number"] == 2
+
+
+@pytest.mark.parametrize("boundary", [
+    "heading", "new_account", "different_lane", "spacing", "rule", "other_period_amount",
+])
+def test_wrapped_caption_does_not_cross_account_or_section_boundaries(boundary):
+    caption = [_word("caption", "Previous Account", 220, 310, top=20,
+                     bold=boundary == "heading")]
+    if boundary == "other_period_amount":
+        caption.append(_word("prior", "25", 70, 100, value=25.0, top=20))
+    current_x = 280 if boundary == "different_lane" else 220
+    current_top = 50 if boundary == "spacing" else 32
+    page = _page(
+        caption,
+        [
+            _word("label", "901234-New Account" if boundary == "new_account" else "General",
+                  current_x, current_x + 70, top=current_top),
+            _word("actual", "1,250", 450, 490, value=1250.0, top=current_top),
+        ],
+    )
+    if boundary == "rule":
+        page.rules = [PdfRule("rule", "horizontal", 200, 31, 400, 31)]
+
+    evidence = compact_pdf_evidence(
+        _document(page), _bindings(actual=490), period_ids=["actual"]
+    )
+
+    amount_row = next(row for row in evidence if row.row_key == "Page 001!2")
+    assert "Previous Account" not in amount_row.label
+    assert "label_line_ids" not in amount_row["pdf_source"]
+    assert amount_row.values_by_period == {"actual": 1250.0}

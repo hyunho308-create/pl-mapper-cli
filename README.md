@@ -4,6 +4,12 @@ Map an operator hotel P&L workbook or born-digital PDF into a bundled 271-accoun
 
 Follow the [getting started guide](./GETTING_STARTED.md) to begin.
 
+To review a completed run without normalizing it again, see the
+[quick output review](docs/per-pl-evaluator.md). It prepares saved-run evidence
+for review in the active Codex task; the Python command makes no model call.
+See [model notes and source comparisons](docs/model-notes.md) for what the
+workbook notes mean and the limits of automatic source-check discovery.
+
 This is the self-contained command-line distribution of the normalization
 engine maintained in
 [P-L-Agent](https://github.com/hyunho308-create/P-L-Agent). The CLI-specific

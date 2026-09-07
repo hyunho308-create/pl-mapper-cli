@@ -71,6 +71,11 @@ def test_interactive_selection_has_no_default():
     ) == ["2025-01_2025-06_actual"]
 
 
+def test_interactive_selection_rejects_an_empty_validated_set():
+    with pytest.raises(RuntimeError, match="No discovered period passed validation"):
+        _prompt_for_period_ids(CATALOG, set(), read=lambda _prompt: "1")
+
+
 def test_batch_annual_policy_is_outside_main_cli_and_uses_catalog_order():
     assert _choose_period_ids(
         CATALOG, ALL_VALID, [], annual_periods=2

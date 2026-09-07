@@ -54,15 +54,6 @@ OPENAI_MODEL_PRICING = {
     ),
 }
 
-# Kept as the public shorthand used by pipeline telemetry. Cost calculation
-# itself resolves the actual model through OPENAI_MODEL_PRICING.
-OPENAI_INPUT_USD_PER_MTOK = OPENAI_MODEL_PRICING[DEFAULT_OPENAI_MODEL].input_usd_per_mtok
-OPENAI_CACHED_INPUT_USD_PER_MTOK = (
-    OPENAI_MODEL_PRICING[DEFAULT_OPENAI_MODEL].cached_input_usd_per_mtok
-)
-OPENAI_OUTPUT_USD_PER_MTOK = OPENAI_MODEL_PRICING[DEFAULT_OPENAI_MODEL].output_usd_per_mtok
-
-
 def openai_model_pricing(model_name: str | None) -> OpenAIModelPricing:
     """Return explicit pricing, never silently price another model as Luna."""
     selected = model_name or DEFAULT_OPENAI_MODEL
@@ -129,7 +120,6 @@ class OpenAIModelClient(ModelClient):
         self.repair_max_output_tokens = self.max_output_tokens
         self.usage_history: list[dict] = []
         self.last_tool_trace: list[dict] | None = None
-        self.last_validation_result: dict | None = None
         self._client_instance = None
 
     def _client(self):
@@ -177,7 +167,6 @@ class OpenAIModelClient(ModelClient):
         previous_response_id: str | None = None
         total_tool_calls = 0
         self.last_tool_trace = trace
-        self.last_validation_result = None
 
         def announce(line: str) -> None:
             if on_activity is None:
@@ -342,20 +331,10 @@ class OpenAIModelClient(ModelClient):
                             name, arguments, bool(result.get("ok", False))
                         )
                     )
-                    if "accepted" in result:
-                        self.last_validation_result = {
-                            "accepted": result.get("accepted"),
-                            "error_count": result.get("error_count"),
-                            "warning_count": result.get("warning_count"),
-                            "validation_attempt": result.get("validation_attempt"),
-                            "findings": result.get("findings"),
-                        }
                     if result.get("accepted") is False:
                         self.reasoning_effort = self.repair_reasoning_effort
                         self.max_output_tokens = self.repair_max_output_tokens
-                    terminal = getattr(
-                        toolset, "terminal_result", lambda _name, _result: None
-                    )(name, result)
+                    terminal = toolset.terminal_result(name, result)
                     if terminal is not None:
                         record["terminal_tool_result"] = True
                         return response_model.model_validate(terminal)
@@ -384,9 +363,7 @@ class OpenAIModelClient(ModelClient):
                     f"{exc}\n\nReturn the same answer as one valid JSON object."
                 )
                 continue
-            final_response_error = getattr(
-                toolset, "final_response_error", lambda _: None
-            )(result)
+            final_response_error = toolset.final_response_error(result)
             if final_response_error:
                 previous_response_id = response.id
                 current_input = final_response_error

@@ -14,6 +14,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from hotel_pl_normalizer.models.evidence import (
+    EvidenceLocatorKind,
+    EvidenceRow,
+    ExcelValueAnchor,
+)
 from hotel_pl_normalizer.models.period_selection import PeriodColumnSelectionMap
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
 from hotel_pl_normalizer.structure.representation import (
@@ -27,7 +32,7 @@ def compact_workbook_evidence(
     period_map: PeriodColumnSelectionMap | dict[str, PeriodColumnSelectionMap],
     *,
     include_sheets: set[str],
-) -> list[dict[str, Any]]:
+) -> list[EvidenceRow]:
     """Expose each row once with one value for every selected period.
 
     Two kinds of row are withheld from the model, both to keep the prompt to a
@@ -69,7 +74,7 @@ def compact_workbook_evidence(
         )
         unavailable_by_period[period_id] = set(selection_map.unavailable_sheets)
 
-    evidence = []
+    evidence: list[EvidenceRow] = []
     for sheet in workbook.sheets:
         if sheet.sheet_name not in include_sheets:
             continue
@@ -144,8 +149,7 @@ def compact_workbook_evidence(
             if _is_all_zero_filler(selected_values, text_cells):
                 continue
             first_period = next(iter(period_maps))
-            evidence.append(
-                {
+            legacy_row = {
                     "row_key": f"{sheet.sheet_name}!{row.row_index}",
                     "label": label,
                     "selected_value_columns": selected_columns,
@@ -168,6 +172,20 @@ def compact_workbook_evidence(
                         for cell in label_selection.context
                     ],
                 }
+            evidence.append(
+                EvidenceRow.from_legacy_dict(
+                    legacy_row,
+                    locator_kind=EvidenceLocatorKind.EXCEL,
+                    anchors_by_period={
+                        period_id: (
+                            ExcelValueAnchor(column_index=column)
+                            if column is not None
+                            else None
+                        )
+                        for period_id, column in selected_columns.items()
+                    },
+                    primary_period_id=first_period,
+                )
             )
     return evidence
 

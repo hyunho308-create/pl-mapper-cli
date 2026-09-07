@@ -137,12 +137,44 @@ def _read_openpyxl_workbook(
         # Shared across sheets but never across workbooks -- see `_cell_style`.
         style_cache: dict = {}
         for idx, worksheet in enumerate(loaded.workbook.worksheets, start=1):
+            declared_max_row = worksheet.max_row
+            declared_max_column = worksheet.max_column
+            # Some exporters leave a stale, undersized <dimension> reference in
+            # the worksheet XML.  Read-only openpyxl trusts that declaration and
+            # would silently stop before later financial cells.  Resetting the
+            # cached dimensions makes the streaming reader discover the real
+            # bounds from the cell records themselves.
+            reset_dimensions = getattr(worksheet, "reset_dimensions", None)
+            if callable(reset_dimensions):
+                reset_dimensions()
             merge_refs = _streaming_merge_refs(
                 loaded.read_path, getattr(worksheet, "_worksheet_path", "")
             )
-            sheets.append(
-                _read_sheet_streaming(worksheet, idx, merge_refs, style_cache=style_cache)
+            parsed_sheet = _read_sheet_streaming(
+                worksheet, idx, merge_refs, style_cache=style_cache
             )
+            sheets.append(parsed_sheet)
+            if (
+                declared_max_row is not None
+                and declared_max_column is not None
+                and (
+                    parsed_sheet.max_row > declared_max_row
+                    or parsed_sheet.max_column > declared_max_column
+                )
+            ):
+                warnings.append(
+                    IngestionWarning(
+                        severity=Severity.WARNING,
+                        message=(
+                            "Worksheet declared an undersized used range "
+                            f"({declared_max_row} row(s) x {declared_max_column} "
+                            "column(s)); ingestion recovered cells through "
+                            f"row {parsed_sheet.max_row}, column "
+                            f"{parsed_sheet.max_column}."
+                        ),
+                        sheet_name=worksheet.title,
+                    )
+                )
             if getattr(worksheet, "sheet_state", "visible") != "visible":
                 warnings.append(
                     IngestionWarning(
@@ -250,9 +282,12 @@ def _read_sheet_streaming(
     # Trim to the used range, then pad short rows so every row is the same width,
     # which is what the random-access reader produced.
     trimmed: list[WorkbookRow] = []
-    for row in rows:
-        if row.row_index > max_row:
-            continue
+    rows_by_index = {row.row_index: row for row in rows if row.row_index <= max_row}
+    for row_index in range(1, max_row + 1):
+        row = rows_by_index.get(row_index) or WorkbookRow(
+            row_index=row_index,
+            cells=[],
+        )
         cells = [cell for cell in row.cells if cell.column <= max_col]
         present = {cell.column for cell in cells}
         for column in range(1, max_col + 1):

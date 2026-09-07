@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from openpyxl.utils import get_column_letter
@@ -11,16 +12,22 @@ from hotel_pl_normalizer.models.binding import (
     UnavailablePeriod,
     WorkbookBindings,
 )
+from hotel_pl_normalizer.models.period_selection import CanonicalPeriod
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
+from hotel_pl_normalizer.providers.base import AgentToolset
 from hotel_pl_normalizer.structure.period_headers import (
+    COVERAGE_MARKERS,
+    SCENARIO_MARKERS,
     column_forbidden_markers,
     column_scenario_markers,
+    period_column_problem,
 )
 from hotel_pl_normalizer.structure.period_headers import (
     header_markers as _header_markers,
 )
 from hotel_pl_normalizer.structure.representation import (
     infer_label_layout,
+    is_technical_label,
     select_row_label,
 )
 
@@ -107,13 +114,8 @@ def _layout_binding_submission_schema() -> dict[str, Any]:
     }
 
 
-class PeriodBindingToolset:
+class PeriodBindingToolset(AgentToolset):
     """Reader tools plus one period-binding submission."""
-
-    # Tool results are reads of one specific record, and the prompt names the
-    # workbook, so a cached session would be safe -- but the periods vary per
-    # run and the prompt would have to carry them all. Not worth the subtlety.
-    cacheable = False
 
     # How many times a submission may be refused before its next well-formed
     # submission is taken anyway. A check that keeps refusing is not teaching the
@@ -133,12 +135,15 @@ class PeriodBindingToolset:
         workbook: WorkbookRecord,
         *,
         period_ids: list[str],
+        periods: list[CanonicalPeriod] | None = None,
         financial_sheets: list[str] | None = None,
         controlling_summary_sheet: str | None = None,
         max_reads: int = 120,
     ) -> None:
+        super().__init__(max_reads=max_reads)
         self.workbook = workbook
         self.period_ids = list(period_ids)
+        self.periods = list(periods or [])
         self.sheets = {sheet.sheet_name: sheet for sheet in workbook.sheets}
         # Routing defines the binding scope. Other sheets remain readable for
         # context, but they cannot contribute a binding outcome.
@@ -150,19 +155,17 @@ class PeriodBindingToolset:
             if controlling_summary_sheet in self.financial_sheets
             else None
         )
-        self.max_reads = max_reads
-        self.reads = 0
         # Only `read_rows` and `column_stats` count as opening a sheet. A
         # `find_rows` hit does not: a workbook-wide search returns cells from
         # twenty tabs without the model having seen any of their header blocks,
         # and "which column is December" is a question only the header answers.
         self.opened_sheets: set[str] = set()
         self.submission: WorkbookBindings | None = None
-        self.rejections: list[str] = []
         self.observations: list[str] = []
         self._refusals: dict[str, int] = {}
         self.layout_groups: list[dict[str, Any]] | None = None
-        self.layout_submission_count = 0
+        self.layout_submission_count = self.counter_value("layout_submissions")
+        self.layout_repair_count = self.counter_value("layout_repairs")
         self.header_end_rows = {
             name: _header_end_row(self.sheets[name]) for name in self.financial_sheets
         }
@@ -172,9 +175,6 @@ class PeriodBindingToolset:
             )
             for name in self.financial_sheets
         }
-
-    def signature(self) -> str:
-        return f"period_binding:{self.workbook.workbook_id}"
 
     # -- declarations -----------------------------------------------------
 
@@ -326,8 +326,8 @@ class PeriodBindingToolset:
     def terminal_result(self, name: str, result: dict[str, Any]):
         """End the session once the binding submission is accepted."""
         if name == "submit_layout_bindings" and result.get("accepted"):
-            return result.get("structure")
-        return None
+            return self.store_terminal(result.get("structure"))
+        return super().terminal_result(name, result)
 
     @staticmethod
     def final_response_error(_result: WorkbookBindings) -> str:
@@ -344,17 +344,14 @@ class PeriodBindingToolset:
         """Return conservative header-equivalent groups for routed sheets."""
         if self.layout_groups is None:
             self.layout_groups = self._build_sheet_layouts()
-        # Building the groups inspects every routed header deterministically.
-        # The model is making one claim about that exact shared header, not
-        # guessing from another unexamined sheet.
-        self.opened_sheets.update(self.financial_sheets)
         return {
             "ok": True,
             "layout_groups": self.layout_groups,
             "selected_period_ids": self.period_ids,
             "instruction": (
-                "Return one layout outcome for every layout_id and selected period. "
-                "Use a sheet override only when a named member is a real exception."
+                "Call read_headers for every listed sheet before submitting. Then "
+                "return one layout outcome for every layout_id and selected period; "
+                "use a sheet override only when a named member is a real exception."
             ),
         }
 
@@ -462,13 +459,9 @@ class PeriodBindingToolset:
         return found
 
     def _budget_spent(self) -> dict[str, Any] | None:
-        if self.reads < self.max_reads:
-            return None
-        return {
-            "ok": False,
-            "error": f"Read budget of {self.max_reads} calls is spent.",
-            "instruction": "Submit what you have. A partial answer is useful.",
-        }
+        return self.read_budget_result(
+            instruction="Submit what you have. A partial answer is useful."
+        )
 
     def _sheet_or_error(self, sheet_name: str):
         sheet = self.sheets.get(sheet_name)
@@ -490,7 +483,7 @@ class PeriodBindingToolset:
         end = arguments.get("end_row")
         end = int(end) if end is not None else start + MAX_ROWS_PER_READ - 1
         end = min(end, start + MAX_ROWS_PER_READ - 1)
-        self.reads += 1
+        self.record_read()
         self.opened_sheets.add(sheet.sheet_name)
 
         rows: list[dict[str, Any]] = []
@@ -557,7 +550,7 @@ class PeriodBindingToolset:
         rows = int(arguments.get("rows") or DEFAULT_HEADER_ROWS)
         rows = max(1, min(rows, MAX_HEADER_ROWS))
         taken = known[:MAX_SHEETS_PER_HEADER_READ]
-        self.reads += 1
+        self.record_read()
         self.opened_sheets.update(taken)
 
         result: dict[str, Any] = {
@@ -610,7 +603,7 @@ class PeriodBindingToolset:
                 "instruction": "Use a name from list_sheets, or omit it to search all.",
             }
         names = [requested] if requested else list(self.sheets)
-        self.reads += 1
+        self.record_read()
         hits = []
         for name in names:
             for row in self.sheets[name].rows:
@@ -632,7 +625,7 @@ class PeriodBindingToolset:
             return error
         start = max(1, int(arguments.get("start_row") or 1))
         end = int(arguments.get("end_row") or start)
-        self.reads += 1
+        self.record_read()
         self.opened_sheets.add(sheet.sheet_name)
         return column_stats(sheet, start, end).as_dict()
 
@@ -640,7 +633,11 @@ class PeriodBindingToolset:
 
     def _submit_layout_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Expand compact layout choices into the existing sheet-level contract."""
-        self.layout_submission_count += 1
+        self.layout_submission_count = self.increment_counter(
+            "layout_submissions"
+        )
+        if self.layout_submission_count > 1:
+            self.layout_repair_count = self.increment_counter("layout_repairs")
         if self.layout_submission_count > MAX_LAYOUT_SUBMISSIONS:
             raise RuntimeError(
                 "Excel layout binding exceeded one initial submission and two repairs."
@@ -747,6 +744,7 @@ class PeriodBindingToolset:
 
         bindings: list[PeriodBinding] = []
         unavailable: list[UnavailablePeriod] = []
+        member_exceptions: list[dict[str, str]] = []
         notes = [str(value) for value in arguments.get("notes") or []]
         for (layout_id, period_id), (kind, item) in outcomes.items():
             layout = layouts[layout_id]
@@ -877,22 +875,38 @@ class PeriodBindingToolset:
                             evidence=evidence,
                         )
                     )
-                else:
-                    state = (
-                        "all zero"
-                        if counts.get("numeric", 0)
-                        else "blank"
+                elif not counts.get("numeric", 0):
+                    member_exceptions.append(
+                        {
+                            "sheet_name": sheet_name,
+                            "period_id": period_id,
+                            "excel_column": column,
+                            "reason": "Shared column has no labelled numeric values.",
+                        }
                     )
+                else:
                     unavailable.append(
                         UnavailablePeriod(
                             sheet_name=sheet_name,
                             period_id=period_id,
                             reason=(
                                 f"Layout {layout_id} selected column {column}, but the "
-                                f"column is {state} on this sheet."
+                                "column is all zero on this sheet."
                             ),
                         )
                     )
+
+        if member_exceptions:
+            result = self._reject(
+                "The shared column is missing on the listed member sheets. "
+                "This does not establish that their selected period is absent. "
+                "Read each member's header and value rows, then submit a "
+                "sheet_bindings override for its actual column, or sheet_unavailable "
+                "only after confirming that the period is absent or empty.",
+                "submit_layout_bindings",
+            )
+            result["member_exceptions"] = member_exceptions
+            return result
 
         expanded = WorkbookBindings(
             bindings=bindings,
@@ -970,6 +984,7 @@ class PeriodBindingToolset:
             self.sheets,
             period_ids=self.period_ids,
             financial_sheets=self.financial_sheets,
+            periods=self.periods,
         )
         if not result.accepted and not self._out_of_patience(submission_tool):
             return self._reject(" ".join(result.rejections), submission_tool)
@@ -982,6 +997,7 @@ class PeriodBindingToolset:
                 self.sheets,
                 self.period_ids,
                 self.financial_sheets,
+                self.periods,
             )
             unresolved = self._unanswered_pairs(submission)
             submission = _mark_unresolved_unavailable(submission, unresolved)
@@ -1057,7 +1073,7 @@ class PeriodBindingToolset:
             "mapping for that period rather than assigned another sheet's column."
         )
         message = " ".join(parts)
-        self.rejections.append(message)
+        self.record_rejection(message)
         return {
             "ok": True,
             "accepted": False,
@@ -1088,7 +1104,7 @@ class PeriodBindingToolset:
         return self._refusals.get(tool, 0) >= self.MAX_REJECTIONS_PER_PHASE
 
     def _reject(self, message: str, tool: str) -> dict[str, Any]:
-        self.rejections.append(message)
+        self.record_rejection(message)
         self._refusals[tool] = self._refusals.get(tool, 0) + 1
         remaining = self.MAX_REJECTIONS_PER_PHASE - self._refusals[tool]
         instruction = f"Correct it and call {tool} again."
@@ -1141,6 +1157,7 @@ def _drop_rejected_bindings(
     sheets,
     period_ids: list[str],
     financial_sheets: list[str],
+    periods: list[CanonicalPeriod] | None = None,
 ) -> WorkbookBindings:
     """Keep the bindings that stand on their own, drop the ones that cannot.
 
@@ -1151,6 +1168,11 @@ def _drop_rejected_bindings(
     """
     chosen = set(period_ids)
     financial = set(financial_sheets)
+    periods_by_id = {period.period_id: period for period in periods or []}
+    latest_period_year = max(
+        (int(period.end_month[:4]) for period in periods_by_id.values()),
+        default=0,
+    )
     unavailable = []
     unavailable_pairs: set[tuple[str, str]] = set()
     for item in submission.unavailable:
@@ -1194,6 +1216,23 @@ def _drop_rejected_bindings(
             )
             unavailable_pairs.add(pair)
             continue
+        period = periods_by_id.get(binding.period_id)
+        if period is not None:
+            confirmation = getattr(period, "department_confirmation", None)
+            if (
+                confirmation is not None
+                and binding.sheet_name == confirmation.sheet_name
+                and letters != confirmation.excel_column.strip().upper()
+            ):
+                continue
+            identity_problem = period_column_problem(
+                sheet,
+                period,
+                letters,
+                latest_period_year=latest_period_year,
+            )
+            if identity_problem is not None:
+                continue
         candidates.append(binding)
 
     pair_counts: dict[tuple[str, str], int] = {}
@@ -1309,6 +1348,13 @@ def _is_number(value: Any) -> bool:
 
 def _sheet_header_signature(sheet) -> tuple[Any, ...]:
     header_end = _header_end_row(sheet)
+    if not any(
+        _is_column_header_row(row)
+        for row in sheet.rows
+        if row.row_index <= header_end
+    ):
+        # A shared report date/title does not establish amount-column positions.
+        return ()
     markers: list[tuple[int, tuple[str, ...]]] = []
     for row in sheet.rows:
         if row.row_index > header_end:
@@ -1398,38 +1444,71 @@ def _merged_end_column(cell_range: str) -> int:
 
 
 def _header_end_row(sheet) -> int:
-    """Stop before the first substantive value row, capped for prompt safety."""
-    saw_period_header = False
+    """Read through preliminary KPIs to column headers, then stop at values."""
+    saw_column_header = False
+    first_value_row: int | None = None
     for row in sheet.rows:
+        if row.row_index > LAYOUT_HEADER_ROWS:
+            break
         numeric = [cell for cell in row.cells if _is_number(cell.raw_value)]
-        row_markers = {
-            marker
-            for cell in row.cells
-            if (text := _text(cell))
-            for marker in _header_markers(text)
-        }
+        if _is_column_header_row(row):
+            saw_column_header = True
+            continue
         labelled_value_row = bool(numeric) and any(
             (text := _text(cell)) and not _header_markers(text)
             for cell in row.cells
             if not _is_number(cell.raw_value)
         )
-        if saw_period_header and (len(numeric) >= 2 or labelled_value_row):
-            return max(1, min(LAYOUT_HEADER_ROWS, row.row_index - 1))
-        saw_period_header = saw_period_header or bool(
-            row_markers
-            & {
-                "actual",
-                "budget",
-                "forecast",
-                "prior_year",
-                "ytd",
-                "ptd",
-                "ttm",
-                "total",
-            }
-            or any(marker.startswith(("month:", "year:")) for marker in row_markers)
-        )
+        if len(numeric) >= 2 or labelled_value_row:
+            if saw_column_header:
+                return max(1, row.row_index - 1)
+            if first_value_row is None:
+                first_value_row = row.row_index
+    if not saw_column_header and first_value_row is not None:
+        return max(1, first_value_row - 1)
     return LAYOUT_HEADER_ROWS
+
+
+def _is_column_header_row(row) -> bool:
+    """Require a scenario/block header or dates in multiple physical columns."""
+    # Numeric year captions are headers; other numbers make this a value row.
+    numeric = [cell for cell in row.cells if _is_number(cell.raw_value)]
+    if numeric:
+        if any(
+            not (1900 <= float(cell.raw_value) <= 2099 and float(cell.raw_value).is_integer())
+            for cell in numeric
+        ):
+            return False
+        # Dollar amounts can happen to look like years. Only treat these as
+        # year captions when the remaining cells are plain period headers or
+        # report metadata; an account caption makes this a financial value row.
+        if any(
+            not re.fullmatch(
+                r"actuals?|budget|forecast|(?:prior|last|previous) year|"
+                r"(?:current )?period|years?|months?|total|annual|fy|ytd|ptd|ttm|"
+                r"year[- ]to[- ]date|month[- ]to[- ]date",
+                text,
+                flags=re.IGNORECASE,
+            )
+            for cell in row.cells
+            if not _is_number(cell.raw_value)
+            and (text := _text(cell))
+            and not is_technical_label(text)
+        ):
+            return False
+    identities = [
+        (cell.column, set(_header_markers(text)))
+        for cell in row.cells
+        if (text := _text(cell)) and not is_technical_label(text)
+        and _header_markers(text)
+    ]
+    if any(markers & (SCENARIO_MARKERS | COVERAGE_MARKERS) for _, markers in identities):
+        return True
+    dated_columns = {
+        column for column, markers in identities
+        if any(marker.startswith(("month:", "year:")) for marker in markers)
+    }
+    return len(dated_columns) >= 2
 
 
 def _text(cell) -> str | None:

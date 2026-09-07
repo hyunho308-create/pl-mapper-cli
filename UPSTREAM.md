@@ -18,3 +18,17 @@ are not distributed here.
 
 Shared engine files should be changed in `P-L-Agent` first and synchronized
 here. Avoid making independent fixes to shared files in both repositories.
+
+## Latest synchronized revision
+
+Shared files were synchronized on 2026-09-06 from
+[`f686597`](https://github.com/hyunho308-create/P-L-Agent/commit/f686597).
+The manifest covers 112 engine, support-documentation and regression-test files.
+The CLI-specific PDF dispatch regression remains in this repository.
+The obsolete duplicate `tests/test_pdf_ingestion.py` was retired; its current
+coverage is supplied by the shared `tests/test_ingestion_pdf.py`.
+
+This update includes mapping/PDF corrections, clearer model notes, source
+subtotal checks, and the lightweight saved-run output review. Source-control
+relationship selection still needs review; see [model notes](docs/model-notes.md)
+for the limitation and [output review](docs/per-pl-evaluator.md) for usage.

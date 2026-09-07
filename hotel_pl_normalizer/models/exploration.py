@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import model_validator
 
 from .common import StrictModel
-from .period_selection import CanonicalPeriod
+from .period_selection import CanonicalPeriod, PeriodDepartmentConfirmation
 from .sheet_selection import (
     FinancialEvidenceClassification,
     WorkbookSheetLayout,
@@ -16,14 +16,6 @@ class ExploredSheet(FinancialEvidenceClassification):
     """One sheet, and what the model decided to do about it."""
 
     sheet_name: str
-
-
-class PeriodDepartmentConfirmation(StrictModel):
-    """One exact department amount column confirming a selectable period."""
-
-    sheet_name: str
-    excel_column: str
-    evidence: list[str] = []
 
 
 class DiscoveredPeriod(CanonicalPeriod):

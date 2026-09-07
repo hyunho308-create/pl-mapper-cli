@@ -6,21 +6,63 @@ Python reads their values, performs the arithmetic, and validates the result.
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
 from importlib import resources
 from itertools import combinations
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
+from hotel_pl_normalizer.mapping.arithmetic import (
+    MissingValuePolicy,
+    evaluate_operation,
+)
+from hotel_pl_normalizer.mapping.checks import run_checks
+from hotel_pl_normalizer.mapping.coa import (
+    DERIVED_SUMMARY_LINKS,
+    DETERMINISTIC_CALCULATION_TERMS,
+    DETERMINISTIC_SUMMARY_ACCOUNTS,
+    SUMMARY_EQUATIONS,
+    SUMMARY_LINKS,
+    accounts_share_dependency_path,
+    children_by_parent,
+    load_coa,
+)
+from hotel_pl_normalizer.mapping.coa import (
+    DETERMINISTIC_SUMMARY_CALCULATIONS as DETERMINISTIC_SUMMARY_CALCULATIONS,
+)
+from hotel_pl_normalizer.mapping.findings import Finding
+from hotel_pl_normalizer.mapping.repair import RepairContext
+from hotel_pl_normalizer.mapping.repair import repair as repair_mapping
+from hotel_pl_normalizer.mapping.reviews import (
+    normalize_review_item,
+    normalize_review_items,
+)
+from hotel_pl_normalizer.mapping.rules import (
+    get_rule_policy,
+    rules_for,
+)
+from hotel_pl_normalizer.mapping.source_controls import SourceControl
+from hotel_pl_normalizer.mapping.tolerances import (
+    KPI_CURRENCY_TOLERANCE,
+    KPI_RATIO_TOLERANCE,
+    ZERO_EPSILON,
+    offset_match_tolerance,
+    reconciliation_tolerance,
+    source_supported_tolerance,
+)
 from hotel_pl_normalizer.models.common import StrictModel
+from hotel_pl_normalizer.models.evidence import (
+    EvidenceRow,
+    PeriodLocationSummary,
+    ensure_evidence_rows,
+)
 from hotel_pl_normalizer.providers.base import (
+    AgentToolset,
     ModelToolError,
     ProviderResponseTruncated,
     ProviderRunCancelled,
@@ -101,28 +143,37 @@ GENERIC_VENUE_IDS = tuple(
 )
 RESIDUAL_AUTO_ACCEPT_RATIO = 0.05
 UNSUPPORTED_REMAINDER_ABSOLUTE_THRESHOLD = 10_000.0
-DETERMINISTIC_SUMMARY_CALCULATIONS = {
-    "S12.ffe_reserve": {
-        "formula": "0.04 * S12.total_revenue",
-        "mapped_label": "Calculated: 4% of Total Revenue.",
-        "dependencies": ("S12.total_revenue",),
-    },
-    "S12.noi": {
-        "formula": "S12.ebitda - S12.ffe_reserve",
-        "mapped_label": "Calculated: EBITDA less FF&E Reserve.",
-        "dependencies": ("S12.ebitda", "S12.ffe_reserve"),
-    },
-}
-DETERMINISTIC_SUMMARY_ACCOUNTS = frozenset(
-    DETERMINISTIC_SUMMARY_CALCULATIONS
-)
-
-
 class SourceLayerOperation(str, Enum):
     DIRECT = "direct"
     SUM = "sum"
     ADJUSTED_SUBTOTAL = "adjusted_subtotal"
     NEGATE = "negate"
+
+
+def _source_layer_overlap_is_valid(
+    selected_rows,
+    selected_excluded,
+    selected_operation,
+    alternate_rows,
+    alternate_excluded,
+    alternate_operation,
+) -> bool:
+    """Allow common same-signed terms, but not repeated or identical equations."""
+    def coefficients(rows, excluded, operation):
+        all_rows = [*rows, *excluded]
+        if len(all_rows) != len(set(all_rows)):
+            return None
+        sign = -1 if operation == SourceLayerOperation.NEGATE else 1
+        return {**dict.fromkeys(rows, sign), **dict.fromkeys(excluded, -1)}
+
+    selected = coefficients(selected_rows, selected_excluded, selected_operation)
+    alternate = coefficients(alternate_rows, alternate_excluded, alternate_operation)
+    return (
+        selected is not None
+        and alternate is not None
+        and selected != alternate
+        and all(selected[row] == alternate[row] for row in selected.keys() & alternate.keys())
+    )
 
 
 class AccountSourceDecision(StrictModel):
@@ -182,6 +233,7 @@ class MappingReviewItem(StrictModel):
         "scope_exception",
     ]
     message: str
+    mapping_treatment: str | None = None
     coa_ids: list[str] = Field(default_factory=list)
     source_rows: list[str] = Field(default_factory=list)
     selected_source_rows: list[str] = Field(default_factory=list)
@@ -191,6 +243,13 @@ class MappingReviewItem(StrictModel):
     selected_source_operation: SourceLayerOperation | None = None
     alternate_source_operation: SourceLayerOperation | None = None
     requires_human_decision: bool = False
+    _review_item_id: str | None = PrivateAttr(default=None)
+
+    @property
+    def review_item_id(self) -> str | None:
+        """Stable internal identity; deliberately absent from model schemas."""
+
+        return self._review_item_id
 
     @model_validator(mode="after")
     def validate_context(self):
@@ -198,6 +257,16 @@ class MappingReviewItem(StrictModel):
             raise ValueError("review item message cannot be blank")
         if not self.coa_ids and not self.source_rows:
             raise ValueError("review item must cite a COA id or source row")
+        if self.kind == "source_discrepancy" and not (
+            self.selected_source_rows and self.alternate_source_rows
+        ):
+            raise ValueError(
+                "source_discrepancy requires selected_source_rows and "
+                "alternate_source_rows with typed operations so code can compare "
+                "their values. Provide the cited numeric comparison or omit an "
+                "immaterial rounding-only note; use unusual_convention for a "
+                "nonnumeric presentation or mapping treatment."
+            )
         if bool(self.selected_source_rows) != bool(self.alternate_source_rows):
             raise ValueError(
                 "selected_source_rows and alternate_source_rows must be supplied together"
@@ -223,8 +292,15 @@ class MappingReviewItem(StrictModel):
                 raise ValueError(
                     "source-layer row sets must also appear in source_rows"
                 )
-            if selected & alternate:
-                raise ValueError("selected and alternate source layers must be disjoint")
+            if not _source_layer_overlap_is_valid(
+                self.selected_source_rows, self.selected_excluded_rows,
+                self.selected_source_operation, self.alternate_source_rows,
+                self.alternate_excluded_rows, self.alternate_source_operation,
+            ):
+                raise ValueError(
+                    "source layers require distinct equations without repeated rows; "
+                    "shared rows must have the same sign on both sides"
+                )
             for side, operation, rows, excluded in (
                 (
                     "selected",
@@ -273,6 +349,7 @@ class WorkbookSourcePlan(StrictModel):
     strategy: WorkbookStrategy
     decisions: list[AccountSourceDecision]
     review_items: list[MappingReviewItem] = Field(default_factory=list)
+    source_controls: list[SourceControl] = Field(default_factory=list)
 
 
 class WorkbookSourcePatch(StrictModel):
@@ -290,6 +367,7 @@ class WorkbookSourcePatch(StrictModel):
     operator_to_coa_hierarchy_conflicts: list[str] | None = None
     source_detail_incomplete: list[str] | None = None
     review_items: list[MappingReviewItem] | None = None
+    source_controls: list[SourceControl] | None = None
 
     @model_validator(mode="after")
     def validate_repair_tracking(self):
@@ -307,6 +385,29 @@ class WorkbookMappingCompletion(StrictModel):
     validation_attempt: int
 
 
+def _assign_review_item_ids(plan: WorkbookSourcePlan) -> WorkbookSourcePlan:
+    """Attach deterministic IDs without exposing them in model tool schemas."""
+
+    seen: dict[str, int] = {}
+    for item in plan.review_items:
+        payload = json.dumps(
+            item.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        occurrence = seen.get(payload, 0)
+        seen[payload] = occurrence + 1
+        digest = hashlib.sha256(
+            f"{payload}|occurrence={occurrence}".encode("utf-8")
+        ).hexdigest()[:16]
+        item._review_item_id = f"review:{digest}"
+    return plan
+
+
+def _review_item_id(item) -> str | None:
+    return normalize_review_item(item).review_item_id
+
+
 @dataclass(slots=True)
 class MappingResult:
     """Authoritative result of one complete-workbook mapping session."""
@@ -315,8 +416,8 @@ class MappingResult:
     values: dict[str, float | None]
     values_by_period: dict[str, dict[str, float | None]]
     decisions: list[AccountSourceDecision]
-    checks: list[dict]
-    checks_by_period: dict[str, list[str]]
+    checks: list[Finding]
+    checks_by_period: dict[str, list[Finding]]
     residual_plugs_by_period: dict[str, dict[str, float]]
     execution_issues: list[str]
     execution_issues_by_period: dict[str, list[str]]
@@ -332,12 +433,11 @@ class MappingResult:
     model_calls: list[dict]
     tool_trace: list[dict]
     mapping_selection: dict[str, Any]
+    source_controls: list[SourceControl] = field(default_factory=list)
 
 
-class WorkbookMappingValidator:
+class WorkbookMappingValidator(AgentToolset):
     """Deterministic validation tool used inside one stateful model session."""
-
-    cacheable = False
 
     def __init__(
         self,
@@ -347,6 +447,7 @@ class WorkbookMappingValidator:
         period_labels=None,
         sheet_routing_context=None,
     ):
+        super().__init__()
         self.workbook_id = workbook_id
         self.evidence = evidence
         self.coa = coa
@@ -381,6 +482,7 @@ class WorkbookMappingValidator:
         self.stopped_reason: str | None = None
         self.stopped_validation_attempt: int | None = None
         self.repeated_findings: list[dict[str, Any]] = []
+        self.deterministic_repairs: list[dict[str, Any]] = []
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "validate_mapping":
@@ -404,7 +506,16 @@ class WorkbookMappingValidator:
             plan, self.derived_summary_source_rows
         )
         plan = _enrich_adjustment_review_items(plan, self.coa)
+        plan = _assign_review_item_ids(plan)
         result = self.evaluate(plan)
+        plan, result, deterministic_repairs = self._apply_deterministic_repairs(
+            plan, result
+        )
+        if deterministic_repairs:
+            action["deterministic_repair_count"] = len(deterministic_repairs)
+            action["deterministic_repairs"] = deterministic_repairs
+            result["deterministic_repair_count"] = len(deterministic_repairs)
+            result["deterministic_repairs"] = deterministic_repairs
         result["outcome"] = _outcome_from_result(
             result, plan.review_items
         ).value
@@ -461,6 +572,9 @@ class WorkbookMappingValidator:
         score = _validation_score(result)
         result["validation_score"] = list(score)
         self.history.append(result)
+        self.increment_counter("mapping_submissions")
+        if name == "patch_mapping":
+            self.increment_counter("mapping_repairs")
         self.checkpoints.append(
             {
                 "validation_attempt": result["validation_attempt"],
@@ -478,6 +592,42 @@ class WorkbookMappingValidator:
             self.last_accepted_digest = self.digest(plan)
             self.last_accepted_plan = plan
         return result
+
+    def _apply_deterministic_repairs(self, plan, result):
+        """Reach a conservative fixed point without consuming a model turn."""
+
+        audits: list[dict[str, Any]] = []
+        for pass_number in range(1, 4):
+            revalidated_result: dict[str, Any] | None = None
+
+            def revalidate(candidate):
+                nonlocal revalidated_result
+                revalidated_result = self.evaluate(candidate)
+                return _finding_texts(revalidated_result)
+
+            repaired = repair_mapping(
+                plan,
+                _finding_texts(result),
+                RepairContext(revalidate=revalidate),
+            )
+            if not repaired.changed:
+                break
+            plan = _assign_review_item_ids(repaired.plan)
+            for record in repaired.applied:
+                audit = record.to_dict()
+                audit.update(
+                    {
+                        "deterministic_pass": pass_number,
+                        "model_validation_attempt": len(self.history) + 1,
+                        "sequence": len(self.deterministic_repairs) + len(audits) + 1,
+                    }
+                )
+                audits.append(audit)
+            if revalidated_result is None:
+                raise RuntimeError("deterministic repair skipped shared validation")
+            result = revalidated_result
+        self.deterministic_repairs.extend(audits)
+        return plan, result, audits
 
     def _update_stop_state(self, previous, result, plan) -> None:
         review_kinds = {item.kind for item in plan.review_items}
@@ -617,10 +767,15 @@ class WorkbookMappingValidator:
             patch.review_items is not None
             and patch.review_items != self.current_plan.review_items
         )
+        changes_controls = (
+            patch.source_controls is not None
+            and patch.source_controls != self.current_plan.source_controls
+        )
         if (
             not changes_decisions
             and not changes_strategy
             and not changes_review
+            and not changes_controls
         ):
             if self.warning_cleanup_pending:
                 return self.current_plan, {
@@ -686,6 +841,11 @@ class WorkbookMappingValidator:
                     if patch.review_items is not None
                     else self.current_plan.review_items
                 ),
+                "source_controls": (
+                    patch.source_controls
+                    if patch.source_controls is not None
+                    else self.current_plan.source_controls
+                ),
             }
         )
         return plan, {
@@ -697,169 +857,71 @@ class WorkbookMappingValidator:
         }
 
     def evaluate(self, plan: WorkbookSourcePlan) -> dict[str, Any]:
-        execution_issues = []
-        if plan.workbook_id != self.workbook_id:
-            execution_issues.append(
-                f"workbook_id must be {self.workbook_id!r}, got {plan.workbook_id!r}"
-            )
-        submitted = {item.coa_id for item in plan.decisions}
-        required_decisions = set(self.coa) - DETERMINISTIC_SUMMARY_ACCOUNTS
-        deterministic_submissions = sorted(
-            submitted & DETERMINISTIC_SUMMARY_ACCOUNTS
+        checked = run_checks(
+            plan=plan,
+            evidence=self.evidence,
+            coa=self.coa,
+            period_labels=self.period_labels,
+            expected_workbook_id=self.workbook_id,
+            stage="session",
+            preserve_blanks=self.preserve_blanks,
+            history=self.history,
+            sheet_routing_context=self.sheet_routing_context,
+            summary_only_pushdown_rows=self.summary_only_pushdown_rows,
         )
-        if deterministic_submissions:
-            execution_issues.append(
-                "deterministic accounts must not be submitted by the model: "
-                + ", ".join(deterministic_submissions)
-            )
-        missing = sorted(required_decisions - submitted)
-        if missing:
-            execution_issues.append(
-                "missing COA decisions: " + ", ".join(missing)
-            )
-        rollup_targets = set(DERIVED_SUMMARY_LINKS) | set(SUMMARY_EQUATIONS)
-        for decision in plan.decisions:
-            if decision.operation != SourceOperation.COA_ROLLUP:
-                continue
-            if plan.strategy.summary_mode != SummaryMode.DERIVED:
-                execution_issues.append(
-                    f"{decision.coa_id}: coa_rollup requires summary_mode=derived"
-                )
-            elif decision.coa_id not in rollup_targets:
-                execution_issues.append(
-                    f"{decision.coa_id}: coa_rollup is only allowed for a linked "
-                    "S12 account or Summary equation"
-                )
-        unknown_review_ids = sorted({
-            coa_id
-            for item in plan.review_items
-            for coa_id in item.coa_ids
-            if coa_id not in self.coa
-        })
-        if unknown_review_ids:
-            execution_issues.append(
-                "review items cite unknown COA ids: " + ", ".join(unknown_review_ids)
-            )
-        evidence_rows = {item["row_key"] for item in self.evidence}
-        unknown_review_rows = sorted({
-            row_key
-            for item in plan.review_items
-            for row_key in item.source_rows
-            if row_key not in evidence_rows
-        })
-        if unknown_review_rows:
-            execution_issues.append(
-                "review items cite unknown source rows: "
-                + ", ".join(unknown_review_rows)
-            )
-        errors = list(execution_issues)
-        errors.extend(_review_item_blockers(plan.review_items))
-        errors.extend(
-            _period_completeness_issues(
-                plan,
-                self.evidence,
-                self.period_labels,
-            )
-        )
-        collapse_issue = _detail_collapse_issue(plan, self.evidence)
-        if collapse_issue:
-            errors.append(collapse_issue)
-        errors.extend(
-            _unused_financial_schedule_issues(
-                plan,
-                self.evidence,
-                self.sheet_routing_context,
-            )
-        )
-        missing_venue_names = sorted(
-            decision.coa_id
-            for decision in plan.decisions
-            if decision.coa_id in GENERIC_VENUE_IDS
-            and decision.operation != SourceOperation.NO_VALUE
-            and not str(decision.venue_name or "").strip()
-        )
-        if missing_venue_names:
-            errors.append(
-                "mapped generic venues require venue_name: "
-                + ", ".join(missing_venue_names)
-            )
-        warning_periods: dict[str, list[str]] = {}
-        residual_plugs_by_period: dict[str, dict[str, float]] = {}
-        for period_id, label in self.period_labels.items():
-            values, calculation_issues = _execute(
-                plan.decisions,
-                self.evidence,
-                self.coa,
-                period_id=period_id,
-                preserve_blanks=self.preserve_blanks,
-            )
-            residual_plugs_by_period[period_id] = _apply_residual_plugs(
-                values,
-                self.coa,
-                plan.decisions,
-                max_ratio=RESIDUAL_AUTO_ACCEPT_RATIO,
-            )
-            checks = _validate(
-                _validation_values(values),
-                self.coa,
-                plan.decisions,
-                plan.strategy,
-                plan.review_items,
-                self.summary_only_pushdown_rows,
-            )
-            checks.extend(
-                _source_layer_conflict_warnings(
-                    plan, self.evidence, values, period_id
-                )
-            )
-            checks.extend(_source_layer_comparison_issues(
-                plan, self.evidence, values, period_id
-            ))
-            checks = _qualify_source_discrepancies(
-                checks,
-                plan,
-                self.evidence,
-                self.coa,
-                self.history,
-                label,
-                calculation_issues,
-            )
-            checks.extend(
-                _unsupported_residual_remainder_warnings(
-                    values,
-                    self.coa,
-                    plan.decisions,
-                )
-            )
-            checks.extend(_review_item_warnings(plan.review_items))
-            errors.extend(
-                f"{label}: {item}"
-                for item in calculation_issues
-            )
-            errors.extend(
-                f"{label}: {item}"
-                for item in checks
-                if item.startswith("error|")
-            )
-            for item in checks:
-                if item.startswith("warning|"):
-                    warning_periods.setdefault(item, []).append(label)
-        warnings = [
-            f"{', '.join(labels)}: {item}"
-            for item, labels in warning_periods.items()
+        errors: list[Finding | str] = [
+            *checked.execution_issues,
+            *(
+                item
+                for item in checked.global_findings
+                if item.severity == "error"
+            ),
         ]
+        warning_periods: dict[tuple[Any, ...], tuple[Finding, list[str], list[str]]] = {}
+        for period_id, label in self.period_labels.items():
+            errors.extend(
+                f"{label}: {item}"
+                for item in checked.execution_issues_by_period[period_id]
+            )
+            errors.extend(
+                item.with_period_label(period_id, label, as_prefix=True)
+                for item in checked.findings_by_period[period_id]
+                if item.severity == "error"
+            )
+            for item in checked.findings_by_period[period_id]:
+                if item.severity != "warning":
+                    continue
+                key = (
+                    item.severity,
+                    item.rule,
+                    item.target,
+                    tuple(item.details.items()),
+                    item.note,
+                    item.review_item_id,
+                )
+                if key not in warning_periods:
+                    warning_periods[key] = (item, [], [])
+                warning_periods[key][1].append(period_id)
+                warning_periods[key][2].append(label)
+        warnings = [
+            item.with_period_label(period_ids[0], ", ".join(labels), as_prefix=True)
+            for item, period_ids, labels in warning_periods.values()
+        ]
+        warnings.extend(
+            item for item in checked.global_findings if item.severity == "warning"
+        )
         accepted = not errors
         needs_detail_enrichment = _needs_coverage_review(warnings)
         return {
             "ok": True,
             "accepted": accepted,
             "submitted_decision_count": len(plan.decisions),
-            "missing_decision_count": len(missing),
+            "missing_decision_count": checked.missing_decision_count,
             "error_count": len(errors),
             "warning_count": len(warnings),
             "errors": errors,
             "warnings": warnings,
-            "residual_plugs_by_period": residual_plugs_by_period,
+            "residual_plugs_by_period": checked.residual_plugs_by_period,
             "review_item_count": len(plan.review_items),
             "review_items": [
                 item.model_dump(mode="json") for item in plan.review_items
@@ -913,6 +975,7 @@ class WorkbookMappingValidator:
                 self.history[-1], self.current_plan.review_items
             ):
                 return "Completion outcome must match the validator outcome."
+            self.store_terminal(completion)
             return None
         if self.last_accepted_plan is None:
             return (
@@ -929,14 +992,17 @@ class WorkbookMappingValidator:
             self.warning_cleanup_pending = False
             self.warning_cleanup_attempted = True
             self.warning_cleanup_outcome = "kept_accepted_plan"
+        self.store_terminal(completion)
         return None
 
     def terminal_result(self, name: str, result: dict[str, Any]):
         """Return a completion payload when another model turn cannot add value."""
         if self.warning_cleanup_pending and name == "patch_mapping":
-            return self._finish_warning_cleanup(result)
+            return self.store_terminal(self._finish_warning_cleanup(result))
         if self.stop_repair:
-            return self._completion_payload(result, accepted=False)
+            return self.store_terminal(
+                self._completion_payload(result, accepted=False)
+            )
         if not result.get("accepted"):
             return None
         if (
@@ -950,7 +1016,7 @@ class WorkbookMappingValidator:
             self.warning_cleanup_checkpoint_score = _validation_score(result)
             self.warning_cleanup_checkpoint_attempt = result["validation_attempt"]
             return None
-        return self._completion_payload(result)
+        return self.store_terminal(self._completion_payload(result))
 
     def _completion_payload(
         self, result: dict[str, Any], *, accepted: bool = True
@@ -1064,6 +1130,7 @@ class WorkbookMappingValidator:
                     ],
                 },
                 "requires_human_decision": {"type": "boolean"},
+                "mapping_treatment": {"anyOf": [{"type": "string"}, {"type": "null"}]},
             },
             "required": [
                 "kind",
@@ -1077,9 +1144,24 @@ class WorkbookMappingValidator:
                 "selected_source_operation",
                 "alternate_source_operation",
                 "requires_human_decision",
+                "mapping_treatment",
             ],
         }
         review_items = {"type": "array", "items": review_item}
+        source_controls = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "coa_id": {"type": "string"},
+                    "total_row": {"type": "string"},
+                    "component_rows": string_list,
+                    "excluded_rows": string_list,
+                },
+                "required": ["label", "coa_id", "total_row", "component_rows", "excluded_rows"],
+            },
+        }
         decision = {
             "type": "object",
             "properties": {
@@ -1177,10 +1259,12 @@ class WorkbookMappingValidator:
                     "strategy": strategy,
                     "decisions": {"type": "array", "items": decision},
                     "review_items": review_items,
+                    "source_controls": source_controls,
                 },
                 "required": [
                     "plan_id", "workbook_id", "strategy", "decisions",
                     "review_items",
+                    "source_controls",
                 ],
             },
         }, {
@@ -1234,6 +1318,7 @@ class WorkbookMappingValidator:
                         "anyOf": [string_list, {"type": "null"}],
                     },
                     "review_items": review_items,
+                    "source_controls": source_controls,
                 },
                 "required": [
                     "patch_id", "workbook_id", "replacements",
@@ -1241,11 +1326,6 @@ class WorkbookMappingValidator:
                 ],
             },
         }]
-
-    def signature(self) -> str:
-        payload = json.dumps(self.declarations(), sort_keys=True)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
 
 def _substantive_decision_digest(decision: AccountSourceDecision) -> str:
     """Serialize only fields that can change mapping execution."""
@@ -1317,7 +1397,7 @@ def _normalize_patch_review_items(values: Any) -> Any:
 
     The narrative, cited COA ids, and cited source rows still reach feedback.
     We clear the optional typed comparison fields only when they cannot form a
-    valid, disjoint source-layer comparison and would otherwise reject the
+    valid, distinct source-layer comparison and would otherwise reject the
     entire repair payload before its mapping changes can be evaluated.
     """
     if not isinstance(values, list):
@@ -1357,7 +1437,10 @@ def _normalize_patch_review_items(values: Any) -> Any:
                 or selected_operation not in allowed_operations
                 or alternate_operation not in allowed_operations
                 or not (selected_set | alternate_set) <= set(cited)
-                or bool(selected_set & alternate_set)
+                or not _source_layer_overlap_is_valid(
+                    selected, selected_excluded, selected_operation,
+                    alternate, alternate_excluded, alternate_operation,
+                )
                 or (
                     selected_operation == SourceLayerOperation.DIRECT.value
                     and (len(selected) != 1 or bool(selected_excluded))
@@ -1402,55 +1485,66 @@ def _normalize_patch_review_items(values: Any) -> Any:
     return normalized_items
 
 
-def _finding_texts(result: dict | None) -> list[str]:
+def _compatibility_findings(
+    values,
+    *,
+    default_severity: Literal["error", "warning"],
+    period_id: str | None = None,
+) -> list[Finding]:
+    """Normalize public/history strings once before live finding logic runs."""
+
+    findings = []
+    for value in values or []:
+        if isinstance(value, Finding):
+            findings.append(
+                value
+                if period_id is None
+                else value.with_updates(period_id=period_id)
+            )
+            continue
+        try:
+            findings.append(Finding.from_legacy(str(value), period_id=period_id))
+        except ValueError:
+            text = str(value)
+            findings.append(
+                Finding(
+                    default_severity,
+                    "execution",
+                    "mapping",
+                    note=text,
+                    period_id=period_id,
+                    legacy_parts=[text],
+                )
+            )
+    return findings
+
+
+def _finding_texts(result: dict | None) -> list[Finding]:
+    """Compatibility boundary for validator history and legacy test payloads."""
+
     if not result:
         return []
     return [
-        str(item)
-        for item in [*result.get("errors", []), *result.get("warnings", [])]
+        *_compatibility_findings(
+            result.get("errors", []), default_severity="error"
+        ),
+        *_compatibility_findings(
+            result.get("warnings", []), default_severity="warning"
+        ),
     ]
-
-
-def _finding_rule(finding: str) -> str:
-    for marker in ("error|", "warning|"):
-        if marker in finding:
-            return finding.split(marker, 1)[1].split("|", 1)[0]
-    return "execution"
-
-
-def _finding_target(finding: str) -> str:
-    for marker in ("error|", "warning|"):
-        if marker in finding:
-            parts = finding.split(marker, 1)[1].split("|", 2)
-            return parts[1] if len(parts) > 1 else ""
-    return ""
 
 
 def _finding_targets(result: dict | None, rule: str) -> set[str]:
     return {
-        target
+        finding.target
         for finding in _finding_texts(result)
-        if _finding_rule(finding) == rule
-        for target in [_finding_target(finding)]
-        if target
+        if finding.rule == rule and finding.target
     }
 
 
-SOURCE_EXCEPTION_RULES = {
-    "source_discrepancy",
-    "source_layer_conflict",
-    "source_presentation_exception",
-    "small_source_reconciliation_difference",
-    "scope_exclusion",
-}
+SOURCE_EXCEPTION_RULES = rules_for(outcome="source_exception")
 
-COVERAGE_GAP_RULES = {
-    "source_detail_incomplete",
-    "coverage_unspecified",
-    "large_residual_plug",
-    "unsupported_residual_remainder",
-    "unresolved_negative_residual",
-}
+COVERAGE_GAP_RULES = rules_for(outcome="coverage_gap")
 
 QUANTIFIED_DETAIL_KEYS = {
     "actual",
@@ -1464,84 +1558,78 @@ QUANTIFIED_DETAIL_KEYS = {
 
 
 def _review_kind(item) -> str:
-    return str(
-        item.kind if isinstance(item, MappingReviewItem) else item.get("kind")
-    )
+    return normalize_review_item(item).kind
 
 
 def _review_requires_human_decision(item) -> bool:
-    return bool(
-        item.requires_human_decision
-        if isinstance(item, MappingReviewItem)
-        else item.get("requires_human_decision", False)
-    )
+    return normalize_review_item(item).requires_human_decision
 
 
-def _review_item_blockers(review_items) -> list[str]:
+def _review_item_blockers(review_items) -> list[Finding]:
     blockers = []
-    for item in review_items:
-        kind = _review_kind(item)
+    for item in normalize_review_items(review_items):
+        kind = item.kind
         if kind not in {"ambiguity", "scope_exception"}:
             continue
-        if kind == "scope_exception" and not _review_requires_human_decision(item):
+        if kind == "scope_exception" and not item.requires_human_decision:
             continue
-        coa_ids = (
-            item.coa_ids
-            if isinstance(item, MappingReviewItem)
-            else item.get("coa_ids", [])
-        )
-        message = (
-            item.message
-            if isinstance(item, MappingReviewItem)
-            else item.get("message", "")
-        )
-        target = coa_ids[0] if coa_ids else "mapping"
+        target = item.coa_ids[0] if item.coa_ids else "mapping"
         rule = "unresolved_ambiguity" if kind == "ambiguity" else "scope_exception"
+        clean_message = item.message.replace("|", "/")
         blockers.append(
-            f"error|{rule}|{target}|message={str(message).replace('|', '/')}"
+            Finding(
+                "error",
+                rule,
+                target,
+                {"message": clean_message},
+                review_item_id=item.review_item_id,
+                legacy_parts=[f"message={clean_message}"],
+            )
         )
     return blockers
 
 
-def _review_item_warnings(review_items) -> list[str]:
+def _review_item_warnings(review_items) -> list[Finding]:
     warnings = []
-    for item in review_items:
-        if _review_kind(item) != "scope_exception":
+    for item in normalize_review_items(review_items):
+        if item.kind != "scope_exception":
             continue
-        if _review_requires_human_decision(item):
+        if item.requires_human_decision:
             continue
-        coa_ids = (
-            item.coa_ids
-            if isinstance(item, MappingReviewItem)
-            else item.get("coa_ids", [])
-        )
-        message = (
-            item.message
-            if isinstance(item, MappingReviewItem)
-            else item.get("message", "")
-        )
-        target = coa_ids[0] if coa_ids else "mapping"
+        target = item.coa_ids[0] if item.coa_ids else "mapping"
+        clean_message = item.message.replace("|", "/")
         warnings.append(
-            f"warning|scope_exclusion|{target}|"
-            f"message={str(message).replace('|', '/')}"
+            Finding(
+                "warning",
+                "scope_exclusion",
+                target,
+                {"message": clean_message},
+                review_item_id=item.review_item_id,
+                legacy_parts=[f"message={clean_message}"],
+            )
         )
     return warnings
 
 
 def _needs_coverage_review(findings) -> bool:
-    return any(_finding_rule(str(item)) in COVERAGE_GAP_RULES for item in findings)
+    typed = _compatibility_findings(findings, default_severity="warning")
+    return any(item.rule in COVERAGE_GAP_RULES for item in typed)
 
 
 def _outcome_from_result(result: dict[str, Any], review_items) -> MappingOutcome:
     if any(
-        _review_kind(item) == "scope_exception"
-        and _review_requires_human_decision(item)
-        for item in review_items
+        item.kind == "scope_exception" and item.requires_human_decision
+        for item in normalize_review_items(review_items)
     ):
         return MappingOutcome.SCOPE_EXCEPTION
     if result.get("errors") or result.get("accepted") is False:
         return MappingOutcome.REJECTED
-    warning_rules = {_finding_rule(item) for item in result.get("warnings", [])}
+    warning_rules = {
+        item.rule
+        for item in _compatibility_findings(
+            result.get("warnings", []), default_severity="warning"
+        )
+    }
     if warning_rules & COVERAGE_GAP_RULES:
         return MappingOutcome.COVERAGE_GAP
     if warning_rules & SOURCE_EXCEPTION_RULES:
@@ -1552,9 +1640,11 @@ def _outcome_from_result(result: dict[str, Any], review_items) -> MappingOutcome
 def _blocking_fingerprint(result: dict[str, Any]) -> tuple[tuple, ...]:
     contexts = result.get("findings") or []
     fingerprint = []
-    for finding in result.get("errors", []):
-        rule = _finding_rule(finding)
-        target = _finding_target(finding)
+    for finding in _compatibility_findings(
+        result.get("errors", []), default_severity="error"
+    ):
+        rule = finding.rule
+        target = finding.target
         rows = sorted({
             row
             for context in contexts
@@ -1562,10 +1652,10 @@ def _blocking_fingerprint(result: dict[str, Any]) -> tuple[tuple, ...]:
             and (not target or target in context.get("coa_ids", []))
             for row in context.get("source_rows", [])
         })
-        details = tuple(sorted(_finding_details(finding).items()))
-        raw = str(finding) if rule == "execution" else ""
+        details = tuple(sorted(finding.details.items()))
+        raw = str(finding.note or "") if rule == "execution" else ""
         fingerprint.append(
-            (_finding_period(finding), rule, target, details, tuple(rows), raw)
+            (finding.period_id, rule, target, details, tuple(rows), raw)
         )
     return tuple(sorted(fingerprint, key=repr))
 
@@ -1591,52 +1681,57 @@ def _numeric_detail(details, key):
 def _structured_exceptions(checks_by_period, period_labels, review_items):
     """Join deterministic exception math to the model's cited treatment."""
     records = []
+    review_items = normalize_review_items(review_items)
     for period_id, checks in checks_by_period.items():
-        for finding in checks:
-            rule = _finding_rule(finding)
+        for finding in _compatibility_findings(
+            checks, default_severity="warning", period_id=period_id
+        ):
+            rule = finding.rule
+            # Source-only controls already carry their own equation and are
+            # not a review of the selected COA mapping. A shared account must
+            # never attach an unrelated selected-layer explanation to them.
+            if rule in {"source_control_difference", "source_control_unverified"}:
+                continue
             if rule not in SOURCE_EXCEPTION_RULES | COVERAGE_GAP_RULES:
                 continue
-            target = _finding_target(finding)
-            details = _finding_details(finding)
-            matching_review = next(
-                (
-                    item
-                    for item in review_items
-                    if _review_kind(item) == (
-                        "scope_exception"
-                        if rule == "scope_exclusion"
-                        else "source_discrepancy"
-                    )
-                    and target in (
-                        item.coa_ids
-                        if isinstance(item, MappingReviewItem)
-                        else item.get("coa_ids", [])
-                    )
-                    and (
-                        rule != "source_layer_conflict"
-                        or (
-                            (
-                                item.selected_source_rows
-                                if isinstance(item, MappingReviewItem)
-                                else item.get("selected_source_rows", [])
-                            )
-                            and (
-                                item.coa_ids[0]
-                                if isinstance(item, MappingReviewItem)
-                                else (item.get("coa_ids") or [None])[0]
-                            )
-                            == target
+            target = finding.target
+            details = finding.details
+            matching_review = None
+            if finding.review_item_id:
+                matching_review = next(
+                    (
+                        item
+                        for item in review_items
+                        if item.review_item_id == finding.review_item_id
+                    ),
+                    None,
+                )
+            else:
+                # Compatibility path for v2-v4 logs and raw-string callers.
+                matching_review = next(
+                    (
+                        item
+                        for item in review_items
+                        if item.kind
+                        == (
+                            "scope_exception"
+                            if rule == "scope_exclusion"
+                            else "source_discrepancy"
                         )
-                    )
-                ),
-                None,
-            )
-            if isinstance(matching_review, MappingReviewItem):
+                        and target in item.coa_ids
+                        and (
+                            rule != "source_layer_conflict"
+                            or (
+                                item.selected_source_rows
+                                and (item.coa_ids or [None])[0] == target
+                            )
+                        )
+                    ),
+                    None,
+                )
+            if matching_review:
                 treatment = matching_review.message
                 source_rows = list(matching_review.source_rows)
-            elif matching_review:
-                treatment = str(matching_review.get("message") or "")
-                source_rows = list(matching_review.get("source_rows") or [])
             else:
                 treatment = (
                     "Retain the supported scope exclusion and disclose it for review."
@@ -1668,13 +1763,14 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
                     "equation": details.get("equation"),
                     "treatment": treatment,
                     "source_rows": source_rows,
+                    "review_item_id": finding.review_item_id,
                 }
             )
     return records
 
 
 def _source_layer_conflict_warnings(plan, evidence, values, period_id):
-    """Calculate two typed, disjoint source equations for one COA target."""
+    """Calculate two typed source equations for one COA target."""
     rows = {item["row_key"]: item for item in evidence}
     decisions = {item.coa_id: item for item in plan.decisions}
     warnings = []
@@ -1731,10 +1827,26 @@ def _source_layer_conflict_warnings(plan, evidence, values, period_id):
         if abs(variance) <= _tolerance(selected):
             continue
         warnings.append(
-            f"warning|source_layer_conflict|{target}|"
-            f"actual={selected:.4f}|expected={alternate:.4f}|"
-            f"variance={variance:.4f}|equation=selected mapped layer versus "
-            "typed alternate cited layer"
+            Finding(
+                "warning",
+                "source_layer_conflict",
+                target,
+                {
+                    "actual": selected,
+                    "expected": alternate,
+                    "variance": variance,
+                    "equation": (
+                        "selected mapped layer versus typed alternate cited layer"
+                    ),
+                },
+                period_id=period_id,
+                review_item_id=review.review_item_id,
+                detail_formats={
+                    "actual": ".4f",
+                    "expected": ".4f",
+                    "variance": ".4f",
+                },
+            )
         )
     return warnings
 
@@ -1761,8 +1873,16 @@ def _source_layer_comparison_issues(plan, evidence, values, period_id):
         )
         if not selected_rows <= decision_rows:
             issues.append(
-                f"error|invalid_source_layer_comparison|{target}|"
-                "selected layer is not contained in the mapped target decision"
+                Finding(
+                    "error",
+                    "invalid_source_layer_comparison",
+                    target,
+                    note=(
+                        "selected layer is not contained in the mapped target decision"
+                    ),
+                    period_id=period_id,
+                    review_item_id=review.review_item_id,
+                )
             )
             continue
         try:
@@ -1775,16 +1895,29 @@ def _source_layer_comparison_issues(plan, evidence, values, period_id):
             )
         except (KeyError, TypeError, ValueError) as exc:
             issues.append(
-                f"error|invalid_source_layer_comparison|{target}|"
-                f"selected layer cannot be calculated: {exc}"
+                Finding(
+                    "error",
+                    "invalid_source_layer_comparison",
+                    target,
+                    note=f"selected layer cannot be calculated: {exc}",
+                    period_id=period_id,
+                    review_item_id=review.review_item_id,
+                )
             )
             continue
         mapped = float(values[target])
         if selected is not None and abs(mapped - selected) > _tolerance(mapped):
             issues.append(
-                f"error|invalid_source_layer_comparison|{target}|"
-                f"mapped={mapped:.4f}|selected_equation={selected:.4f}|"
-                "typed selected layer does not equal the mapped target"
+                Finding(
+                    "error",
+                    "invalid_source_layer_comparison",
+                    target,
+                    {"mapped": mapped, "selected_equation": selected},
+                    "typed selected layer does not equal the mapped target",
+                    period_id,
+                    review.review_item_id,
+                    detail_formats={"mapped": ".4f", "selected_equation": ".4f"},
+                )
             )
     return issues
 
@@ -1798,30 +1931,30 @@ def _source_layer_value(
 ):
     if operation is None:
         raise ValueError("missing source-layer operation")
+    try:
+        operation = SourceLayerOperation(operation)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"unsupported source-layer operation {operation}"
+        ) from exc
     included = [_row_value(rows, row, period_id=period_id) for row in source_rows]
     excluded = [_row_value(rows, row, period_id=period_id) for row in excluded_rows]
-    if any(value is None for value in [*included, *excluded]):
-        return None
-    if operation == SourceLayerOperation.DIRECT:
-        if len(included) != 1:
-            raise ValueError("direct requires one row")
-        return float(included[0])
-    if operation == SourceLayerOperation.SUM:
-        return sum(float(value) for value in included)
-    if operation == SourceLayerOperation.ADJUSTED_SUBTOTAL:
-        return sum(float(value) for value in included) - sum(
-            float(value) for value in excluded
-        )
-    if operation == SourceLayerOperation.NEGATE:
-        return -sum(float(value) for value in included)
-    raise ValueError(f"unsupported source-layer operation {operation}")
+    return evaluate_operation(
+        operation,
+        included,
+        excluded,
+        missing_value_policy=MissingValuePolicy.PROPAGATE,
+        empty_value=0.0,
+    )
 
 
 def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
     """Rank executable plans by the accounting priorities used by the mapper."""
     errors = [
-        _finding_rule(item)
-        for item in result.get("errors", [])
+        item.rule
+        for item in _compatibility_findings(
+            result.get("errors", []), default_severity="error"
+        )
     ]
     warnings = result.get("warnings", [])
     summary_math = sum(rule == "summary_math" for rule in errors)
@@ -1841,7 +1974,6 @@ def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
     hierarchy = sum(
         rule in {
             "coverage",
-            "duplicate_decision",
             "hierarchy_complete",
             "hierarchy_partial_with_residual",
             "coverage_inconsistent",
@@ -1862,28 +1994,28 @@ def _validation_score(result: dict[str, Any]) -> tuple[int, ...]:
     )
 
 
-@lru_cache(maxsize=1)
 def _validation_rule_guidance() -> dict[str, dict[str, str]]:
-    text = resources.files("hotel_pl_normalizer.prompts").joinpath(
-        "validation_feedback.md"
-    ).read_text(encoding="utf-8")
-    guidance = {}
-    pattern = re.compile(
-        r"### `([^`]+)`\s+Description:\s*(.*?)\s+Resolution:\s*(.*?)(?=\n### `|\Z)",
-        re.DOTALL,
-    )
-    for rule, description, resolution in pattern.findall(text):
-        guidance[rule] = {
-            "description": " ".join(description.split()),
-            "resolution": " ".join(resolution.split()),
+    return {
+        rule: {
+            "description": policy.description,
+            "resolution": policy.resolution,
         }
-    return guidance
+        for rule in rules_for()
+        for policy in [get_rule_policy(rule)]
+    }
 
 
-def _finding_context(finding, plan, evidence_rows, coa):
-    rule = _finding_rule(finding)
-    target = _finding_target(finding)
-    coa_ids = [coa_id for coa_id in coa if coa_id in finding]
+def _finding_context(finding: Finding, plan, evidence_rows, coa):
+    rule = finding.rule
+    target = finding.target
+    searchable = " ".join(
+        [
+            target,
+            str(finding.note or ""),
+            *(str(value) for value in finding.details.values()),
+        ]
+    )
+    coa_ids = [coa_id for coa_id in coa if coa_id in searchable]
     if target in coa and target not in coa_ids:
         coa_ids.insert(0, target)
     if rule in {
@@ -1901,7 +2033,7 @@ def _finding_context(finding, plan, evidence_rows, coa):
         )
         coa_ids = list(dict.fromkeys(coa_ids))
     known_rows = {str(item.get("row_key")) for item in evidence_rows}
-    explicit_rows = [row for row in known_rows if row in finding]
+    explicit_rows = [row for row in known_rows if row in searchable]
     decisions = {item.coa_id: item for item in plan.decisions}
     cited_rows = []
     for coa_id in coa_ids:
@@ -1913,12 +2045,7 @@ def _finding_context(finding, plan, evidence_rows, coa):
         for row in dict.fromkeys([*explicit_rows, *cited_rows])
         if row in known_rows
     ]
-    details = {
-        key.strip(): value.strip()
-        for part in str(finding).split("|")[3:]
-        if "=" in part
-        for key, value in [part.split("=", 1)]
-    }
+    details = dict(finding.details)
     context = {
         "rule": rule,
         "coa_ids": coa_ids,
@@ -1942,7 +2069,7 @@ def _finding_context(finding, plan, evidence_rows, coa):
             context["validation_math"] = (
                 f"children are {abs(difference):,.2f} {direction} parent"
             )
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     elif rule in {"summary_department", "summary_math"} and {
         "actual",
@@ -1959,7 +2086,7 @@ def _finding_context(finding, plan, evidence_rows, coa):
                 if rule == "summary_math"
                 else f"{subject} is {abs(difference):,.2f} {direction} department"
             )
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     if rule == "summary_department":
         candidates = _offset_candidates(finding, plan, evidence_rows, coa)
@@ -1986,20 +2113,15 @@ OFFSET_LABEL_TERMS = (
 
 def _offset_candidates(finding, plan, evidence_rows, coa, limit=4):
     """Return a few unused, value-matched rows after a department mismatch."""
-    details = {
-        key.strip(): value.strip()
-        for part in str(finding).split("|")[3:]
-        if "=" in part
-        for key, value in [part.split("=", 1)]
-    }
+    details = finding.details
     try:
         variance = float(details["variance"])
     except (KeyError, ValueError):
         return []
-    if abs(variance) <= 0.005:
+    if abs(variance) <= ZERO_EPSILON:
         return []
 
-    target = _finding_target(finding)
+    target = finding.target
     detail_ids = []
     if target in SUMMARY_LINKS:
         detail_ids.append(SUMMARY_LINKS[target])
@@ -2023,7 +2145,7 @@ def _offset_candidates(finding, plan, evidence_rows, coa, limit=4):
         for decision in plan.decisions
         for row in [*decision.source_rows, *decision.excluded_rows]
     }
-    tolerance = max(5.0, abs(variance) * 0.005)
+    tolerance = offset_match_tolerance(variance)
     matches = []
     for evidence in evidence_rows:
         row_key = str(evidence.get("row_key") or "")
@@ -2069,7 +2191,6 @@ def _offset_candidates(finding, plan, evidence_rows, coa, limit=4):
 
 SOURCE_DISCREPANCY_BLOCKING_RULES = {
     "coverage",
-    "duplicate_decision",
     "hierarchy_complete",
     "hierarchy_partial_with_residual",
     "coverage_inconsistent",
@@ -2077,23 +2198,18 @@ SOURCE_DISCREPANCY_BLOCKING_RULES = {
 }
 
 
-def _finding_details(finding):
-    return {
-        key.strip(): value.strip()
-        for part in str(finding).split("|")[3:]
-        if "=" in part
-        for key, value in [part.split("=", 1)]
-    }
-
-
 def _qualify_source_discrepancies(
     checks, plan, evidence, coa, history, period_label, calculation_issues
 ):
     """Downgrade only a repeated, independently supported source mismatch."""
+    checks = _compatibility_findings(checks, default_severity="error")
     if calculation_issues or any(
-        item.startswith("error|summary_math|")
-        or item.startswith("error|source_row_")
-        or item.startswith("error|invalid_source_layer_comparison|")
+        item.severity == "error"
+        and (
+            item.rule == "summary_math"
+            or item.rule.startswith("source_row_")
+            or item.rule == "invalid_source_layer_comparison"
+        )
         for item in checks
     ):
         return checks
@@ -2106,9 +2222,10 @@ def _qualify_source_discrepancies(
     unqualified_expense_targets = set()
     output = []
     for finding in checks:
-        target = _finding_target(finding)
+        target = finding.target
         if not (
-            finding.startswith("error|summary_department|")
+            finding.severity == "error"
+            and finding.rule == "summary_department"
             and target != "S12.total_departmental_expenses"
         ):
             output.append(finding)
@@ -2121,24 +2238,24 @@ def _qualify_source_discrepancies(
             if target in DEPARTMENTAL_EXPENSE_SUMMARY_TARGETS:
                 unqualified_expense_targets.add(target)
             continue
-        qualified[target] = float(_finding_details(finding)["variance"])
+        qualified[target] = float(finding.details["variance"])
         output.append(warning)
 
     aggregate = next(
         (
             item
             for item in output
-            if item.startswith(
-                "error|summary_department|S12.total_departmental_expenses|"
-            )
+            if item.severity == "error"
+            and item.rule == "summary_department"
+            and item.target == "S12.total_departmental_expenses"
         ),
         None,
     )
     if aggregate and not unqualified_expense_targets:
-        details = _finding_details(aggregate)
+        details = aggregate.details
         try:
             aggregate_variance = float(details["variance"])
-        except (KeyError, ValueError):
+        except (KeyError, TypeError, ValueError):
             aggregate_variance = None
         component_variance = sum(
             qualified.get(target, 0.0)
@@ -2152,12 +2269,12 @@ def _qualify_source_discrepancies(
         ):
             output.remove(aggregate)
             output.append(
-                aggregate.replace(
-                    "error|summary_department|",
-                    "warning|source_discrepancy|",
-                    1,
+                aggregate.downgrade(
+                    rule="source_discrepancy",
+                    note=(
+                        "component source discrepancies explain the aggregate difference"
+                    ),
                 )
-                + "|component source discrepancies explain the aggregate difference"
             )
     return _collapse_qualified_source_warnings(output)
 
@@ -2167,24 +2284,24 @@ def _collapse_qualified_source_warnings(checks):
     qualified = [
         item
         for item in checks
-        if _finding_rule(item) in {
+        if item.rule in {
             "source_discrepancy",
             "source_presentation_exception",
         }
     ]
     output = []
     for finding in checks:
-        if _finding_rule(finding) != "source_layer_conflict":
+        if finding.rule != "source_layer_conflict":
             output.append(finding)
             continue
-        target = _finding_target(finding)
-        variance = _numeric_detail(_finding_details(finding), "variance")
+        target = finding.target
+        variance = _numeric_detail(finding.details, "variance")
         duplicate = any(
-            _finding_target(root) == target
+            root.target == target
             and variance is not None
             and (
                 root_variance := _numeric_detail(
-                    _finding_details(root), "variance"
+                    root.details, "variance"
                 )
             ) is not None
             and abs(root_variance - variance) <= _tolerance(variance)
@@ -2214,22 +2331,27 @@ def _qualify_combined_ood_misc_presentation(
     }:
         return checks
     if any(
-        item.startswith("error|summary_combined_ood_misc|")
-        or item.startswith("error|summary_combined_ood_misc_inactive_bucket|")
+        item.severity == "error"
+        and item.rule
+        in {
+            "summary_combined_ood_misc",
+            "summary_combined_ood_misc_inactive_bucket",
+        }
         for item in checks
     ):
         return checks
 
     findings = {
-        _finding_target(item): item
+        item.target: item
         for item in checks
-        if item.startswith("error|summary_department|")
-        and _finding_target(item) in OOD_MISC_SUMMARY_LINKS
+        if item.severity == "error"
+        and item.rule == "summary_department"
+        and item.target in OOD_MISC_SUMMARY_LINKS
     }
     if set(findings) != set(OOD_MISC_SUMMARY_LINKS):
         return checks
 
-    details = {target: _finding_details(item) for target, item in findings.items()}
+    details = {target: item.details for target, item in findings.items()}
     try:
         summary_values = {
             target: float(item["actual"]) for target, item in details.items()
@@ -2240,7 +2362,7 @@ def _qualify_combined_ood_misc_presentation(
         variances = {
             target: float(item["variance"]) for target, item in details.items()
         }
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return checks
 
     active_target = (
@@ -2260,9 +2382,13 @@ def _qualify_combined_ood_misc_presentation(
         or abs(sum(variances.values())) > _tolerance(detail_total)
     ):
         return checks
+    period_keys = {period_label}
+    period_keys.update(
+        item.period_id for item in findings.values() if item.period_id
+    )
     if not all(
         _same_discrepancy_was_previously_blocking(
-            history, period_label, target, variances[target]
+            history, period_keys, target, variances[target]
         )
         for target in OOD_MISC_SUMMARY_LINKS
     ):
@@ -2313,17 +2439,16 @@ def _qualify_combined_ood_misc_presentation(
         return checks
 
     return [
-        (
-            item.replace(
-                "error|summary_department|",
-                "warning|source_presentation_exception|",
-                1,
-            )
-            + "|operator Summary combines OOD and Misc while detailed schedules "
-            "report them separately"
-            if item in findings.values()
-            else item
+        item.downgrade(
+            rule="source_presentation_exception",
+            note=(
+                "operator Summary combines OOD and Misc while detailed schedules "
+                "report them separately"
+            ),
+            review_item_id=review.review_item_id,
         )
+        if item in findings.values()
+        else item
         for item in checks
     ]
 
@@ -2347,27 +2472,30 @@ DEPARTMENTAL_EXPENSE_SUMMARY_TARGETS = {
 
 
 def _qualified_source_discrepancy_warning(
-    finding, plan, evidence, coa, history, period_label, checks
+    finding: Finding, plan, evidence, coa, history, period_label, checks
 ):
-    target = _finding_target(finding)
-    details = _finding_details(finding)
+    target = finding.target
+    details = finding.details
     try:
         variance = float(details["variance"])
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return None
     typed_current_match = any(
-        _finding_rule(item) == "source_layer_conflict"
-        and _finding_target(item) == target
+        item.rule == "source_layer_conflict"
+        and item.target == target
         and (
             typed_variance := _numeric_detail(
-                _finding_details(item), "variance"
+                item.details, "variance"
             )
         ) is not None
         and abs(typed_variance - variance) <= _tolerance(variance)
         for item in checks
     )
+    period_keys = {period_label}
+    if finding.period_id:
+        period_keys.add(finding.period_id)
     if not typed_current_match and not _same_discrepancy_was_previously_blocking(
-        history, period_label, target, variance
+        history, period_keys, target, variance
     ):
         return None
 
@@ -2406,11 +2534,10 @@ def _qualified_source_discrepancy_warning(
         return None
     if _related_hierarchy_is_blocking(checks, detail_ids, coa):
         return None
-    return (
-        finding.replace(
-            "error|summary_department|", "warning|source_discrepancy|", 1
-        )
-        + "|independently reported source layers do not reconcile"
+    return finding.downgrade(
+        rule="source_discrepancy",
+        note="independently reported source layers do not reconcile",
+        review_item_id=review.review_item_id,
     )
 
 
@@ -2421,19 +2548,22 @@ def _decision_source_set(decision):
 
 
 def _same_discrepancy_was_previously_blocking(
-    history, period_label, target, variance
+    history, period_ids, target, variance
 ):
+    period_ids = {str(item) for item in period_ids if item}
     for result in history:
-        for finding in result.get("errors", []):
+        for finding in _compatibility_findings(
+            result.get("errors", []), default_severity="error"
+        ):
             if (
-                _finding_rule(finding) != "summary_department"
-                or _finding_target(finding) != target
-                or _finding_period(finding) != period_label
+                finding.rule != "summary_department"
+                or finding.target != target
+                or finding.period_id not in period_ids
             ):
                 continue
             try:
-                prior_variance = float(_finding_details(finding)["variance"])
-            except (KeyError, ValueError):
+                prior_variance = float(finding.details["variance"])
+            except (KeyError, TypeError, ValueError):
                 continue
             if abs(prior_variance - variance) <= _tolerance(variance):
                 return True
@@ -2442,11 +2572,11 @@ def _same_discrepancy_was_previously_blocking(
 
 def _related_hierarchy_is_blocking(checks, detail_ids, coa):
     for finding in checks:
-        if not finding.startswith("error|"):
+        if finding.rule == "execution" or finding.severity != "error":
             continue
-        if _finding_rule(finding) not in SOURCE_DISCREPANCY_BLOCKING_RULES:
+        if finding.rule not in SOURCE_DISCREPANCY_BLOCKING_RULES:
             continue
-        target = _finding_target(finding)
+        target = finding.target
         if any(
             target == detail_id
             or _accounts_share_lineage(target, detail_id, coa)
@@ -2458,7 +2588,7 @@ def _related_hierarchy_is_blocking(checks, detail_ids, coa):
 
 def _compact_validation_feedback(previous, current, plan, evidence, coa, action):
     findings = _finding_texts(current)
-    rules = list(dict.fromkeys(_finding_rule(item) for item in findings))
+    rules = list(dict.fromkeys(item.rule for item in findings))
     guidance = _validation_rule_guidance()
     output = {
         "findings": _compact_finding_contexts(findings, plan, evidence, coa),
@@ -2471,7 +2601,7 @@ def _compact_validation_feedback(previous, current, plan, evidence, coa, action)
     hypothesis = action.get("repair_hypothesis")
     expected_fix = action.get("expected_fix")
     if hypothesis and expected_fix:
-        previous_rules = {_finding_rule(item) for item in _finding_texts(previous)}
+        previous_rules = {item.rule for item in _finding_texts(previous)}
         current_rules = set(rules)
         output["repair_tracking"] = {
             "repair_hypothesis": hypothesis,
@@ -2489,7 +2619,7 @@ def _compact_finding_contexts(findings, plan, evidence, coa):
     positions = {}
     for finding in findings:
         context = _finding_context(finding, plan, evidence, coa)
-        period = _finding_period(finding)
+        period = finding.period_id
         key = json.dumps(context, sort_keys=True)
         if key not in positions:
             positions[key] = len(compact)
@@ -2505,91 +2635,6 @@ def _compact_finding_contexts(findings, plan, evidence, coa):
         if len(periods) > 1:
             context["periods"] = periods
     return compact
-
-
-def _finding_period(finding):
-    positions = [
-        position
-        for marker in ("error|", "warning|")
-        if (position := str(finding).find(marker)) >= 0
-    ]
-    if not positions:
-        return None
-    prefix = str(finding)[: min(positions)].strip()
-    return prefix[:-1].strip() if prefix.endswith(":") else None
-
-
-SUMMARY_LINKS = {
-    "S12.total_rooms_revenue": "S1.total_rooms_revenue",
-    "S12.total_rooms_expenses": "S1.total_rooms_expenses",
-    "S12.total_food_and_beverage_revenue": "S2.total_food_and_beverage_revenue",
-    "S12.total_food_and_beverage_expenses": "S2.total_food_and_beverage_expenses",
-    "S12.total_other_operated_departments_expenses": "S3.total_other_operated_departments_expenses",
-    "S12.total_administrative_and_general_expenses": "S5.total_administrative_and_general_expenses",
-    "S12.total_information_and_telecommunications_systems_expenses": "S6.total_information_and_telecommunications_systems_expenses",
-    "S12.total_sales_and_marketing_expenses": "S7.total_sales_and_marketing_expenses",
-    "S12.total_property_operation_and_maintenance_expenses": "S8.total_property_operation_and_maintenance_expenses",
-    "S12.total_utilities_expenses": "S9.total_utilities_expenses",
-    "S12.total_management_fees": "S10.total_management_fees",
-    "S12.total_non_operating_income_and_expenses": "S11.total_non_operating_income_and_expenses",
-}
-
-
-DERIVED_SUMMARY_LINKS = {
-    **SUMMARY_LINKS,
-    "S12.total_other_operated_departments_revenue": "S3.total_other_operated_departments_revenue",
-    "S12.total_miscellaneous_income": "S4.total_miscellaneous_income",
-    "S12.non_operating_income": "S11.non_operating_income",
-    "S12.rent": "S11.rent",
-    "S12.property_and_other_taxes": "S11.property_and_other_taxes",
-    "S12.insurance": "S11.insurance",
-    "S12.other": "S11.other",
-}
-
-
-SUMMARY_EQUATIONS = {
-    "S12.total_revenue": [
-        (1, "S12.total_rooms_revenue"),
-        (1, "S12.total_food_and_beverage_revenue"),
-        (1, "S12.total_other_operated_departments_revenue"),
-        (1, "S12.total_miscellaneous_income"),
-    ],
-    "S12.total_departmental_expenses": [
-        (1, "S12.total_rooms_expenses"),
-        (1, "S12.total_food_and_beverage_expenses"),
-        (1, "S12.total_other_operated_departments_expenses"),
-    ],
-    "S12.departmental_profit": [
-        (1, "S12.total_revenue"),
-        (-1, "S12.total_departmental_expenses"),
-    ],
-    "S12.total_undistributed_expenses": [
-        (1, "S12.total_administrative_and_general_expenses"),
-        (1, "S12.total_information_and_telecommunications_systems_expenses"),
-        (1, "S12.total_sales_and_marketing_expenses"),
-        (1, "S12.total_property_operation_and_maintenance_expenses"),
-        (1, "S12.total_utilities_expenses"),
-    ],
-    "S12.gop": [
-        (1, "S12.departmental_profit"),
-        (-1, "S12.total_undistributed_expenses"),
-    ],
-    "S12.income_after_management_fees": [
-        (1, "S12.gop"),
-        (-1, "S12.total_management_fees"),
-    ],
-    "S12.total_non_operating_income_and_expenses": [
-        (1, "S12.non_operating_income"),
-        (1, "S12.rent"),
-        (1, "S12.property_and_other_taxes"),
-        (1, "S12.insurance"),
-        (1, "S12.other"),
-    ],
-    "S12.ebitda": [
-        (1, "S12.income_after_management_fees"),
-        (-1, "S12.total_non_operating_income_and_expenses"),
-    ],
-}
 
 
 DEPARTMENT_ROOT_IDS = {
@@ -2656,17 +2701,19 @@ SUMMARY_DERIVED_ROW_REUSE = {
 WORKBOOK_MAPPING_PROMPT = resources.files("hotel_pl_normalizer.prompts").joinpath(
     "workbook_mapping.md"
 ).read_text(encoding="utf-8")
+WORKBOOK_DYNAMIC_DATA_MARKER = "## Workbook Data"
 
 
 def map_workbook(
     *,
     workbook_id: str,
     requested_period: str,
-    periods,
-    period_labels: dict[str, str] | None = None,
-    evidence: list[dict],
+    evidence: list[EvidenceRow | dict],
     excluded_sheets: list[str],
     client,
+    period_locations: PeriodLocationSummary | None = None,
+    periods=None,
+    period_labels: dict[str, str] | None = None,
     sheet_routing_context: list[dict] | None = None,
     on_activity=None,
     cancel=None,
@@ -2675,10 +2722,15 @@ def map_workbook(
     initial_usage_count = len(client.usage_history)
     coa = _load_coa()
     period_labels = period_labels or {"selected": requested_period}
+    evidence = ensure_evidence_rows(evidence)
+    if period_locations is None:
+        if periods is None:
+            raise ValueError("map_workbook requires period_locations")
+        period_locations = PeriodLocationSummary.from_excel(periods, period_labels)
     prompt = _primary_prompt(
         workbook_id,
         requested_period,
-        periods,
+        period_locations,
         period_labels,
         evidence,
         coa,
@@ -2748,123 +2800,79 @@ def map_workbook(
         for coa_id in coa
     }
     decisions = _rank_generic_venue_decisions(base_decisions, combined_values)
-    values_by_period = {}
-    checks_by_period = {}
-    execution_issues_by_period = {}
-    residual_plugs_by_period = {}
-    for period_id in period_labels:
-        values, execution_issues = _execute(
-            decisions,
-            evidence,
-            coa,
-            period_id=period_id,
-            preserve_blanks=preserve_blanks,
-        )
-        residual_plugs_by_period[period_id] = _apply_residual_plugs(
-            values,
-            coa,
-            decisions,
-            max_ratio=None,
-            allow_large_negative=False,
-        )
-        unresolved_negative = _unresolved_negative_residuals(
-            values, coa, decisions
-        )
-        values_by_period[period_id] = values
-        execution_issues_by_period[period_id] = execution_issues
-        checks_by_period[period_id] = _validate(
-            _validation_values(values),
-            coa,
-            decisions,
-            plan.strategy,
-            plan.review_items,
-            validator.summary_only_pushdown_rows,
-        )
-        checks_by_period[period_id].extend(
-            _source_layer_conflict_warnings(
-                plan, evidence, values, period_id
-            )
-        )
-        checks_by_period[period_id].extend(
-            _source_layer_comparison_issues(
-                plan, evidence, values, period_id
-            )
-        )
-        checks_by_period[period_id] = _qualify_source_discrepancies(
-            checks_by_period[period_id],
-            plan,
-            evidence,
-            coa,
-            validator.history,
-            period_labels[period_id],
-            execution_issues,
-        )
-        checks_by_period[period_id] = _replace_unresolved_negative_errors(
-            checks_by_period[period_id], unresolved_negative
-        )
-        checks_by_period[period_id].extend(
-            _large_residual_plug_warnings(
-                values,
-                coa,
-                residual_plugs_by_period[period_id],
-            )
-        )
-        checks_by_period[period_id].extend(
-            _unsupported_residual_remainder_warnings(
-                values,
-                coa,
-                decisions,
-            )
-        )
+    final_plan = plan.model_copy(update={"decisions": decisions})
+    checked = run_checks(
+        plan=final_plan,
+        evidence=evidence,
+        coa=coa,
+        period_labels=period_labels,
+        expected_workbook_id=workbook_id,
+        stage="final",
+        preserve_blanks=preserve_blanks,
+        history=validator.history,
+        sheet_routing_context=sheet_routing_context,
+        summary_only_pushdown_rows=validator.summary_only_pushdown_rows,
+    )
+    values_by_period = checked.values_by_period
+    checks_by_period = checked.final_findings_by_period()
+    execution_issues_by_period = checked.execution_issues_by_period
+    residual_plugs_by_period = checked.residual_plugs_by_period
     primary_period_id = next(iter(period_labels))
-    checks_by_period[primary_period_id].extend(
-        _review_item_blockers(plan.review_items)
-    )
-    checks_by_period[primary_period_id].extend(
-        _review_item_warnings(plan.review_items)
-    )
-    checks_by_period[primary_period_id].extend(
-        _period_completeness_issues(plan, evidence, period_labels)
-    )
-    checks_by_period[primary_period_id].extend(
-        _unused_financial_schedule_issues(
-            plan,
-            evidence,
-            sheet_routing_context,
-        )
-    )
     has_coverage_gap = any(
         _needs_coverage_review(period_checks)
         for period_checks in checks_by_period.values()
     )
     if has_coverage_gap and not validator.warning_cleanup_attempted:
         checks_by_period[primary_period_id].append(
-            "error|coverage_review_not_completed|mapping_session|"
-            "the required focused coverage review did not complete"
+            Finding(
+                "error",
+                "coverage_review_not_completed",
+                "mapping_session",
+                note="the required focused coverage review did not complete",
+                period_id=primary_period_id,
+            )
         )
         if validator.stopped_reason is None:
             validator.stopped_reason = "coverage_review_not_completed"
     values = values_by_period[primary_period_id]
     execution_issues = [
+        *checked.execution_issues,
+        *(
         f"{period_labels[period_id]}: {issue}"
         for period_id, issues in execution_issues_by_period.items()
         for issue in issues
+        ),
     ]
     checks = [
-        f"{check}|period={period_labels[period_id]}"
+        check.with_period_label(
+            period_id, period_labels[period_id], as_prefix=False
+        )
         for period_id, period_checks in checks_by_period.items()
         for check in period_checks
     ]
     if repair_truncated:
+        truncated = Finding(
+            "warning",
+            "mapping_repair_truncated",
+            "mapping_session",
+            note=(
+                "A repair response reached its output-token limit; returned the "
+                "best completed mapping from an earlier validation attempt."
+            ),
+            period_id=primary_period_id,
+        )
+        checks_by_period[primary_period_id].append(truncated)
         checks.append(
-            "warning|mapping_repair_truncated|mapping_session|"
-            "A repair response reached its output-token limit; returned the "
-            "best completed mapping from an earlier validation attempt."
+            truncated.with_period_label(
+                primary_period_id,
+                period_labels[primary_period_id],
+                as_prefix=False,
+            )
         )
     accepted = (
         not execution_issues
         and not any(
-            check.startswith("error|")
+            check.severity == "error"
             for period_checks in checks_by_period.values()
             for check in period_checks
         )
@@ -2875,13 +2883,13 @@ def map_workbook(
             check
             for period_checks in checks_by_period.values()
             for check in period_checks
-            if check.startswith("error|")
+            if check.severity == "error"
         ] + list(execution_issues),
         "warnings": [
             check
             for period_checks in checks_by_period.values()
             for check in period_checks
-            if check.startswith("warning|")
+            if check.severity == "warning"
         ],
     }
     outcome = _outcome_from_result(final_result, plan.review_items)
@@ -2902,6 +2910,7 @@ def map_workbook(
         execution_issues=list(execution_issues),
         execution_issues_by_period=execution_issues_by_period,
         review_items=list(plan.review_items),
+        source_controls=list(plan.source_controls),
         accepted=accepted,
         outcome=outcome,
         exceptions=exceptions,
@@ -2917,10 +2926,27 @@ def map_workbook(
         model_calls=model_calls,
         tool_trace=tool_trace,
         mapping_selection={
+            "stable_prompt_prefix": _stable_mapping_prompt_telemetry({
+                coa_id: metadata
+                for coa_id, metadata in coa.items()
+                if coa_id not in DETERMINISTIC_SUMMARY_ACCOUNTS
+            }),
             "selected_validation_attempt": validator.best_validation_attempt,
             "best_validation_attempt": validator.best_validation_attempt,
             "last_validation_attempt": len(validator.history) or None,
             "best_validation_score": list(validator.best_score or ()),
+            **(
+                {
+                    "deterministic_repair_count": len(
+                        validator.deterministic_repairs
+                    ),
+                    "deterministic_repairs": list(
+                        validator.deterministic_repairs
+                    ),
+                }
+                if validator.deterministic_repairs
+                else {}
+            ),
             "used_best_instead_of_last": (
                 validator.best_validation_attempt is not None
                 and validator.best_validation_attempt != len(validator.history)
@@ -2955,7 +2981,7 @@ def map_workbook(
                 }),
             },
             "confirmed_source_discrepancy": any(
-                _finding_rule(check) in SOURCE_EXCEPTION_RULES
+                check.rule in SOURCE_EXCEPTION_RULES
                 for period_checks in checks_by_period.values()
                 for check in period_checks
             ),
@@ -3010,38 +3036,54 @@ def _primary_prompt(
         for coa_id, metadata in coa.items()
         if coa_id not in DETERMINISTIC_SUMMARY_ACCOUNTS
     }
-    coa_lines = _coa_lines(model_coa)
-    period_lines = []
-    period_maps = periods if isinstance(periods, dict) else {"selected": periods}
-    multi_period = len(period_maps) > 1
-    for period_id, period_map in period_maps.items():
-        for selection in [
-            *period_map.sheet_selections,
-            *([period_map.default_selection] if period_map.default_selection else []),
-        ]:
-            prefix = f"{period_id}|" if multi_period else ""
-            period_lines.append(
-                f"{prefix}{selection.sheet_name or '*'}|"
-                f"column={selection.value_column}|{period_labels[period_id]}"
-            )
-    payload = {
+    locations = (
+        periods
+        if isinstance(periods, PeriodLocationSummary)
+        else PeriodLocationSummary.from_excel(periods, period_labels)
+    )
+    period_lines = locations.prompt_lines()
+    multi_period = len(locations.period_ids) > 1
+    dynamic_payload = {
         "workbook_id": workbook_id,
         "requested_period": requested_period,
         "period_columns": period_lines,
-        "coa": coa_lines,
-        "coa_hierarchy_equations": _hierarchy_equations(model_coa),
-        "summary_equations": _summary_equation_lines(),
         "sheets_excluded_as_nonfinancial": excluded_sheets,
         "sheet_routing_context": list(sheet_routing_context or []),
         "workbook_rows": rows,
     }
     if multi_period:
-        payload["selected_periods"] = period_labels
+        dynamic_payload["selected_periods"] = period_labels
+    dynamic_json = json.dumps(dynamic_payload, separators=(",", ":"))
+    return _stable_mapping_prompt_prefix(model_coa) + "," + dynamic_json[1:]
+
+
+def _stable_mapping_prompt_prefix(model_coa: dict[str, dict]) -> str:
+    """Render the workbook-independent beginning of the original JSON payload.
+
+    The returned text deliberately ends before the closing JSON brace. The
+    dynamic workbook fields are appended to that same object, so this is only a
+    key-order change from the pre-split payload rather than new prompt content.
+    """
+
+    reference = {
+        "coa": _coa_lines(model_coa),
+        "coa_hierarchy_equations": _hierarchy_equations(model_coa),
+        "summary_equations": _summary_equation_lines(),
+    }
+    reference_json = json.dumps(reference, separators=(",", ":"))
     return "\n\n".join([
         WORKBOOK_MAPPING_PROMPT.strip(),
-        "## Workbook Data",
-        json.dumps(payload, separators=(",", ":")),
+        WORKBOOK_DYNAMIC_DATA_MARKER,
+        reference_json[:-1],
     ])
+
+
+def _stable_mapping_prompt_telemetry(model_coa: dict[str, dict]) -> dict[str, Any]:
+    encoded = _stable_mapping_prompt_prefix(model_coa).encode("utf-8")
+    return {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "byte_length": len(encoded),
+    }
 
 
 def _execute(
@@ -3077,55 +3119,14 @@ def _execute(
                 _row_value(rows, key, period_id=period_id)
                 for key in decision.excluded_rows
             ]
-            included_numbers = [value for value in included if value is not None]
-            excluded_numbers = [value for value in excluded if value is not None]
-            op = decision.operation
-            if op == SourceOperation.NO_VALUE:
-                value = None if preserve_blanks else 0.0
-            elif op == SourceOperation.DIRECT:
-                if len(included) != 1:
-                    raise ValueError("direct requires one row")
-                value = included[0]
-            elif op == SourceOperation.SUM:
-                value = (
-                    sum(included_numbers)
-                    if included_numbers
-                    else (None if preserve_blanks else 0.0)
-                )
-            elif op == SourceOperation.ADJUSTED_SUBTOTAL:
-                value = (
-                    sum(included_numbers) - sum(excluded_numbers)
-                    if included_numbers or excluded_numbers
-                    else (None if preserve_blanks else 0.0)
-                )
-            elif op == SourceOperation.NEGATE:
-                value = (
-                    -sum(included_numbers)
-                    if included_numbers
-                    else (None if preserve_blanks else 0.0)
-                )
-            elif op == SourceOperation.RATIO:
-                if len(included) != 2:
-                    raise ValueError("ratio requires two rows")
-                if any(value is None for value in included):
-                    value = None if preserve_blanks else 0.0
-                elif included[1] == 0:
-                    raise ValueError("ratio requires two rows and nonzero denominator")
-                else:
-                    value = included[0] / included[1]
-            elif op == SourceOperation.PRODUCT:
-                if any(item is None for item in included):
-                    value = None if preserve_blanks else 0.0
-                else:
-                    value = 1.0
-                    for item in included:
-                        value *= item
-            elif op == SourceOperation.SCALE:
-                value = (
-                    sum(included_numbers) * float(decision.scale_factor)
-                    if included_numbers
-                    else (None if preserve_blanks else 0.0)
-                )
+            value = evaluate_operation(
+                decision.operation,
+                included,
+                excluded,
+                scale_factor=decision.scale_factor,
+                missing_value_policy=MissingValuePolicy.IGNORE,
+                empty_value=None if preserve_blanks else 0.0,
+            )
             values[decision.coa_id] = (
                 None if value is None else float(value)
             )
@@ -3195,20 +3196,19 @@ def _execute(
 def _apply_deterministic_summary_calculations(values, preserve_blanks):
     if not DETERMINISTIC_SUMMARY_ACCOUNTS.intersection(values):
         return
-    total_revenue = values.get("S12.total_revenue")
-    ebitda = values.get("S12.ebitda")
-    if total_revenue is None:
-        reserve = None if preserve_blanks else 0.0
-    else:
-        reserve = 0.04 * float(total_revenue)
-    if "S12.ffe_reserve" in values:
-        values["S12.ffe_reserve"] = reserve
-    if ebitda is None or reserve is None:
-        noi = None if preserve_blanks else 0.0
-    else:
-        noi = float(ebitda) - float(reserve)
-    if "S12.noi" in values:
-        values["S12.noi"] = noi
+    empty_value = None if preserve_blanks else 0.0
+    for target, terms in DETERMINISTIC_CALCULATION_TERMS.items():
+        if target not in values:
+            continue
+        dependencies = [values.get(source) for _, source in terms]
+        values[target] = (
+            sum(
+                coefficient * float(value)
+                for (coefficient, _source), value in zip(terms, dependencies)
+            )
+            if all(value is not None for value in dependencies)
+            else empty_value
+        )
 
 
 def _coa_rollup_dependencies(coa_id):
@@ -3281,6 +3281,9 @@ def _row_value(rows, row_key, *, period_id: str | None = None):
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip().replace(",", "").replace("$", "")
+    # Accounting zero markers are explicit values, unlike an absent cell.
+    if text in {"-", "\u2013", "\u2014", "\u2212"}:
+        return 0.0
     if text.startswith("(") and text.endswith(")"):
         text = f"-{text[1:-1]}"
     return float(text)
@@ -3380,7 +3383,7 @@ def _period_completeness_issues(plan, evidence, period_labels):
                     period_id
                     for period_id in missing_periods
                     if candidate_values[period_id] is not None
-                    and abs(candidate_values[period_id]) > 0.005
+                    and abs(candidate_values[period_id]) > ZERO_EPSILON
                 ]
                 if not fills:
                     continue
@@ -3401,15 +3404,23 @@ def _period_completeness_issues(plan, evidence, period_labels):
                 seen.add(fingerprint)
                 labels = ", ".join(period_labels[period_id] for period_id in fills)
                 issues.append(
-                    f"error|period_detail_available|{decision.coa_id}|"
-                    f"selected_row={selected_key}|candidate_row={candidate_key}|"
-                    f"missing_periods={labels}|candidate matches the selected row "
-                    "where both are populated and supplies missing selected-period detail"
+                    Finding(
+                        "error",
+                        "period_detail_available",
+                        decision.coa_id,
+                        {
+                            "selected_row": selected_key,
+                            "candidate_row": candidate_key,
+                            "missing_periods": labels,
+                        },
+                        "candidate matches the selected row where both are populated "
+                        "and supplies missing selected-period detail",
+                    )
                 )
     return issues
 
 
-def _detail_collapse_issue(plan, evidence):
+def _detail_collapse_issue(plan, evidence) -> Finding | None:
     """Reject a suspicious parent-only plan for a substantively rich workbook.
 
     This coarse safeguard uses only the rows already routed to mapping. It does
@@ -3422,7 +3433,7 @@ def _detail_collapse_issue(plan, evidence):
         and any(
             isinstance(value, (int, float))
             and not isinstance(value, bool)
-            and abs(float(value)) > 0.005
+            and abs(float(value)) > ZERO_EPSILON
             for value in (row.get("selected_values") or {}).values()
         )
     ]
@@ -3445,13 +3456,20 @@ def _detail_collapse_issue(plan, evidence):
     minimum = max(12, 2 * len(rich_sheets))
     if len(active_detail) >= minimum or len(active_detail) >= len(rich_rows) * 0.12:
         return None
-    return (
-        "detail_mapping_collapsed: routing supplied "
-        f"{len(rich_sheets)} substantive sheet(s) with "
-        f"{len(rich_rows)} non-zero labelled rows, but the plan cites only "
-        f"{len(active_detail)} detailed COA account(s) from them; "
-        "map identifiable child accounts instead of collapsing the workbook "
-        "mostly to parents/no_value"
+    return Finding(
+        "error",
+        "detail_mapping_collapsed",
+        "mapping",
+        {
+            "substantive_sheets": len(rich_sheets),
+            "nonzero_labeled_rows": len(rich_rows),
+            "mapped_detail_accounts": len(active_detail),
+            "minimum_detail_accounts": minimum,
+        },
+        (
+            "map identifiable child accounts instead of collapsing the workbook "
+            "mostly to parents/no_value"
+        ),
     )
 
 
@@ -3471,7 +3489,7 @@ def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
         if not any(
             isinstance(value, (int, float))
             and not isinstance(value, bool)
-            and abs(float(value)) > 0.005
+            and abs(float(value)) > ZERO_EPSILON
             for value in values.values()
         ):
             continue
@@ -3492,6 +3510,7 @@ def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
         for item in sheet_routing_context or []
         if str(item.get("sheet_name") or "").strip()
     ]
+    review_items = normalize_review_items(getattr(plan, "review_items", []))
     issues = []
     for routed in sheet_routing_context or []:
         role = getattr(routed.get("role"), "value", routed.get("role"))
@@ -3510,15 +3529,11 @@ def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
         scope_review = next(
             (
                 item
-                for item in getattr(plan, "review_items", [])
-                if _review_kind(item) == "scope_exception"
+                for item in review_items
+                if item.kind == "scope_exception"
                 and any(
                     row_key.rsplit("!", 1)[0].casefold() == sheet_name.casefold()
-                    for row_key in (
-                        item.source_rows
-                        if isinstance(item, MappingReviewItem)
-                        else item.get("source_rows", [])
-                    )
+                    for row_key in item.source_rows
                     if "!" in row_key
                 )
             ),
@@ -3534,11 +3549,25 @@ def _unused_financial_schedule_issues(plan, evidence, sheet_routing_context):
             continue
         context_rows = ",".join(active_rows[:12])
         issues.append(
-            f"error|unused_financial_schedule|{sheet_name}|"
-            "routing classified this selected-period financial sheet as "
-            "department_p_and_l, but no mapping decision cites it and "
-            "duplicate_or_supporting_schedules does not explain which schedule "
-            f"supersedes it|source_rows={context_rows}"
+            Finding(
+                "error",
+                "unused_financial_schedule",
+                sheet_name,
+                {"source_rows": context_rows},
+                (
+                    "routing classified this selected-period financial sheet as "
+                    "department_p_and_l, but no mapping decision cites it and "
+                    "duplicate_or_supporting_schedules does not explain which "
+                    "schedule supersedes it"
+                ),
+                legacy_parts=[
+                    "routing classified this selected-period financial sheet as "
+                    "department_p_and_l, but no mapping decision cites it and "
+                    "duplicate_or_supporting_schedules does not explain which "
+                    "schedule supersedes it",
+                    f"source_rows={context_rows}",
+                ],
+            )
         )
     return issues
 
@@ -3586,11 +3615,13 @@ def _validate(
     for parent, child_ids in children.items():
         decision = by_id.get(parent)
         if decision is None:
-            issues.append(f"error|coverage|{parent}|missing parent decision")
+            issues.append(
+                Finding("error", "coverage", parent, note="missing parent decision")
+            )
             continue
         child_total = sum(values.get(child, 0.0) for child in child_ids)
         variance = values.get(parent, 0.0) - child_total
-        tolerance = _tolerance(values.get(parent, 0.0))
+        tolerance = reconciliation_tolerance(values.get(parent, 0.0))
         residual_ids = [
             child for child in child_ids if _is_residual(coa.get(child, {}))
         ]
@@ -3610,50 +3641,131 @@ def _validate(
                     [parent, *active_children],
                 ):
                     issues.append(
-                        f"warning|small_source_reconciliation_difference|{parent}|"
-                        f"rule=hierarchy_complete|parent={values.get(parent,0.0):.2f}|"
-                        f"children={child_total:.2f}|variance={variance:.2f}|"
-                        "reported parent and cited children differ; preserve both and review"
+                        Finding(
+                            "warning",
+                            "small_source_reconciliation_difference",
+                            parent,
+                            {
+                                "rule": "hierarchy_complete",
+                                "parent": values.get(parent, 0.0),
+                                "children": child_total,
+                                "variance": variance,
+                            },
+                            "reported parent and cited children differ; preserve both and review",
+                            detail_formats={
+                                "parent": ".2f",
+                                "children": ".2f",
+                                "variance": ".2f",
+                            },
+                        )
                     )
                 else:
                     issues.append(
-                        f"error|hierarchy_complete|{parent}|parent={values.get(parent,0.0):.2f}|"
-                        f"children={child_total:.2f}|variance={variance:.2f}|"
-                        f"child_ids={','.join(child_ids)}"
+                        Finding(
+                            "error",
+                            "hierarchy_complete",
+                            parent,
+                            {
+                                "parent": values.get(parent, 0.0),
+                                "children": child_total,
+                                "variance": variance,
+                                "child_ids": ",".join(child_ids),
+                            },
+                            detail_formats={
+                                "parent": ".2f",
+                                "children": ".2f",
+                                "variance": ".2f",
+                            },
+                        )
                     )
         elif coverage == ChildCoverage.PARTIAL:
             if residual_ids:
-                if abs(variance) > 0.005:
+                if abs(variance) > tolerance:
                     issues.append(
-                        f"error|hierarchy_partial_with_residual|{parent}|"
-                        f"parent={values.get(parent,0.0):.2f}|children={child_total:.2f}|"
-                        f"variance={variance:.2f}|residual_ids={','.join(residual_ids)}"
+                        Finding(
+                            "error",
+                            "hierarchy_partial_with_residual",
+                            parent,
+                            {
+                                "parent": values.get(parent, 0.0),
+                                "children": child_total,
+                                "variance": variance,
+                                "residual_ids": ",".join(residual_ids),
+                            },
+                            detail_formats={
+                                "parent": ".2f",
+                                "children": ".2f",
+                                "variance": ".2f",
+                            },
+                        )
                     )
             elif abs(variance) > tolerance:
                 issues.append(
-                    f"warning|source_detail_incomplete|{parent}|partial children "
-                    "and no legitimate residual child|"
-                    f"parent={values.get(parent,0.0):.2f}|children={child_total:.2f}|"
-                    f"variance={variance:.2f}|preserve parent and review"
+                    Finding(
+                        "warning",
+                        "source_detail_incomplete",
+                        parent,
+                        {
+                            "parent": values.get(parent, 0.0),
+                            "children": child_total,
+                            "variance": variance,
+                        },
+                        (
+                            "partial children and no legitimate residual child; "
+                            "preserve parent and review"
+                        ),
+                        detail_formats={
+                            "parent": ".2f",
+                            "children": ".2f",
+                            "variance": ".2f",
+                        },
+                        legacy_parts=[
+                            "partial children and no legitimate residual child",
+                            f"parent={values.get(parent,0.0):.2f}",
+                            f"children={child_total:.2f}",
+                            f"variance={variance:.2f}",
+                            "preserve parent and review",
+                        ],
+                    )
                 )
         elif coverage == ChildCoverage.NOT_PRESENT:
             if active_children:
                 issues.append(
-                    f"error|coverage_inconsistent|{parent}|marked not_present but "
-                    f"active children={','.join(active_children)}"
+                    Finding(
+                        "error",
+                        "coverage_inconsistent",
+                        parent,
+                        {"active_children": ",".join(active_children)},
+                        "marked not_present but active children are populated",
+                        legacy_parts=[
+                            "marked not_present but "
+                            f"active children={','.join(active_children)}"
+                        ],
+                    )
                 )
         else:
             issues.append(
-                f"warning|coverage_unspecified|{parent}|parent must declare "
-                "complete, partial, or not_present child coverage"
+                Finding(
+                    "warning",
+                    "coverage_unspecified",
+                    parent,
+                    note=(
+                        "parent must declare complete, partial, or not_present "
+                        "child coverage"
+                    ),
+                )
             )
         if (
             decision.operation == SourceOperation.NO_VALUE
             and any(abs(values.get(child, 0.0)) > tolerance for child in child_ids)
         ):
             issues.append(
-                f"error|parent_no_value_with_children|{parent}|"
-                f"active_children={','.join(active_children)}"
+                Finding(
+                    "error",
+                    "parent_no_value_with_children",
+                    parent,
+                    {"active_children": ",".join(active_children)},
+                )
             )
 
     for summary_id, department_id in SUMMARY_LINKS.items():
@@ -3742,6 +3854,7 @@ def _validate(
                 by_id, [target, *(source for _, source in terms)]
             ),
         )
+    issues.extend(_kpi_sanity_issues(values))
     _append_equation_issue(
         issues,
         "kpi_math",
@@ -3749,7 +3862,7 @@ def _validate(
         values.get("S12.occupancy", 0.0),
         _safe_ratio(values.get("S12.rooms_sold", 0.0), values.get("S12.rooms_available", 0.0)),
         "rooms_sold / rooms_available",
-        tolerance=0.001,
+        tolerance=KPI_RATIO_TOLERANCE,
     )
     _append_equation_issue(
         issues,
@@ -3758,7 +3871,7 @@ def _validate(
         values.get("S12.adr", 0.0),
         _safe_ratio(values.get("S12.total_rooms_revenue", 0.0), values.get("S12.rooms_sold", 0.0)),
         "rooms_revenue / rooms_sold",
-        tolerance=0.05,
+        tolerance=KPI_CURRENCY_TOLERANCE,
     )
     _append_equation_issue(
         issues,
@@ -3767,12 +3880,16 @@ def _validate(
         values.get("S12.revpar", 0.0),
         _safe_ratio(values.get("S12.total_rooms_revenue", 0.0), values.get("S12.rooms_available", 0.0)),
         "rooms_revenue / rooms_available",
-        tolerance=0.05,
+        tolerance=KPI_CURRENCY_TOLERANCE,
     )
     if values.get("S11.non_operating_income", 0.0) > 1.0:
         issues.append(
-            "error|non_operating_sign|S11.non_operating_income|normalized "
-            "non-operating income must be zero or negative"
+            Finding(
+                "error",
+                "non_operating_sign",
+                "S11.non_operating_income",
+                note="normalized non-operating income must be zero or negative",
+            )
         )
     return issues
 
@@ -3787,15 +3904,34 @@ def _source_row_reuse_issues(
         included = set(decision.source_rows)
         excluded = set(decision.excluded_rows)
         for row in sorted(
-            row for row in included if decision.source_rows.count(row) > 1
+            {
+                row
+                for row in included
+                if decision.source_rows.count(row) > 1
+            }
+            | {
+                row
+                for row in excluded
+                if decision.excluded_rows.count(row) > 1
+            }
         ):
             issues.append(
-                f"error|source_row_repeated|{decision.coa_id}|row={row}|"
-                "the same source row appears more than once in one calculation"
+                Finding(
+                    "error",
+                    "source_row_repeated",
+                    decision.coa_id,
+                    {"row": row},
+                    "the same source row appears more than once in one calculation",
+                )
             )
         for row in sorted(included & excluded):
             issues.append(
-                f"error|source_row_included_and_excluded|{decision.coa_id}|row={row}"
+                Finding(
+                    "error",
+                    "source_row_included_and_excluded",
+                    decision.coa_id,
+                    {"row": row},
+                )
             )
         for row in included:
             uses.setdefault(row, []).append(decision)
@@ -3830,9 +3966,13 @@ def _source_row_reuse_issues(
                 for decision in pair
             })
             issues.append(
-                f"error|source_row_double_count|{row}|"
-                f"coa_ids={','.join(coa_ids)}|"
-                "same included source row is assigned to unrelated accounts"
+                Finding(
+                    "error",
+                    "source_row_double_count",
+                    row,
+                    {"coa_ids": ",".join(coa_ids)},
+                    "same included source row is assigned to unrelated accounts",
+                )
             )
     return issues
 
@@ -3886,7 +4026,6 @@ def _same_department_revenue_expense_derivation(left, right, coa):
             for value in (
                 decision.coa_id,
                 item.get("account_name"),
-                item.get("full_hierarchy_path"),
                 item.get("hierarchy_path"),
             )
         ).lower()
@@ -4068,31 +4207,7 @@ def _accounts_share_dependency_path(left, right, coa):
     Edges point only from a child/component to its parent/total. Two siblings
     may therefore share a downstream total without becoming mutually reusable.
     """
-    edges = {}
-    for coa_id, metadata in coa.items():
-        parent = str(metadata.get("parent_coa_id") or "")
-        if parent:
-            edges.setdefault(coa_id, set()).add(parent)
-    for summary_id, department_id in DERIVED_SUMMARY_LINKS.items():
-        edges.setdefault(department_id, set()).add(summary_id)
-    for target, terms in SUMMARY_EQUATIONS.items():
-        for _sign, source in terms:
-            edges.setdefault(source, set()).add(target)
-
-    def reaches(source, target):
-        pending = [source]
-        visited = {source}
-        while pending:
-            current = pending.pop()
-            for candidate in edges.get(current, ()):
-                if candidate == target:
-                    return True
-                if candidate not in visited:
-                    visited.add(candidate)
-                    pending.append(candidate)
-        return False
-
-    return reaches(left, right) or reaches(right, left)
+    return accounts_share_dependency_path(left, right, coa)
 
 
 def _accounts_share_lineage(left, right, coa):
@@ -4119,16 +4234,12 @@ def _all_source_supported(by_id, coa_ids):
 def _is_small_source_supported_conflict(actual, variance, by_id, coa_ids):
     return (
         _all_source_supported(by_id, coa_ids)
-        and abs(variance) <= max(_tolerance(actual), abs(actual) * 0.0001)
+        and abs(variance) <= source_supported_tolerance(actual)
     )
 
 
 def _children_by_parent(coa):
-    children = {}
-    for item in coa.values():
-        if item.get("parent_coa_id"):
-            children.setdefault(item["parent_coa_id"], []).append(item["coa_id"])
-    return children
+    return children_by_parent(coa)
 
 
 def _validate_ood_misc_summary(values, strategy, issues, by_id):
@@ -4195,14 +4306,21 @@ def _validate_ood_misc_summary(values, strategy, issues, by_id):
         severity = (
             "error"
             if any(
-                abs(value) > 0.005
+                abs(value) > ZERO_EPSILON
                 for value in (summary_ood, summary_misc, detail_ood, detail_misc)
             )
             else "warning"
         )
         issues.append(
-            f"{severity}|ood_misc_summary_mode_unknown|S12|model must determine "
-            "whether Summary presents OOD and Misc separately or combined"
+            Finding(
+                severity,
+                "ood_misc_summary_mode_unknown",
+                "S12",
+                note=(
+                    "model must determine whether Summary presents OOD and Misc "
+                    "separately or combined"
+                ),
+            )
         )
 
 
@@ -4217,20 +4335,48 @@ def _append_equation_issue(
     *,
     source_supported=False,
 ):
-    allowed = _tolerance(actual) if tolerance is None else tolerance
+    allowed = reconciliation_tolerance(actual) if tolerance is None else tolerance
     variance = actual - expected
     if abs(variance) > allowed:
-        if source_supported and abs(variance) <= max(allowed, abs(actual) * 0.0001):
+        if source_supported and abs(variance) <= source_supported_tolerance(actual):
             issues.append(
-                f"warning|small_source_reconciliation_difference|{target}|rule={rule}|"
-                f"actual={actual:.4f}|expected={expected:.4f}|"
-                f"variance={variance:.4f}|equation={expression}|"
-                "reported values differ slightly; preserve them and review"
+                Finding(
+                    "warning",
+                    "small_source_reconciliation_difference",
+                    target,
+                    {
+                        "rule": rule,
+                        "actual": actual,
+                        "expected": expected,
+                        "variance": variance,
+                        "equation": expression,
+                    },
+                    "reported values differ slightly; preserve them and review",
+                    detail_formats={
+                        "actual": ".4f",
+                        "expected": ".4f",
+                        "variance": ".4f",
+                    },
+                )
             )
         else:
             issues.append(
-                f"error|{rule}|{target}|actual={actual:.4f}|expected={expected:.4f}|"
-                f"variance={variance:.4f}|equation={expression}"
+                Finding(
+                    "error",
+                    rule,
+                    target,
+                    {
+                        "actual": actual,
+                        "expected": expected,
+                        "variance": variance,
+                        "equation": expression,
+                    },
+                    detail_formats={
+                        "actual": ".4f",
+                        "expected": ".4f",
+                        "variance": ".4f",
+                    },
+                )
             )
 
 
@@ -4238,8 +4384,63 @@ def _safe_ratio(numerator, denominator):
     return 0.0 if not denominator else numerator / denominator
 
 
+def _kpi_sanity_issues(values):
+    """A KPI can reconcile arithmetically and still exceed physical capacity."""
+    issues = []
+    occupancy = values.get("S12.occupancy")
+    sold = values.get("S12.rooms_sold")
+    available = values.get("S12.rooms_available")
+    if occupancy is not None and occupancy > 1.0:
+        issues.append(Finding(
+            "warning", "occupancy_above_capacity", "S12.occupancy",
+            {"occupancy": occupancy, "rooms_sold": sold, "rooms_available": available},
+            note="Occupancy exceeds 100%; review the cited room counts and source occupancy.",
+        ))
+    if sold is not None and sold > 0 and available is not None and available <= 0:
+        issues.append(Finding(
+            "warning", "invalid_rooms_available", "S12.rooms_available",
+            {"rooms_sold": sold, "rooms_available": available},
+            note="Rooms sold is positive but Rooms Available is zero or negative; review source capacity.",
+        ))
+    return issues
+
+
+def _non_residual_plug_issues(plan, coa):
+    """Do not use a specifically named leaf as an undeclared balancing bucket."""
+    children = _children_by_parent(coa)
+    by_id = {decision.coa_id: decision for decision in plan.decisions}
+    issues = []
+    for decision in plan.decisions:
+        metadata = coa.get(decision.coa_id, {})
+        parent_id = metadata.get("parent_coa_id")
+        parent = by_id.get(parent_id)
+        if (
+            decision.operation != SourceOperation.ADJUSTED_SUBTOTAL
+            or _is_residual(metadata)
+            or children.get(decision.coa_id)
+            or parent is None
+            or parent.operation != SourceOperation.DIRECT
+            or set(decision.source_rows) != set(parent.source_rows)
+        ):
+            continue
+        sibling_rows = {
+            row for child in children.get(parent_id, [])
+            if child != decision.coa_id and child in by_id
+            for row in by_id[child].source_rows
+        }
+        if decision.excluded_rows and set(decision.excluded_rows) <= sibling_rows:
+            issues.append(Finding(
+                "error", "non_residual_plug", decision.coa_id,
+                {"parent": parent_id},
+                note="Use the named account's source row; parent less siblings is not a supported classification.",
+            ))
+    return issues
+
+
 def _tolerance(value):
-    return max(5.0, abs(value) * 0.00001)
+    """Backward-compatible alias for the named reconciliation policy."""
+
+    return reconciliation_tolerance(value)
 
 
 def _format_equation_terms(terms):
@@ -4254,8 +4455,8 @@ def _is_residual(item):
 
 
 def _residual_plug_ratio(plug: float, parent: float) -> float:
-    if abs(parent) <= 0.005:
-        return 0.0 if abs(plug) <= 0.005 else float("inf")
+    if abs(parent) <= ZERO_EPSILON:
+        return 0.0 if abs(plug) <= ZERO_EPSILON else float("inf")
     return abs(plug) / abs(parent)
 
 
@@ -4285,7 +4486,7 @@ def _apply_residual_plugs(
         plug = parent_value - sibling_total - identified_residual
         ratio = _residual_plug_ratio(plug, parent_value)
         if (
-            abs(plug) > 0.005
+            abs(plug) > reconciliation_tolerance(parent_value)
             and (
                 max_ratio is None
                 or ratio < max_ratio
@@ -4317,7 +4518,10 @@ def _unresolved_negative_residuals(values, coa, decisions):
         child_total = sum(float(values.get(child) or 0.0) for child in child_ids)
         plug = float(values.get(parent) or 0.0) - child_total
         ratio = _residual_plug_ratio(plug, float(values.get(parent) or 0.0))
-        if plug < -0.005 and ratio >= RESIDUAL_AUTO_ACCEPT_RATIO:
+        if (
+            plug < -reconciliation_tolerance(float(values.get(parent) or 0.0))
+            and ratio >= RESIDUAL_AUTO_ACCEPT_RATIO
+        ):
             unresolved[parent] = (residual_id, plug, ratio)
     return unresolved
 
@@ -4329,14 +4533,20 @@ def _replace_unresolved_negative_errors(checks, unresolved):
         item
         for item in checks
         if not (
-            item.startswith("error|hierarchy_partial_with_residual|")
-            and _finding_target(item) in unresolved
+            item.severity == "error"
+            and item.rule == "hierarchy_partial_with_residual"
+            and item.target in unresolved
         )
     ]
     output.extend(
-        f"warning|unresolved_negative_residual|{parent}|"
-        f"residual_id={residual_id}|plug={plug:.2f}|ratio={ratio:.4f}|"
-        "negative remainder was not forced into the residual before presentation"
+        Finding(
+            "warning",
+            "unresolved_negative_residual",
+            parent,
+            {"residual_id": residual_id, "plug": plug, "ratio": ratio},
+            "negative remainder was not forced into the residual before presentation",
+            detail_formats={"plug": ".2f", "ratio": ".4f"},
+        )
         for parent, (residual_id, plug, ratio) in unresolved.items()
     )
     return output
@@ -4358,9 +4568,14 @@ def _large_residual_plug_warnings(values, coa, plugs):
         if ratio < RESIDUAL_AUTO_ACCEPT_RATIO:
             continue
         warnings.append(
-            f"warning|large_residual_plug|{parent}|"
-            f"residual_id={residual_id}|plug={plug:.2f}|ratio={ratio:.4f}|"
-            "remaining difference assigned to the residual before presentation"
+            Finding(
+                "warning",
+                "large_residual_plug",
+                parent,
+                {"residual_id": residual_id, "plug": plug, "ratio": ratio},
+                "remaining difference assigned to the residual before presentation",
+                detail_formats={"plug": ".2f", "ratio": ".4f"},
+            )
         )
     return warnings
 
@@ -4389,45 +4604,29 @@ def _unsupported_residual_remainder_warnings(values, coa, decisions):
         ):
             continue
         warnings.append(
-            f"warning|unsupported_residual_remainder|{parent}|"
-            f"residual_id={decision.coa_id}|remainder={remainder:.2f}|"
-            f"ratio={ratio:.4f}|residual value is calculated from a subtotal "
-            "remainder rather than directly identified source detail"
+            Finding(
+                "warning",
+                "unsupported_residual_remainder",
+                parent,
+                {
+                    "residual_id": decision.coa_id,
+                    "remainder": remainder,
+                    "ratio": ratio,
+                },
+                (
+                    "residual value is calculated from a subtotal remainder rather "
+                    "than directly identified source detail"
+                ),
+                detail_formats={"remainder": ".2f", "ratio": ".4f"},
+            )
         )
     return warnings
 
 
 def _load_coa():
-    source = resources.files("hotel_pl_normalizer.data").joinpath(
-        "coa_v2.csv"
-    )
-    rows = {}
-    with source.open("r", encoding="utf-8-sig", newline="") as handle:
-        for order, raw in enumerate(csv.DictReader(handle)):
-            coa_id = raw["coa_id"]
-            rows[coa_id] = {
-                **raw,
-                "_order": order,
-                "is_residual": str(raw.get("is_residual") or "false").strip().lower(),
-            }
-    parent_ids = {
-        item["parent_coa_id"] for item in rows.values() if item["parent_coa_id"]
-    }
-    for coa_id, item in rows.items():
-        item["is_total_line"] = str(coa_id in parent_ids).lower()
-        item["indent_level"] = str(_coa_depth(coa_id, rows))
-    return rows
+    """Compatibility wrapper for callers that historically imported mapper._load_coa."""
 
-
-def _coa_depth(coa_id, coa):
-    depth = 0
-    parent_id = coa[coa_id].get("parent_coa_id")
-    visited = {coa_id}
-    while parent_id and parent_id in coa and parent_id not in visited:
-        visited.add(parent_id)
-        depth += 1
-        parent_id = coa[parent_id].get("parent_coa_id")
-    return depth
+    return load_coa()
 
 
 def _coa_lines(coa):

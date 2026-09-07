@@ -33,7 +33,6 @@ lives on Run Notes; full detail remains in the run log.
 
 from __future__ import annotations
 
-import csv
 import math
 import re
 import tempfile
@@ -48,10 +47,21 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.views import Selection
 
 from hotel_pl_normalizer.atomic import replace_atomically
-from hotel_pl_normalizer.feedback import compose_result_feedback
+from hotel_pl_normalizer.feedback import (
+    FeedbackCompositionError,
+    compose_result_feedback,
+    fallback_feedback_manifest,
+)
 from hotel_pl_normalizer.mapping import (
     DETERMINISTIC_SUMMARY_CALCULATIONS,
     GENERIC_VENUE_SLOTS,
+)
+from hotel_pl_normalizer.mapping.coa import canonical_coa_ids
+from hotel_pl_normalizer.mapping.findings import ensure_finding
+from hotel_pl_normalizer.models.evidence import (
+    EvidenceRow,
+    PdfLineLocator,
+    ensure_evidence_rows,
 )
 from hotel_pl_normalizer.pipeline import NormalizationResult
 
@@ -69,6 +79,9 @@ LABELS_COL = 23            # W
 FEEDBACK_COL = 24          # X
 VENUE_COL = 25             # Y
 MAX_OUTPUT_FILENAME_CHARS = 80
+
+RATIO_ACCOUNTS = frozenset({"S12.occupancy"})
+COUNT_ACCOUNTS = frozenset({"S12.rooms_available", "S12.rooms_sold"})
 
 MODEL_SHEET_PART = "xl/worksheets/sheet3.xml"
 MODEL_SHEET_RELS = "xl/worksheets/_rels/sheet3.xml.rels"
@@ -166,8 +179,7 @@ def _field(item, name, default=None):
 
 
 def _canonical_coa_ids() -> list[str]:
-    with COA_CSV.open(encoding="utf-8-sig", newline="") as handle:
-        return [row["coa_id"] for row in csv.DictReader(handle)]
+    return canonical_coa_ids()
 
 
 def _assert_template_matches(sheet, canonical: list[str]) -> int:
@@ -265,20 +277,16 @@ def _describe_check(check) -> tuple[str, str, str]:
     while the interface still reported a flag count.
     """
     text = str(check)
-    parts = [part for part in text.split("|") if part != ""]
-    if not parts:
+    try:
+        finding = ensure_finding(check)
+    except ValueError:
         return "", "", text
-    severity = parts[0].strip().lower()
+    severity = finding.severity
     if severity not in SEVERITY_ORDER:
         return "", "", text
-    rule = parts[1] if len(parts) > 1 else ""
-    target = parts[2] if len(parts) > 2 else ""
-    details = {
-        key.strip(): value.strip()
-        for part in parts[3:]
-        if "=" in part
-        for key, value in [part.split("=", 1)]
-    }
+    rule = finding.rule
+    target = finding.target
+    details = dict(finding.details)
     if rule in {
         "hierarchy_complete",
         "source_detail_incomplete",
@@ -296,7 +304,7 @@ def _describe_check(check) -> tuple[str, str, str]:
                 f"Rollup warning: Child accounts are {abs(difference):,.0f} "
                 f"{direction} the parent account."
             )
-        except ValueError:
+        except (TypeError, ValueError):
             rendered = "Rollup warning: Child accounts do not reconcile to the parent account."
     elif rule == "source_detail_incomplete":
         rendered = "Rollup warning: Child accounts do not reconcile to the parent account."
@@ -466,264 +474,6 @@ def _describe_check(check) -> tuple[str, str, str]:
     return severity, target, rendered
 
 
-def _clean_feedback_message(message: str, coa: dict[str, dict]) -> str:
-    """Make model-written reviewer messages readable without losing provenance."""
-    text = str(message).strip()
-    for coa_id in sorted(coa, key=len, reverse=True):
-        account_name = str(coa.get(coa_id, {}).get("account_name") or "").strip()
-        replacement = account_name or coa_id.split(".", 1)[-1].replace("_", " ")
-        text = text.replace(coa_id, replacement)
-    # Source references are meaningful evidence, not implementation noise.
-    # Deleting them corrupted messages such as "Outlet1!35 and
-    # RoomService!35 are combined allowances" into "and are combined...".
-    # Keep the reference but spell it in analyst-friendly language.
-    text = re.sub(r"\b([\w&.-]+)!(\d+)\b", r"\1 row \2", text)
-    text = text.replace("no_value", "left blank")
-    text = re.sub(
-        r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b",
-        lambda match: match.group(0).replace("_f_b", " F&B").replace("_", " "),
-        text,
-    )
-    text = re.sub(r"\s+([,.;:])", r"\1", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip(" ,;")
-
-
-def _round_feedback_numbers(message: str) -> str:
-    """Round reviewer figures and omit currency symbols without changing values."""
-
-    def replace(match: re.Match) -> str:
-        number = float(match.group("number").replace(",", ""))
-        return f"{match.group('sign')}{number:,.0f}{match.group('percent')}"
-
-    rounded = re.sub(
-        r"(?<![\w.])(?P<sign>-?)(?P<currency>\$?)"
-        r"(?P<number>\d[\d,]*\.\d+)(?P<percent>%?)(?!\w)",
-        replace,
-        str(message),
-    )
-    return rounded.replace("$", "")
-
-
-def _check_rule_and_details(check) -> tuple[str, dict[str, str]]:
-    parts = [part for part in str(check).split("|") if part != ""]
-    rule = parts[1] if len(parts) > 1 else ""
-    details = {
-        key.strip(): value.strip()
-        for part in parts[3:]
-        if "=" in part
-        for key, value in [part.split("=", 1)]
-    }
-    return rule, details
-
-
-def _compact_period_feedback(rule, entries) -> str:
-    values = []
-    for label, _rendered, details in entries:
-        if rule in {
-            "hierarchy_complete",
-            "source_detail_incomplete",
-            "hierarchy_partial_with_residual",
-        }:
-            try:
-                difference = float(details["children"]) - float(details["parent"])
-                relation = "above" if difference > 0 else "below"
-                values.append(f"{label}: {abs(difference):,.0f} {relation}")
-            except (KeyError, ValueError):
-                values.append(label)
-        elif rule in {
-            "source_layer_conflict",
-            "source_discrepancy",
-            "source_presentation_exception",
-            "summary_department",
-            "summary_math",
-        }:
-            try:
-                values.append(f"{label}: {float(details['variance']):+,.0f}")
-            except (KeyError, ValueError):
-                values.append(label)
-        else:
-            return "\n".join(f"{label} — {rendered}" for label, rendered, _ in entries)
-    prefix = (
-        "Coverage gap: child accounts versus parent"
-        if rule in {
-            "hierarchy_complete",
-            "source_detail_incomplete",
-            "hierarchy_partial_with_residual",
-        }
-        else "Source difference"
-        if rule in {
-            "source_layer_conflict",
-            "source_discrepancy",
-            "source_presentation_exception",
-        }
-        else "Needs review: validation difference"
-    )
-    return f"{prefix} — {'; '.join(values)}."
-
-
-def _feedback(
-    result: NormalizationResult,
-    known_ids: set[str],
-    periods: list[tuple[str, str, dict]],
-) -> tuple[dict[str, list[tuple[int, str]]], list[str]]:
-    """Per-account feedback, plus everything that belongs to no single account."""
-    by_account: dict[str, list[tuple[int, str]]] = {}
-    orphans: list[str] = []
-    multi = len(periods) > 1
-    labels = {period_id: label for period_id, label, _ in periods}
-
-    check_records = []
-    checks_by_period = result.checks_by_period or {
-        periods[0][0]: list(result.checks or [])
-    }
-    for period_id, period_checks in checks_by_period.items():
-        for check in period_checks:
-            severity, target, rendered = _describe_check(check)
-            rule, details = _check_rule_and_details(check)
-            check_records.append(
-                {
-                    "period_id": period_id,
-                    "label": labels[period_id],
-                    "severity": severity,
-                    "target": target,
-                    "rule": rule,
-                    "details": details,
-                    "rendered": rendered,
-                }
-            )
-
-    source_priority = {
-        "source_discrepancy": 0,
-        "source_presentation_exception": 1,
-        "source_layer_conflict": 2,
-    }
-    source_fingerprints = set()
-    deduped_records = []
-    for record in sorted(
-        check_records,
-        key=lambda item: source_priority.get(item["rule"], 99),
-    ):
-        fingerprint = None
-        if record["rule"] in source_priority:
-            try:
-                fingerprint = (
-                    record["period_id"],
-                    record["target"],
-                    round(abs(float(record["details"]["variance"])), 2),
-                )
-            except (KeyError, ValueError):
-                pass
-        if fingerprint is not None and fingerprint in source_fingerprints:
-            continue
-        if fingerprint is not None:
-            source_fingerprints.add(fingerprint)
-        deduped_records.append(record)
-
-    grouped_checks: dict[tuple[str, str, str, str], list[dict]] = {}
-    for record in deduped_records:
-        shape = re.sub(
-            r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?%?",
-            "<n>",
-            record["rendered"],
-        )
-        grouped_checks.setdefault(
-            (record["severity"], record["rule"], record["target"], shape),
-            [],
-        ).append(record)
-    deterministic_review_targets = {
-        record["target"]
-        for record in deduped_records
-        if record["rule"] in set(source_priority) | {"scope_exclusion"}
-    }
-    for (severity, rule, target, _shape), records in grouped_checks.items():
-        rendered = records[0]["rendered"]
-        affected_labels = list(dict.fromkeys(record["label"] for record in records))
-        prefix = ""
-        if len(records) > 1 and len(affected_labels) > 1:
-            line = _compact_period_feedback(
-                rule,
-                [
-                    (record["label"], record["rendered"], record["details"])
-                    for record in records
-                ],
-            )
-        else:
-            if multi and len(affected_labels) < len(periods):
-                prefix = f"{', '.join(affected_labels)} — "
-            line = f"{prefix}{rendered}"
-        if target in known_ids:
-            by_account.setdefault(target, []).append(
-                (SEVERITY_ORDER.get(severity, 2), line)
-            )
-        else:
-            orphans.append(f"{line} [{target}]" if target else line)
-
-    for item in result.review_items or []:
-        message = _clean_feedback_message(
-            str(_field(item, "message", "") or ""), result.coa
-        )
-        if not message:
-            continue
-        kind = str(_field(item, "kind", "") or "")
-        if kind in {"source_discrepancy", "scope_exception"} and any(
-            coa_id in deterministic_review_targets
-            for coa_id in (_field(item, "coa_ids", []) or [])
-        ):
-            continue
-        prefix = (
-            "Review"
-            if kind == "ambiguity"
-            else "Scope decision"
-            if kind == "scope_exception" and _field(
-                item, "requires_human_decision", False
-            )
-            else "Scope note"
-            if kind == "scope_exception"
-            else "Source difference"
-            if kind == "source_discrepancy"
-            else "Mapping treatment"
-            if kind == "unusual_convention"
-            else "Review"
-        )
-        rendered = f"{prefix}: {message}" if kind else message
-        targets = [
-            coa_id
-            for coa_id in (_field(item, "coa_ids", []) or [])
-            if coa_id in known_ids
-        ]
-        if targets:
-            # Keep every affected ID in the run log, but show the human one note
-            # only once. Prefer the Summary account, where reviewers encounter
-            # cross-department presentation decisions first.
-            primary = next(
-                (coa_id for coa_id in targets if coa_id.startswith("S12.")),
-                targets[0],
-            )
-            by_account.setdefault(primary, []).append((2, rendered))
-        else:
-            orphans.append(rendered)
-
-    for issue in result.execution_issues or []:
-        orphans.append(str(issue))
-    for period_id, issues in (result.execution_issues_by_period or {}).items():
-        prefix = f"{labels.get(period_id, period_id)} — " if multi else ""
-        orphans.extend(f"{prefix}{issue}" for issue in issues or [])
-
-    decided = {
-        str(_field(decision, "coa_id", ""))
-        for decision in result.decisions or []
-    }
-    deterministic = set(DETERMINISTIC_SUMMARY_CALCULATIONS)
-    missing_count = len(known_ids - deterministic - decided)
-    if missing_count and (not result.accepted or bool(result.decisions)):
-        orphans.append(
-            f"Mapping incomplete: {missing_count} COA accounts have no submitted mapping decision."
-        )
-
-    return by_account, orphans
-
-
 def _canonical_feedback(
     result: NormalizationResult,
     known_ids: set[str],
@@ -736,6 +486,8 @@ def _canonical_feedback(
     priorities = {"error": 0, "warning": 1, "info": 2}
 
     for finding in bundle.findings:
+        if finding.destination == "internal_only":
+            continue
         if finding.destination == "run_notes":
             orphans.append(finding.rendered_text)
             continue
@@ -759,6 +511,40 @@ def _canonical_feedback(
             f"Mapping incomplete: {missing_count} COA accounts have no submitted mapping decision."
         )
     return by_account, list(dict.fromkeys(orphans))
+
+
+def _fallback_feedback(
+    result: NormalizationResult,
+    error: Exception,
+) -> tuple[dict[str, list[tuple[int, str]]], list[str]]:
+    """Keep presentation defects from destroying a completed mapping.
+
+    The run log already stores the raw checks, review items, and execution
+    issues. This compact manifest makes the fallback and its cause durable,
+    while Run Notes tells the reviewer where the unabridged inputs live.
+    """
+    manifest = fallback_feedback_manifest(result, error)
+    diagnostic = str(manifest["composition_error"])
+    return {}, [
+        "Feedback detail could not be composed; the mapped values were retained. "
+        "Review the raw checks, review items, exceptions, and execution issues in "
+        f"run_log.json. Diagnostic: {diagnostic}"
+    ]
+
+
+def _output_number(
+    coa_id: str,
+    value: object,
+    *,
+    number_format: str = "",
+) -> float:
+    """Preserve precision according to the account's numeric meaning."""
+    number = float(value)
+    if coa_id in RATIO_ACCOUNTS or "%" in number_format:
+        return round(number, 6)
+    if coa_id in COUNT_ACCOUNTS:
+        return round(number)
+    return round(number, 2)
 
 
 def _validation_findings(
@@ -791,15 +577,28 @@ def _plural(count: int, singular: str) -> str:
     return f"{count} {singular}{suffix}"
 
 
-def _money(value) -> str:
+def _source_number(value) -> float | None:
+    """Parse displayed source amounts without treating missing cells as zero."""
     if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "").replace("$", "")
+        if text in {"-", "\u2013", "\u2014", "\u2212"}:
+            return 0.0
+        value = f"-{text[1:-1]}" if text.startswith("(") and text.endswith(")") else text
+    return float(value)
+
+
+def _money(value) -> str:
+    number = _source_number(value)
+    if number is None:
         return "blank"
-    number = float(value)
     rendered = f"${abs(number):,.0f}" if math.isclose(number, round(number), abs_tol=0.005) else f"${abs(number):,.2f}"
     return f"({rendered})" if number < 0 else rendered
 
 
 def _source_value(value, coa_id: str) -> str:
+    value = _source_number(value)
     if value is None:
         return "blank"
     lowered_id = coa_id.lower()
@@ -813,21 +612,40 @@ def _source_value(value, coa_id: str) -> str:
 
 
 def _row_amount(
-    row: dict,
+    row: EvidenceRow | dict | None,
     period: tuple[str, str, dict],
     coa_id: str,
+    operation: str = "direct",
 ) -> str:
+    row = row or {}
+    operation = operation.casefold()
     selected = row.get("selected_values") or row.get("values") or {}
     period_id, _, _ = period
     value = selected.get(period_id)
     if value is None and not selected:
         value = row.get("selected_value", row.get("value"))
+    value = _source_number(value)
+    if coa_id in RATIO_ACCOUNTS:
+        if operation == "ratio":
+            # The cited numerator and denominator are room counts, not ratios.
+            return _source_value(value, "")
+        formats = row.get("selected_value_formats") or {}
+        number_format = formats.get(period_id, row.get("selected_value_format"))
+        if (
+            operation == "direct"
+            and value is not None
+            and 1.0 < float(value) <= 100.0
+            and "%" not in str(number_format or "")
+        ):
+            # Match direct-occupancy normalization for a source reported in
+            # percentage points; Excel percentage cells already store ratios.
+            value = float(value) / 100.0
     return _source_value(value, coa_id)
 
 
 def _mapped_from(
     decision,
-    evidence_by_key: dict[str, dict],
+    evidence_by_key: dict[str, EvidenceRow],
     period: tuple[str, str, dict],
     residual_plug: float | None = None,
 ) -> str:
@@ -836,11 +654,16 @@ def _mapped_from(
 
     def describe(key, prefix: str = "") -> str:
         row_key = str(key)
-        row = evidence_by_key.get(row_key, {})
-        label = str(row.get("label") or row_key).replace("\n", " ").strip()
-        sheet_name = row_key.rsplit("!", 1)[0] if "!" in row_key else "Source"
-        amount = _row_amount(row, period, coa_id)
-        return f"{prefix}{sheet_name} - {label}: {amount}"
+        row = evidence_by_key.get(row_key)
+        label = str(
+            (row.get("label") if row is not None else None) or row_key
+        ).replace("\n", " ").strip()
+        if row is not None and isinstance(row.locator, PdfLineLocator):
+            source_location = row.display
+        else:
+            source_location = row_key.rsplit("!", 1)[0] if "!" in row_key else "Source"
+        amount = _row_amount(row, period, coa_id, operation)
+        return f"{prefix}{source_location} - {label}: {amount}"
 
     operation = str(_field(decision, "operation", "direct") or "direct")
     operation = operation.split(".")[-1]
@@ -881,7 +704,7 @@ def _deterministic_mapped_label(coa_id: str) -> str | None:
     return str(calculation["mapped_label"]) if calculation else None
 
 
-def _inferred_venue_name(decision, evidence_by_key: dict[str, dict]) -> str:
+def _inferred_venue_name(decision, evidence_by_key: dict[str, EvidenceRow]) -> str:
     explicit = str(_field(decision, "venue_name", "") or "").strip()
     if explicit:
         return explicit
@@ -901,7 +724,10 @@ def _inferred_venue_name(decision, evidence_by_key: dict[str, dict]) -> str:
     return ""
 
 
-def _venue_names(by_account: dict, evidence_by_key: dict[str, dict]) -> dict[str, str]:
+def _venue_names(
+    by_account: dict,
+    evidence_by_key: dict[str, EvidenceRow],
+) -> dict[str, str]:
     """Operator venue names, keyed to the food row of each generic slot.
 
     The model tab labels its venue rows from these cells, so a slot with no
@@ -940,21 +766,20 @@ def _run_note_mismatch_counts(result, periods) -> dict[str, int]:
         "summary_math": set(),
         "summary_department": set(),
         "hierarchy": set(),
+        "kpi": set(),
     }
 
     for period_id, checks in period_checks:
         for check in checks or []:
-            parts = str(check).split("|")
-            if len(parts) < 3:
+            try:
+                finding = ensure_finding(check, period_id=period_id)
+            except ValueError:
                 continue
-            rule, target = parts[1], parts[2]
-            details = {
-                key.strip(): value.strip()
-                for part in parts[3:]
-                if "=" in part
-                for key, value in [part.split("=", 1)]
-            }
-            if rule in {"summary_math", "summary_department"}:
+            rule, target = finding.rule, finding.target
+            details = finding.details
+            if rule in {"occupancy_above_capacity", "invalid_rooms_available"}:
+                counts["kpi"].add((period_id, rule, target))
+            elif rule in {"summary_math", "summary_department"}:
                 try:
                     variance = float(details["variance"])
                 except (KeyError, ValueError):
@@ -991,9 +816,14 @@ def _run_note_mismatch_counts(result, periods) -> dict[str, int]:
 def _run_note_mismatches(result, periods) -> list[str]:
     counts = _run_note_mismatch_counts(result, periods)
     return [
-        _plural(counts["summary_math"], "summary math error"),
-        _plural(counts["summary_department"], "summary-to-department error"),
-        _plural(counts["hierarchy"], "material rollup warning"),
+        _plural(counts[name], description)
+        for name, description in (
+            ("summary_math", "summary math error"),
+            ("summary_department", "summary-to-department error"),
+            ("hierarchy", "material rollup warning"),
+            ("kpi", "room KPI warning"),
+        )
+        if counts[name]
     ]
 
 
@@ -1010,7 +840,15 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     findings = _validation_findings(result, periods)
     errors = [finding for finding in findings if finding[0] == "error"]
     warnings = [finding for finding in findings if finding[0] == "warning"]
-    human_notes = len(result.review_items or [])
+    manifest_findings = (result.feedback_manifest or {}).get("findings")
+    if manifest_findings is not None and not any(
+        item.get("destination") != "internal_only" for item in manifest_findings
+    ):
+        warnings = []
+    human_notes = (
+        sum(item.get("destination") != "internal_only" for item in manifest_findings)
+        if manifest_findings is not None else len(result.review_items or [])
+    )
     mismatch_counts = _run_note_mismatch_counts(result, periods)
     status_by_outcome = {
         "clean": "Completed",
@@ -1039,11 +877,7 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         5: ", ".join(label for _, label, _ in periods),
         6: status,
         7: int(result.mapped_account_count),
-        8: (
-            "Every value is calculated by code from cited source rows; "
-            "model-generated numbers are not used. FF&E Reserve is 4% of "
-            "Total Revenue and NOI is EBITDA less that reserve."
-        ),
+        8: "Every value is calculated by code from cited source rows",
     }
     labels = {
         4: "Source file",
@@ -1065,7 +899,7 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         if row_number == 7:
             detail_cell.number_format = "0"
         if row_number == 8:
-            sheet.row_dimensions[row_number].height = 30.0
+            sheet.row_dimensions[row_number].height = 15.0
 
     note_lines = _run_note_mismatches(result, periods)
     note_lines.extend(dict.fromkeys(orphans))
@@ -1164,10 +998,20 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
 
     by_account = {str(_field(d, "coa_id", "")): d for d in result.decisions}
     evidence_by_key = {
-        str(row.get("row_key")): row for row in (result.evidence or [])
+        row.row_key: row for row in ensure_evidence_rows(result.evidence or [])
     }
     known_ids = set(canonical)
-    feedback, orphans = _canonical_feedback(result, known_ids)
+    try:
+        feedback, orphans = _canonical_feedback(result, known_ids)
+    except (
+        FeedbackCompositionError,
+        OutputTemplateError,
+        KeyError,
+        StopIteration,
+        TypeError,
+        ValueError,
+    ) as exc:
+        feedback, orphans = _fallback_feedback(result, exc)
     venues = _venue_names(by_account, evidence_by_key)
     mapped_label_period = _mapped_label_period(periods)
     sheet.cell(
@@ -1183,10 +1027,18 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
             value = values.get(coa_id)
             # Blank, not zero, when a period has no figure: a written zero is a
             # claim that the account was mapped and came to nothing.
-            sheet.cell(
+            target = sheet.cell(
                 row=FIRST_ACCOUNT_ROW + index,
                 column=column,
-                value=None if value is None else round(float(value), 2),
+            )
+            target.value = (
+                None
+                if value is None
+                else _output_number(
+                    coa_id,
+                    value,
+                    number_format=target.number_format,
+                )
             )
     for offset in range(MAX_PERIODS):
         letter = get_column_letter(FIRST_PERIOD_COL + offset)
@@ -1223,7 +1075,7 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
         notes = list(feedback.get(coa_id, []))
         if notes:
             ordered = [
-                _round_feedback_numbers(text)
+                text
                 for _, text in sorted(notes, key=lambda item: item[0])
             ]
             sheet.cell(
@@ -1242,17 +1094,61 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
     _unhide_existing_columns_after(model_sheet, FIRST_PERIOD_COL + MAX_PERIODS - 1)
     _reset_sheet_views(book)
 
+    # openpyxl cannot calculate formulas. Mark their cached values stale and
+    # force Excel-compatible consumers to recalculate the analyst tab on open.
+    book.calculation.calcMode = "auto"
+    book.calculation.fullCalcOnLoad = True
+    book.calculation.forceFullCalc = True
+    book.calculation.calcOnSave = True
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    book.save(path)
-    _restore_template_textbox(path)
+    handle = tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.stem}.",
+        suffix=".xlsx",
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    handle.close()
+    try:
+        book.save(temporary)
+        _restore_template_textbox(temporary)
+        _validate_staged_workbook(temporary)
+        replace_atomically(temporary, path)
+    finally:
+        book.close()
+        temporary.unlink(missing_ok=True)
     return path
+
+
+def _validate_staged_workbook(path: Path) -> None:
+    """Refuse to promote a corrupt or structurally incomplete workbook."""
+    with zipfile.ZipFile(path) as archive:
+        corrupt_part = archive.testzip()
+        if corrupt_part is not None:
+            raise OutputTemplateError(
+                f"Staged output contains a corrupt OOXML part: {corrupt_part}."
+            )
+    staged = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    try:
+        required = {"Run Notes", "COA", "KHP Model Accounts"}
+        missing = required - set(staged.sheetnames)
+        if missing:
+            raise OutputTemplateError(
+                "Staged output is missing required sheet(s): "
+                + ", ".join(sorted(missing))
+            )
+    finally:
+        staged.close()
 
 
 def _reset_sheet_views(book: openpyxl.Workbook) -> None:
     """Open every worksheet at A1 without disturbing its frozen rows/columns."""
-    book.active = 0
+    book.active = book.sheetnames.index("Run Notes")
     for sheet in book.worksheets:
+        for view in sheet.views.sheetView:
+            view.tabSelected = sheet.title == "Run Notes"
         view = sheet.sheet_view
         view.topLeftCell = "A1"
 

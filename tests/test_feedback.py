@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from hotel_pl_normalizer.feedback import (
     MAPPING_TREATMENT,
     SOURCE_PRESENTATION,
@@ -57,7 +59,7 @@ def _check(rule, target, variance, *, parent=None, children=None):
     return "|".join(fields)
 
 
-def _compose(*, checks=None, reviews=None, exceptions=None, issues=None, by_period=None):
+def _compose(*, checks=None, reviews=None, exceptions=None, issues=None, by_period=None, evidence=None):
     return compose_feedback(
         checks_by_period=checks or {},
         review_items=reviews or [],
@@ -66,6 +68,7 @@ def _compose(*, checks=None, reviews=None, exceptions=None, issues=None, by_peri
         execution_issues_by_period=by_period or {},
         period_labels=LABELS,
         coa=COA,
+        evidence_rows=evidence,
     )
 
 
@@ -109,10 +112,10 @@ def test_source_review_joins_period_math_without_repeating_findings():
     finding = bundle.findings[0]
     assert finding.category == SOURCE_PRESENTATION
     assert len(finding.periods) == 2
-    assert "Summary revenue" in finding.rendered_text
+    assert "mapped amount differs from the cited source comparison" in finding.rendered_text
     assert "S12" not in finding.rendered_text
-    assert "Summary row 20" in finding.rendered_text
-    assert "1,250" in finding.rendered_text
+    assert "Summary!20" in finding.source_refs
+    assert "1,250" not in finding.rendered_text  # unverified model amount
     assert "$" not in finding.rendered_text
     assert ".49" not in finding.rendered_text
     assert "43,874 higher in 2025 Actual" in finding.rendered_text
@@ -278,7 +281,7 @@ def test_quantified_sentence_replaces_vague_difference_disclosure_clause():
 
     text = bundle.findings[0].rendered_text
     assert "six-dollar-tens" not in text
-    assert "reported total is retained" in text
+    assert "reported total is retained" not in text
     assert "66 lower in 2025 Actual" in text
 
 
@@ -348,7 +351,7 @@ def test_duplicate_equivalent_exceptions_join_one_check_without_repetition():
         "small_source_reconciliation_difference",
         "actual",
         target,
-        1.0,
+        11.0,
         "The reported total is retained.",
     )
     bundle = _compose(
@@ -357,7 +360,7 @@ def test_duplicate_equivalent_exceptions_join_one_check_without_repetition():
                 _check(
                     "small_source_reconciliation_difference",
                     target,
-                    1.0,
+                    11.0,
                 )
             ]
         },
@@ -367,3 +370,170 @@ def test_duplicate_equivalent_exceptions_join_one_check_without_repetition():
     assert len(bundle.findings) == 1
     assert len(bundle.inputs) == 3
     assert sum(item.status == "superseded_by" for item in bundle.inputs) == 1
+
+
+def _source_comparison_review():
+    return {
+        **_review(
+            "source_discrepancy", "The two source presentations differ.",
+            ["S2.total_food_and_beverage_revenue"],
+            source_rows=["Outlet!10", "Outlet!11", "Outlet!20"],
+        ),
+        "selected_source_rows": ["Outlet!10", "Outlet!11"],
+        "alternate_source_rows": ["Outlet!20"],
+        "selected_source_operation": "sum",
+        "alternate_source_operation": "direct",
+    }
+
+
+def _comparison_evidence(budget=500.0):
+    return [
+        {"row_key": "Outlet!10", "selected_values": {"actual": 60.1, "budget": 300.0}},
+        {"row_key": "Outlet!11", "selected_values": {"actual": 40.34, "budget": 200.0}},
+        {"row_key": "Outlet!20", "selected_values": {"actual": 100.0, "budget": budget}},
+    ]
+
+
+def test_cited_rounding_difference_is_internal_without_validator_exception():
+    bundle = _compose(reviews=[_source_comparison_review()], evidence=_comparison_evidence())
+
+    assert bundle.rendered_count == 0
+    assert bundle.inputs[0].status == "internal_only"
+    finding = bundle.findings[0]
+    assert finding.destination == "internal_only"
+    assert finding.periods[0].variance == pytest.approx(0.44)
+    assert finding.periods[1].variance == 0.0
+    assert finding.explanation
+    assert len(finding.source_refs) == 3
+
+
+@pytest.mark.parametrize("budget", [490.0, None])
+def test_material_or_unknown_second_period_keeps_review_visible(budget):
+    bundle = _compose(reviews=[_source_comparison_review()], evidence=_comparison_evidence(budget))
+    assert bundle.rendered_count == 1
+    assert bundle.inputs[0].status == "rendered"
+    assert "0 higher in 2025 Actual" not in bundle.findings[0].rendered_text
+
+
+def test_missing_period_key_does_not_reuse_primary_value_to_hide_review():
+    evidence = _comparison_evidence()
+    evidence[-1]["selected_values"].pop("budget")
+    evidence[-1]["selected_value"] = 500.0
+    bundle = _compose(reviews=[_source_comparison_review()], evidence=evidence)
+    assert bundle.rendered_count == 1
+
+
+def test_rounding_word_alone_never_hides_a_review():
+    review = _source_comparison_review()
+    review["message"] = "A small rounding difference should be ignored."
+    bundle = _compose(reviews=[review])
+    assert bundle.rendered_count == 1
+
+
+def test_invalid_overlapping_source_comparison_is_not_hidden():
+    review = _source_comparison_review()
+    review["alternate_source_rows"] = ["Outlet!10", "Outlet!11"]
+    review["alternate_source_operation"] = "sum"
+    bundle = _compose(reviews=[review], evidence=_comparison_evidence())
+    assert bundle.rendered_count == 1
+
+
+def test_adjusted_source_comparison_uses_excluded_rows():
+    review = _source_comparison_review()
+    review.update(
+        selected_source_rows=["Outlet!20"], selected_excluded_rows=["Outlet!10"],
+        selected_source_operation="adjusted_subtotal", alternate_source_rows=["Outlet!11"],
+    )
+    bundle = _compose(reviews=[review], evidence=_comparison_evidence())
+    assert bundle.rendered_count == 0
+    assert bundle.findings[0].periods[0].variance == pytest.approx(-0.44)
+
+
+def test_material_validator_conflict_cannot_be_hidden_by_review_equation():
+    review = _source_comparison_review()
+    bundle = _compose(
+        reviews=[review], evidence=_comparison_evidence(),
+        exceptions=[_exception("source_layer_conflict", "actual", review["coa_ids"][0], 50.0, review["message"])],
+    )
+    assert bundle.rendered_count == 1
+
+
+def test_presentation_and_treatment_merge_only_for_the_same_cited_adjustment():
+    discrepancy = _source_comparison_review()
+    evidence = _comparison_evidence(300.0)
+    evidence[-1]["selected_values"]["actual"] = 60.1
+    treatment = _review(
+        "unusual_convention", "The separate service adjustment is included once in the expense rollup.",
+        discrepancy["coa_ids"], source_rows=["Outlet!11"],
+    )
+    unrelated = _review(
+        "source_discrepancy", "A separate schedule has an unresolved conflict.",
+        discrepancy["coa_ids"], source_rows=["Other schedule!40"],
+    )
+    bundle = _compose(reviews=[discrepancy, treatment, unrelated], evidence=evidence)
+    assert bundle.rendered_count == 2
+    merged = next(item for item in bundle.findings if len(item.source_input_ids) == 2)
+    assert merged.explanation == treatment["message"]
+    assert merged.periods[0].variance == pytest.approx(40.34)
+    assert set(merged.source_refs) == set(discrepancy["source_rows"])
+    assert any(item.status == "superseded_by" for item in bundle.inputs)
+
+
+def test_shared_account_and_row_do_not_merge_a_different_adjustment():
+    discrepancy = _source_comparison_review()
+    treatment = _review("unusual_convention", "A different treatment applies.", discrepancy["coa_ids"], source_rows=["Outlet!11"])
+    bundle = _compose(reviews=[discrepancy, treatment], evidence=_comparison_evidence(490.0))
+    assert bundle.rendered_count == 2
+
+
+def test_separate_treatment_survives_rounding_without_a_numeric_warning():
+    review = {**_source_comparison_review(), "mapping_treatment": "The facility fee is included in miscellaneous income."}
+    bundle = _compose(reviews=[review], evidence=_comparison_evidence())
+    finding = bundle.findings[0]
+    assert finding.category == MAPPING_TREATMENT
+    assert bundle.rendered_count == 1
+    assert "facility fee" in finding.rendered_text
+    assert "difference" not in finding.rendered_text
+    assert finding.periods[0].variance == pytest.approx(.44)
+
+
+def test_legacy_adjustment_treatment_reconstructed_from_labels_not_model_prose():
+    review = _source_comparison_review()
+    review.update(selected_source_rows=["Outlet!20"], selected_excluded_rows=["Outlet!10"],
+                  selected_source_operation="adjusted_subtotal", alternate_source_rows=["Outlet!11"])
+    evidence = _comparison_evidence()
+    for row, label in zip(evidence, ["Facility fees", "Operating revenue", "Combined revenue"]):
+        row["label"] = label
+    bundle = _compose(reviews=[review], evidence=evidence)
+    assert bundle.findings[0].category == MAPPING_TREATMENT
+    assert bundle.findings[0].rendered_text == "Mapping treatment: Mapped from Combined revenue, less Facility fees."
+
+
+def test_populated_parent_owns_note_and_combines_unsplit_coverage():
+    parent = "S2.management"
+    review = _review("unusual_convention", "Management wages are mapped without a service/kitchen split.",
+                     [parent, "S2.service_management", "S2.kitchen_management"])
+    bundle = compose_feedback(
+        checks_by_period={"actual": [_check("source_detail_incomplete", parent, 100, parent=100, children=0)]},
+        review_items=[review], exceptions=[], execution_issues=[], execution_issues_by_period={},
+        period_labels=LABELS, coa=COA, values_by_period={"actual": {parent: 100}},
+    )
+    assert bundle.rendered_count == 1
+    finding = bundle.findings[0]
+    assert finding.primary_coa_id == parent
+    assert "No child breakdown mapped: 100 in 2025 Actual" in finding.rendered_text
+    assert "service/kitchen split" in finding.rendered_text
+    assert len(finding.source_input_ids) == 2
+
+
+def test_residual_and_comparison_share_one_note_only_on_the_same_account():
+    target = "S3.total_other_operated_departments_expenses"
+    review = _review("source_discrepancy", "Inactive schedule caused the gap.", [target])
+    bundle = _compose(
+        reviews=[review], exceptions=[_exception("source_layer_conflict", "actual", target, 20,
+                                              review["message"], reported=100, comparison=80)],
+        checks={"actual": [f"warning|unsupported_residual_remainder|{target}|remainder=20|ratio=0.2"]},
+    )
+    assert bundle.rendered_count == 1
+    assert "Inactive" not in bundle.findings[0].rendered_text
+    assert len(bundle.findings[0].source_input_ids) == 3

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import unittest
@@ -100,6 +101,80 @@ def _record() -> WorkbookRecord:
 
 
 class StreamlinedDesignTests(unittest.TestCase):
+    def test_excel_tool_declarations_keep_both_canonical_byte_families(self) -> None:
+        exploration_workbook = SimpleNamespace(
+            path=Path("test.xlsx"),
+            sheets=lambda: [SimpleNamespace(sheet_name="Summary")],
+        )
+        exploration = WorkbookExplorationToolset(exploration_workbook)
+        compact = json.dumps(
+            exploration.declarations(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(len(compact), 3910)
+        self.assertEqual(
+            hashlib.sha256(compact).hexdigest(),
+            "ee68eb35327078d855dc4b229a0fc762311aba691939b3064a686aaefd616f51",
+        )
+
+        sorted_compact = json.dumps(
+            WorkbookExplorationToolset(
+                SimpleNamespace(
+                    path=Path("test.xlsx"),
+                    sheets=lambda: [SimpleNamespace(sheet_name="P&L")],
+                )
+            ).declarations(),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(sorted_compact).hexdigest(),
+            "86fb43dbca08b5e19e25ce3ad8b1f2b4d446e0c93f52c431fb4e0d6d85f3daa4",
+        )
+
+        workbook = _record()
+        workbook.sheets[0].sheet_name = "Summary"
+        workbook.sheets.extend(
+            [
+                WorkbookSheet(
+                    sheet_id=name.lower(),
+                    sheet_name=name,
+                    max_row=0,
+                    max_column=0,
+                )
+                for name in ("Rooms", "Excluded")
+            ]
+        )
+        binding = PeriodBindingToolset(
+            workbook,
+            period_ids=["p1"],
+            financial_sheets=["Summary", "Rooms"],
+        )
+        compact = json.dumps(
+            binding.declarations(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(len(compact), 4093)
+        self.assertEqual(
+            hashlib.sha256(compact).hexdigest(),
+            "f7d29bedf7703592b65342f2c9c0452e2baf85e4a54d2d95a1645719d52e6ae1",
+        )
+        sorted_compact = json.dumps(
+            PeriodBindingToolset(
+                _record(), period_ids=["p1"], financial_sheets=["P&L"]
+            ).declarations(),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(sorted_compact).hexdigest(),
+            "7599b320b23d9ac7194a413e40bac70e9928f2ae74dff94a6cd705182f9ebd48",
+        )
+
     def test_cli_has_no_evaluation_only_routes(self) -> None:
         stdout = StringIO()
         with patch.object(sys, "argv", ["hotel-pl-normalizer", "--help"]):
@@ -109,6 +184,81 @@ class StreamlinedDesignTests(unittest.TestCase):
         help_text = stdout.getvalue()
         self.assertNotIn("--discovery-run", help_text)
         self.assertNotIn("--discover-only", help_text)
+
+    def test_excel_toolsets_share_exact_optional_read_budget_mechanics(self) -> None:
+        class BudgetWorkbook:
+            path = Path("test.xlsx")
+
+            @staticmethod
+            def sheets():
+                return [SimpleNamespace(sheet_name="P&L")]
+
+            @staticmethod
+            def read_rows(sheet_name, start, end):
+                del sheet_name, start, end
+                return []
+
+            @staticmethod
+            def merged_ranges(sheet_name):
+                del sheet_name
+                return []
+
+            @staticmethod
+            def find_text(query, sheet_name):
+                del query, sheet_name
+                return []
+
+        exploration = WorkbookExplorationToolset(BudgetWorkbook(), max_reads=1)
+        unknown = exploration.dispatch(
+            "read_rows", {"sheet_name": "Missing", "start_row": 1}
+        )
+        self.assertFalse(unknown["ok"])
+        self.assertEqual(exploration.reads, 0)
+        self.assertTrue(
+            exploration.dispatch(
+                "read_rows", {"sheet_name": "P&L", "start_row": 1}
+            )["ok"]
+        )
+        self.assertEqual(exploration.reads, 1)
+        self.assertEqual(exploration.max_reads, 1)
+        self.assertEqual(
+            exploration.dispatch("find_text", {"query": "Actual"}),
+            {
+                "ok": False,
+                "error": "Read budget of 1 calls is spent.",
+                "instruction": "Submit what you have and move on.",
+            },
+        )
+
+        binding = PeriodBindingToolset(
+            _record(),
+            period_ids=["p1"],
+            financial_sheets=["P&L"],
+            max_reads=1,
+        )
+        unknown = binding.dispatch(
+            "read_rows", {"sheet_name": "Missing", "start_row": 1}
+        )
+        self.assertFalse(unknown["ok"])
+        self.assertEqual(binding.reads, 0)
+        self.assertTrue(
+            binding.dispatch(
+                "read_rows", {"sheet_name": "P&L", "start_row": 1}
+            )["ok"]
+        )
+        self.assertEqual(binding.reads, 1)
+        self.assertEqual(binding.max_reads, 1)
+        self.assertEqual(
+            binding.dispatch(
+                "column_stats",
+                {"sheet_name": "P&L", "start_row": 1, "end_row": 2},
+            ),
+            {
+                "ok": False,
+                "error": "Read budget of 1 calls is spent.",
+                "instruction": "Submit what you have. A partial answer is useful.",
+            },
+        )
 
     def test_removed_model_members_stay_removed(self) -> None:
         selection_schema = PeriodColumnSelection.model_json_schema()
@@ -265,6 +415,8 @@ class StreamlinedDesignTests(unittest.TestCase):
         structure = accepted["structure"]
         self.assertEqual(structure["controlling_summary_sheet"], "Summary")
         self.assertEqual(len(structure["periods"]), 1)
+        self.assertIs(toolset.terminal_result("submit_periods", accepted), structure)
+        self.assertIs(toolset.terminal_value, structure)
 
     def test_monthly_spread_cannot_control_a_recurring_ptd_ytd_family(self) -> None:
         names = ["2025 Consolidated", "SHG - P12", "QED-P12"]
@@ -919,6 +1071,7 @@ class StreamlinedDesignTests(unittest.TestCase):
 
         self.assertEqual(candidates["B"]["scenario_hints"], ["actual"])
         self.assertEqual(candidates["N"]["scenario_hints"], ["actual"])
+        toolset.dispatch("read_headers", {"sheet_names": ["Summary"]})
         result = toolset.dispatch(
             "submit_layout_bindings",
             {

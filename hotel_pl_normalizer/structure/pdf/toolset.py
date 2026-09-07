@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from statistics import median
 from typing import Any
@@ -14,6 +12,7 @@ from hotel_pl_normalizer.models.pdf import (
     PdfTextLine,
     PdfWord,
 )
+from hotel_pl_normalizer.providers.base import AgentToolset
 
 MAX_LINES_PER_READ = 60
 MAX_REGION_WORDS = 800
@@ -25,16 +24,15 @@ class PdfToolError(ValueError):
     """An actionable error safe to return to a tool-using model."""
 
 
-class PdfInspectionToolset:
+class PdfInspectionToolset(AgentToolset):
     """Read-only PDF tools over positioned source objects.
 
     These tools expose page geometry and displayed text. They deliberately do
     not create worksheets, cells, merged ranges, or inferred table columns.
     """
 
-    cacheable = False
-
     def __init__(self, document: PdfDocumentRecord) -> None:
+        super().__init__()
         self.document = document
         self._words = {
             word.word_id: word
@@ -391,14 +389,6 @@ class PdfInspectionToolset:
                 },
             },
         ]
-
-    def signature(self) -> str:
-        payload = {
-            "document": self.document.document_id,
-            "tools": self.declarations(),
-        }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
     def _page(self, page_number: int) -> PdfPage:
         try:

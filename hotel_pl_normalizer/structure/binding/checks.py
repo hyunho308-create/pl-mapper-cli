@@ -6,8 +6,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from hotel_pl_normalizer.models.binding import PeriodBinding, WorkbookBindings
+from hotel_pl_normalizer.models.period_selection import CanonicalPeriod
 from hotel_pl_normalizer.models.workbook import WorkbookSheet
-from hotel_pl_normalizer.structure.period_headers import column_forbidden_markers
+from hotel_pl_normalizer.structure.period_headers import (
+    column_forbidden_markers,
+    period_column_problem,
+)
 
 
 @dataclass
@@ -28,12 +32,18 @@ def check_bindings(
     *,
     period_ids: list[str],
     financial_sheets: list[str],
+    periods: list[CanonicalPeriod] | None = None,
 ) -> CheckResult:
     """Require one mechanically valid outcome for every routed sheet-period pair."""
 
     result = CheckResult()
     chosen = set(period_ids)
     financial = set(financial_sheets)
+    periods_by_id = {period.period_id: period for period in periods or []}
+    latest_period_year = max(
+        (int(period.end_month[:4]) for period in periods_by_id.values()),
+        default=0,
+    )
     claimed: dict[str, list[PeriodBinding]] = {}
     binding_pairs = Counter(
         (binding.sheet_name, binding.period_id) for binding in submission.bindings
@@ -101,6 +111,20 @@ def check_bindings(
                 "financial period."
             )
             continue
+        period = periods_by_id.get(binding.period_id)
+        if period is not None:
+            identity_problem = period_column_problem(
+                sheet,
+                period,
+                binding.excel_column,
+                latest_period_year=latest_period_year,
+            )
+            if identity_problem is not None:
+                result.rejections.append(
+                    f"Column {binding.excel_column} on {binding.sheet_name!r} "
+                    f"cannot bind {binding.period_id!r}: {identity_problem}."
+                )
+                continue
         claimed.setdefault(binding.sheet_name, []).append(binding)
 
     for item in submission.unavailable:
@@ -135,6 +159,25 @@ def check_bindings(
                     f"{len(periods)} different periods "
                     f"({', '.join(sorted(periods))}). One column holds one period."
                 )
+
+    for period_id, period in periods_by_id.items():
+        confirmation = getattr(period, "department_confirmation", None)
+        if confirmation is None:
+            continue
+        expected_column = confirmation.excel_column.strip().upper()
+        confirmed = [
+            binding
+            for binding in submission.bindings
+            if binding.period_id == period_id
+            and binding.sheet_name == confirmation.sheet_name
+            and binding.excel_column.strip().upper() == expected_column
+        ]
+        if not confirmed:
+            result.rejections.append(
+                f"Discovery confirmed {period_id!r} at "
+                f"{confirmation.sheet_name!r}!{expected_column}; binding must "
+                "retain that exact department location."
+            )
 
     _reject_unbound_sheets(submission, financial_sheets, period_ids, result)
     return result

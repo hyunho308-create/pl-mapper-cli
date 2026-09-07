@@ -315,10 +315,16 @@ class LazyWorkbook:
                 f"{_column_letter(c1 + 1)}{r1 + 1}:{_column_letter(c2)}{r2}"
                 for r1, r2, c1, c2 in getattr(sheet, "merged_cells", [])
             ]
-        index = self._book.sheetnames.index(sheet_name)
+        worksheet = self._book[sheet_name]
+        worksheet_path = str(getattr(worksheet, "_worksheet_path", "")).lstrip("/")
+        if not worksheet_path:
+            return []
         try:
-            with zipfile.ZipFile(self.path) as archive:
-                xml = archive.read(f"xl/worksheets/sheet{index + 1}.xml")
+            # The workbook relationship, not display order, identifies a
+            # worksheet's package part.  They diverge after tab reordering and
+            # in files written by several third-party exporters.
+            with zipfile.ZipFile(self._openpyxl_load.read_path) as archive:
+                xml = archive.read(worksheet_path)
         except (KeyError, OSError, zipfile.BadZipFile):
             return []
         return re.findall(r'<mergeCell ref="([^"]+)"', xml.decode("utf-8", "replace"))

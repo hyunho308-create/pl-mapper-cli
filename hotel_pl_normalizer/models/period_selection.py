@@ -200,8 +200,18 @@ class PeriodColumnSelectionMap(StrictModel):
     notes: list[str] = []
 
 
+class PeriodDepartmentConfirmation(StrictModel):
+    """One exact department amount column confirming a selectable period."""
+
+    sheet_name: str
+    excel_column: str
+    evidence: list[str] = []
+
+
 class PeriodOption(CanonicalPeriod):
-    pass
+    # This is carried through the user-selection boundary so binding can verify
+    # the same location rather than silently replacing discovery's proof.
+    department_confirmation: PeriodDepartmentConfirmation | None = None
 
 
 class PeriodCatalog(StrictModel):

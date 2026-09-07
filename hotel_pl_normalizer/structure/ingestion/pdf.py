@@ -23,7 +23,8 @@ from hotel_pl_normalizer.models.pdf import (
 # A word whose full text matches this grammar is safe to count as a displayed
 # figure. Dates, account codes and text containing letters deliberately do not.
 _NUMBER = re.compile(
-    r"^\s*(?P<open>\()?\s*[$€£¥]?\s*"
+    r"^\s*(?P<open>\()?\s*(?P<leading_before>[-−])?\s*"
+    r"[$€£¥]?\s*(?P<leading_after>[-−])?\s*"
     r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)"
     r"\s*(?P<percent>%)?\s*(?P<trailing>-)?\s*(?P<close>\))?\s*$"
 )
@@ -119,8 +120,16 @@ def parse_displayed_number(text: str) -> tuple[float | None, bool]:
     # Reject mismatched accounting parentheses rather than guessing the sign.
     if bool(match.group("open")) != bool(match.group("close")):
         return None, False
+    leading_signs = bool(match.group("leading_before")) + bool(
+        match.group("leading_after")
+    )
+    if leading_signs > 1 or (leading_signs and match.group("open")):
+        return None, False
     value = float(match.group("number").replace(",", ""))
-    if match.group("open") or match.group("trailing"):
+    # A trailing dash is layout punctuation in the source reports we ingest;
+    # it is not an accounting negative sign.  Only parentheses or an explicit
+    # leading minus make the displayed number negative.
+    if match.group("open") or leading_signs:
         value = -value
     return value, bool(match.group("percent"))
 

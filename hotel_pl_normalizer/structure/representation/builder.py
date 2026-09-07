@@ -153,7 +153,7 @@ def is_technical_label(text: str) -> bool:
         or "fontbold" in normalized
         or "indentlevel" in normalized
         or re.search(r"\[[^\]]+\]\s*\.\s*\[[^\]]+\]", stripped)
-        or (stripped.startswith("<<") and "[" in stripped and "]" in stripped)
+        or stripped.startswith("<<")
         or ("!" in stripped and "$" in stripped)
         or "dep(" in stripped.lower()
         or re.fullmatch(r"[A-Z]{1,4}\d{4,}", compact)

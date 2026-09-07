@@ -19,7 +19,7 @@ from hotel_pl_normalizer.models.exploration import (
     WorkbookRouting,
 )
 from hotel_pl_normalizer.models.workbook import WorkbookRecord
-from hotel_pl_normalizer.providers.base import tool_parameter_schema
+from hotel_pl_normalizer.providers.base import AgentToolset, tool_parameter_schema
 from hotel_pl_normalizer.structure.monthly_spread import (
     MONTHLY_SPREAD_THRESHOLD,
     explicit_month_years,
@@ -47,13 +47,8 @@ def _period_detection_instructions() -> str:
     )
 
 
-class WorkbookExplorationToolset:
+class WorkbookExplorationToolset(AgentToolset):
     """Reader tools plus the two phase submissions, over one open workbook."""
-
-    # The session's opening prompt is the same for a given workbook, but the
-    # tool results are file reads: caching a whole session on the prompt would
-    # serve stale structure if the file were replaced under the same name.
-    cacheable = False
 
     # One controlling summary establishes the catalog. Department sheets only
     # confirm its periods; auxiliary T12/monthly summaries cannot expand it.
@@ -67,25 +62,20 @@ class WorkbookExplorationToolset:
         workbook_record: WorkbookRecord | None = None,
         max_reads: int = 40,
     ) -> None:
+        super().__init__(max_reads=max_reads)
         self.workbook = workbook
         self.workbook_record = workbook_record
         self._record_sheets = {
             sheet.sheet_name: sheet for sheet in (workbook_record.sheets if workbook_record else [])
         }
-        self.max_reads = max_reads
-        self.reads = 0
         self.routing: WorkbookRouting | None = None
         self.submission: WorkbookExploration | None = None
         # Which sheets have actually been opened. Asking for five sheets in the
         # prompt did not produce five: across 29 workbooks, 24 sessions read
         # exactly one before submitting. Text alone does not carry this.
         self.read_sheets: set[str] = set()
-        self.rejections: list[str] = []
         self._sheet_names = [sheet.sheet_name for sheet in workbook.sheets()]
         self._header_value_cache: dict[str, list[str]] = {}
-
-    def signature(self) -> str:
-        return f"exploration:{self.workbook.path.name}"
 
     # -- declarations -----------------------------------------------------
 
@@ -190,8 +180,8 @@ class WorkbookExplorationToolset:
     def terminal_result(self, name: str, result: dict[str, Any]):
         """Ends the session only once phase two is accepted."""
         if name == "submit_periods" and result.get("accepted"):
-            return result.get("structure")
-        return None
+            return self.store_terminal(result.get("structure"))
+        return super().terminal_result(name, result)
 
     # -- tools ------------------------------------------------------------
 
@@ -255,13 +245,9 @@ class WorkbookExplorationToolset:
         }
 
     def _budget_exceeded(self) -> dict[str, Any] | None:
-        if self.reads < self.max_reads:
-            return None
-        return {
-            "ok": False,
-            "error": f"Read budget of {self.max_reads} calls is spent.",
-            "instruction": "Submit what you have and move on.",
-        }
+        return self.read_budget_result(
+            instruction="Submit what you have and move on."
+        )
 
     def _read_rows(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if (spent := self._budget_exceeded()) is not None:
@@ -275,7 +261,7 @@ class WorkbookExplorationToolset:
             }
         start = int(arguments.get("start_row") or 1)
         end = arguments.get("end_row")
-        self.reads += 1
+        self.record_read()
         self.read_sheets.add(sheet_name)
         rows = self.workbook.read_rows(
             sheet_name, start, int(end) if end is not None else None
@@ -304,7 +290,7 @@ class WorkbookExplorationToolset:
                 "error": f"No sheet named {sheet_name!r}.",
                 "instruction": "Use a name from list_sheets, or omit it to search all.",
             }
-        self.reads += 1
+        self.record_read()
         hits = self.workbook.find_text(query, sheet_name)
         self.read_sheets.update(name for name, _ in hits)
         return {
@@ -334,7 +320,7 @@ class WorkbookExplorationToolset:
         try:
             routing = WorkbookRouting.model_validate(arguments)
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
-            self.rejections.append(str(exc))
+            self.record_rejection(str(exc))
             return {
                 "ok": True,
                 "accepted": False,
@@ -346,7 +332,7 @@ class WorkbookExplorationToolset:
             {sheet.sheet_name for sheet in routing.sheets} - set(self._sheet_names)
         )
         if unknown:
-            self.rejections.append(f"unknown sheets: {', '.join(unknown)}")
+            self.record_rejection(f"unknown sheets: {', '.join(unknown)}")
             return {
                 "ok": True,
                 "accepted": False,
@@ -419,7 +405,7 @@ class WorkbookExplorationToolset:
         try:
             found = WorkbookPeriods.model_validate(arguments)
         except Exception as exc:  # noqa: BLE001 - the message goes back to the model
-            self.rejections.append(str(exc))
+            self.record_rejection(str(exc))
             return {
                 "ok": True,
                 "accepted": False,
@@ -445,7 +431,7 @@ class WorkbookExplorationToolset:
                 f"received {anchor!r} with role {received_role!r}. Candidates: "
                 f"{', '.join(summaries) or 'none'}."
             )
-            self.rejections.append(message)
+            self.record_rejection(message)
             return {
                 "ok": True,
                 "accepted": False,
@@ -462,7 +448,7 @@ class WorkbookExplorationToolset:
                 f"Open the header rows of controlling summary {anchor!r} before "
                 "submitting periods."
             )
-            self.rejections.append(message)
+            self.record_rejection(message)
             return {
                 "ok": True,
                 "accepted": False,
@@ -488,7 +474,7 @@ class WorkbookExplorationToolset:
                 f"{required_departments}. Read header rows from: "
                 f"{', '.join(outstanding[:10])}."
             )
-            self.rejections.append(message)
+            self.record_rejection(message)
             return {
                 "ok": True,
                 "accepted": False,
@@ -501,7 +487,7 @@ class WorkbookExplorationToolset:
             anchor, seen_departments
         )
         if controller_problem is not None:
-            self.rejections.append(controller_problem["error"])
+            self.record_rejection(controller_problem["error"])
             return controller_problem
 
         explicit_months = explicit_month_years(self._header_values(anchor))
@@ -519,7 +505,7 @@ class WorkbookExplorationToolset:
                     "period and keep any displayed annual/TTM Total as an additional "
                     f"aggregate. Missing month headers: {missing_months}."
                 )
-                self.rejections.append(message)
+                self.record_rejection(message)
                 return {
                     "ok": True,
                     "accepted": False,
@@ -539,7 +525,7 @@ class WorkbookExplorationToolset:
                 "Remove periods introduced only by auxiliary T12, monthly, trend, "
                 f"or supporting tabs: {', '.join(unanchored)}."
             )
-            self.rejections.append(message)
+            self.record_rejection(message)
             return {
                 "ok": True,
                 "accepted": False,
@@ -560,7 +546,7 @@ class WorkbookExplorationToolset:
                 "These proposed periods were not confirmed on a normal, populated "
                 f"department P&L with matching scenario and coverage: {details}"
             )
-            self.rejections.append(message)
+            self.record_rejection(message)
             return {
                 "ok": True,
                 "accepted": False,

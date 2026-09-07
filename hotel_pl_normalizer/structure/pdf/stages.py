@@ -258,7 +258,6 @@ class PdfExplorationToolset(PdfInspectionToolset):
         self.routing: PdfRouting | None = None
         self.submission: PdfExploration | None = None
         self.period_read_pages: set[int] = set()
-        self.rejections: list[str] = []
 
     def declarations(self) -> list[dict[str, Any]]:
         return [
@@ -295,8 +294,8 @@ class PdfExplorationToolset(PdfInspectionToolset):
 
     def terminal_result(self, name: str, result: dict[str, Any]):
         if name == "submit_periods" and result.get("accepted"):
-            return result.get("structure")
-        return None
+            return self.store_terminal(result.get("structure"))
+        return super().terminal_result(name, result)
 
     def _submit_routing(self, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -345,6 +344,8 @@ class PdfExplorationToolset(PdfInspectionToolset):
                 "coverage but cannot add periods. If the controlling summary itself is a T12 "
                 "or monthly spread, its displayed months are core periods: return every monthly "
                 "amount column plus the displayed TTM/Total amount, never only the aggregate. "
+                "The aggregate spans its displayed months and does not create a synthetic next "
+                "month. "
                 "Enumerate one period per amount anchor; Actual, Budget, Prior and Forecast are "
                 "distinct. Exclude percentages and variances, then call submit_periods."
             ),
@@ -396,6 +397,25 @@ class PdfExplorationToolset(PdfInspectionToolset):
                     "catalog omits displayed months. Return every monthly amount period and "
                     "keep any displayed TTM/Total as an additional aggregate. Missing month "
                     f"headers: {missing_months}."
+                )
+            invented_months = sorted(submitted_months - explicit_months)
+            aggregate_endpoint_errors = [
+                period.period_id
+                for period in periods.periods
+                if period.start_month != period.end_month
+                and (
+                    period.start_month not in explicit_months
+                    or period.end_month not in explicit_months
+                )
+            ]
+            if invented_months or aggregate_endpoint_errors:
+                return self._reject(
+                    "The controlling summary has an explicit monthly spread, but the period "
+                    "catalog invents months or extends an aggregate beyond the displayed "
+                    "range. A TTM/Total column is not a synthetic next month; its range must "
+                    "begin and end on displayed months. Invented monthly headers: "
+                    f"{invented_months}; invalid aggregate periods: "
+                    f"{aggregate_endpoint_errors}."
                 )
 
         department_ranges = self._ranges_for_role("department_p_and_l")
@@ -470,7 +490,7 @@ class PdfExplorationToolset(PdfInspectionToolset):
         ]
 
     def _reject(self, message: str) -> dict[str, Any]:
-        self.rejections.append(message)
+        self.record_rejection(message)
         return {"ok": True, "accepted": False, "error": message}
 
 
@@ -511,8 +531,8 @@ class PdfBindingToolset(PdfInspectionToolset):
         self.submission: PdfBindings | None = None
         self.pending_submission: PdfBindings | None = None
         self.layout_groups: list[dict[str, Any]] | None = None
-        self.binding_submission_count = 0
-        self.rejections: list[str] = []
+        self.binding_submission_count = self.counter_value("binding_submissions")
+        self.binding_repair_count = self.counter_value("binding_repairs")
 
     def declarations(self) -> list[dict[str, Any]]:
         return [
@@ -558,8 +578,8 @@ class PdfBindingToolset(PdfInspectionToolset):
 
     def terminal_result(self, name: str, result: dict[str, Any]):
         if name == "submit_layout_bindings" and result.get("accepted"):
-            return result.get("structure")
-        return None
+            return self.store_terminal(result.get("structure"))
+        return super().terminal_result(name, result)
 
     def _list_financial_layouts(self) -> dict[str, Any]:
         """Compact a long PDF into geometry groups without inferring semantics."""
@@ -766,7 +786,11 @@ class PdfBindingToolset(PdfInspectionToolset):
 
     def _submit_layout_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Expand compact layout choices into the existing page-level contract."""
-        self.binding_submission_count += 1
+        self.binding_submission_count = self.increment_counter(
+            "binding_submissions"
+        )
+        if self.binding_submission_count > 1:
+            self.binding_repair_count = self.increment_counter("binding_repairs")
         if self.binding_submission_count > MAX_BINDING_SUBMISSIONS:
             raise RuntimeError(
                 "PDF layout binding exceeded one initial submission and two repairs."
@@ -891,22 +915,15 @@ class PdfBindingToolset(PdfInspectionToolset):
                 for page_range in _ranges_for_pages(anchor_pages)
             )
             missing_anchor_pages = layout_pages - anchor_pages
-            expanded_unavailable.extend(
-                PdfUnavailablePeriod(
-                    period_id=item["period_id"],
-                    start_page=page_range.start_page,
-                    end_page=page_range.end_page,
-                    reason=(
-                        f"Layout {item['layout_id']} uses amount anchor "
-                        f"{canonical_edge}, which is not displayed on this routed statement."
-                    ),
-                )
-                for page_range in self._statement_ranges(missing_anchor_pages)
-            )
             if missing_anchor_pages:
+                # A geometry miss does not prove that the period is absent.
+                # Leave these members unresolved so the existing bounded repair
+                # can inspect their headers and supply explicit page outcomes.
                 notes.append(
                     f"{item['layout_id']} {item['period_id']}: selected anchor "
-                    f"{canonical_edge} absent on pages {sorted(missing_anchor_pages)}."
+                    f"{canonical_edge} does not match pages {sorted(missing_anchor_pages)}. "
+                    "Read their period headers and repair the page bindings; "
+                    "an anchor shift is not evidence that the period is unavailable."
                 )
 
         for item in layout_unavailable:
@@ -1129,7 +1146,9 @@ class PdfBindingToolset(PdfInspectionToolset):
                 return self._reject(
                     f"{period_id} has neither a binding nor unavailable reason for pages: "
                     f"{sorted(missing)[:30]}. Valid normalized outcomes were retained; "
-                    "submit only bindings or unavailable reasons for missing pages."
+                    "read the missing pages' period headers and submit page_bindings "
+                    "or source-supported page_unavailable overrides with the layout choices. "
+                    "A missing shared anchor does not establish period unavailability."
                 )
             summary = self.exploration.controlling_summary_pages
             summary_pages = (
@@ -1167,7 +1186,7 @@ class PdfBindingToolset(PdfInspectionToolset):
         }
 
     def _reject(self, message: str) -> dict[str, Any]:
-        self.rejections.append(message)
+        self.record_rejection(message)
         return {
             "ok": True,
             "accepted": False,

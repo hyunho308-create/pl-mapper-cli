@@ -43,7 +43,12 @@ def _pdf(path: Path) -> Path:
         ("1,234.50", 1234.5, False),
         ("(900.25)", -900.25, False),
         ("72.5%", 72.5, True),
-        ("$42-", -42.0, False),
+        ("$42-", 42.0, False),
+        ("1,234-", 1234.0, False),
+        ("-1,234", -1234.0, False),
+        ("−1,234", -1234.0, False),
+        ("-$1,234", -1234.0, False),
+        ("$-1,234", -1234.0, False),
         ("2025-01", None, False),
         ("1/31/2025", None, False),
         ("(12", None, False),
@@ -118,7 +123,7 @@ def test_pdf_inspection_tools_are_bounded_and_coordinate_aware(tmp_path):
         toolset.read_page_lines(1, 1, 61)
 
 
-def test_pdf_declared_tools_match_dispatch_and_signature(tmp_path):
+def test_pdf_declared_tools_match_dispatch(tmp_path):
     toolset = PdfInspectionToolset(read_pdf_document(_pdf(tmp_path / "sample.pdf")))
     declared = {item["name"] for item in toolset.declarations()}
 
@@ -132,8 +137,6 @@ def test_pdf_declared_tools_match_dispatch_and_signature(tmp_path):
     }
     assert toolset.dispatch("inspect_document", {})["ok"] is True
     assert toolset.dispatch("read_page_lines", {"page_number": 1})["ok"] is True
-    assert toolset.signature() == toolset.signature()
-    assert len(toolset.signature()) == 16
     refused = toolset.dispatch("make_spreadsheet", {})
     assert refused["ok"] is False
     assert "Unknown tool" in refused["error"]

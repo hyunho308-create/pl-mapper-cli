@@ -19,6 +19,9 @@ from hotel_pl_normalizer.models.period_selection import (
     CanonicalPeriod,
     PeriodScenario,
     inclusive_month_count,
+    is_calendar_year,
+    is_ttm,
+    is_ytd,
 )
 from hotel_pl_normalizer.models.workbook import WorkbookSheet
 from hotel_pl_normalizer.structure.monthly_spread import MONTHLY_SPREAD_THRESHOLD
@@ -147,7 +150,17 @@ def latest_header_month(values: Iterable[str]) -> tuple[int, int] | None:
         ):
             pairs.append((int(match.group(2)), int(match.group(1))))
         for match in re.finditer(
-            rf"\b({_MONTHS})[ '\-/]*((?:19|20)\d{{2}}|\d{{2}})\b",
+            rf"\b({_MONTHS})\s+(?:0?[1-9]|[12]\d|3[01])"
+            rf"(?:st|nd|rd|th)?\s*,?\s*((?:19|20)\d{{2}})\b",
+            text,
+            re.I,
+        ):
+            pairs.append(
+                (int(match.group(2)), _MONTH_NUMBERS[match.group(1)[:3].lower()])
+            )
+        for match in re.finditer(
+            rf"\b({_MONTHS})[ '\-/]*((?:19|20)\d{{2}}|\d{{2}})\b"
+            rf"(?!\s*,?\s*(?:19|20)\d{{2}}\b)",
             text,
             re.I,
         ):
@@ -337,6 +350,15 @@ def period_column_problem(
         PeriodScenario.BUDGET: {"budget"},
         PeriodScenario.FORECAST: {"forecast"},
     }[period.scenario]
+    stacked_problem = _stacked_header_problem(
+        sheet,
+        column,
+        period,
+        allowed=allowed,
+        latest_period_year=latest_period_year,
+    )
+    if stacked_problem is not None:
+        return f"column {excel_column.upper()} {stacked_problem}"
     if scenario_hints and not scenario_hints & allowed:
         return (
             f"column {excel_column.upper()} has scenario markers "
@@ -358,15 +380,29 @@ def period_column_problem(
         if (
             period_year == latest_period_year
             and scenario_hints == {"prior_year"}
-            and f"year:{period_year}" not in markers
         ):
             return f"column {excel_column.upper()} is marked as Prior/Last Year"
 
     month_count = inclusive_month_count(period.start_month, period.end_month)
-    if month_count == 1 and "ytd" in markers and "ptd" not in markers:
-        return f"column {excel_column.upper()} is YTD, not PTD/monthly"
-    if month_count > 1 and "ptd" in markers and not markers & {"ytd", "ttm", "total"}:
-        return f"column {excel_column.upper()} is PTD/monthly, not YTD or annual"
+    grain_problem = _explicit_grain_problem(markers, period)
+    if grain_problem is not None:
+        return f"column {excel_column.upper()} {grain_problem}"
+
+    months = {
+        int(marker.split(":", 1)[1])
+        for marker in markers
+        if marker.startswith("month:")
+    }
+    end_month = int(period.end_month[5:])
+    if (
+        (month_count == 1 or is_ytd(period.start_month, period.end_month) or is_ttm(period.start_month, period.end_month))
+        and months
+        and end_month not in months
+    ):
+        return (
+            f"column {excel_column.upper()} names ending month(s) "
+            f"{sorted(months)}, not {period.end_month}"
+        )
 
     column_years = {
         int(marker.split(":", 1)[1]) for marker in markers if marker.startswith("year:")
@@ -384,6 +420,103 @@ def period_column_problem(
             f"column {excel_column.upper()} names year(s) {sorted(column_years)}, "
             f"not {period_year}"
         )
+    return None
+
+
+def _stacked_header_problem(
+    sheet: WorkbookSheet,
+    column: int,
+    period: CanonicalPeriod,
+    *,
+    allowed: set[str],
+    latest_period_year: int,
+) -> str | None:
+    """Reject a clear conflict in vertically stacked header/value blocks."""
+
+    entries = [
+        entry
+        for entry in _column_header_entries(sheet, column)
+        if _has_period_identity(entry[2]) or entry[2] & SCENARIO_MARKERS
+    ]
+    layout = infer_label_layout(sheet.rows, value_columns={column})
+    numeric_rows = sorted({
+        row.row_index
+        for row in sheet.rows
+        if select_row_label(row, layout).cell is not None
+        for cell in row.cells
+        if cell.column == column
+        and _is_number(cell.raw_value)
+        and float(cell.raw_value) != 0.0
+    })
+    groups: list[list[tuple[int, str, set[str]]]] = []
+    for entry in entries:
+        if groups and any(groups[-1][-1][0] < row < entry[0] for row in numeric_rows):
+            groups.append([])
+        if not groups:
+            groups.append([])
+        groups[-1].append(entry)
+    groups = [
+        group
+        for index, group in enumerate(groups)
+        if any(
+            group[-1][0] < row
+            and (index + 1 == len(groups) or row < groups[index + 1][0][0])
+            for row in numeric_rows
+        )
+    ]
+    if len(groups) < 2:
+        return None
+
+    period_year = int(period.end_month[:4])
+    for group in groups:
+        markers = {marker for _, _, found in group for marker in found}
+        scenarios = markers & SCENARIO_MARKERS
+        if scenarios and not scenarios & allowed:
+            return (
+                "has incompatible stacked-header scenario markers "
+                f"{sorted(scenarios)}"
+            )
+        years = {
+            int(marker.split(":", 1)[1])
+            for marker in markers
+            if marker.startswith("year:")
+        }
+        relative_prior = (
+            period.scenario == PeriodScenario.ACTUAL
+            and period_year < latest_period_year
+            and "prior_year" in scenarios
+        )
+        if years and period_year not in years and not relative_prior:
+            return f"has incompatible stacked-header year(s) {sorted(years)}"
+        grain_problem = _explicit_grain_problem(markers, period)
+        if grain_problem is not None:
+            return f"has incompatible stacked-header grain: {grain_problem}"
+    return None
+
+
+def _explicit_grain_problem(
+    markers: set[str],
+    period: CanonicalPeriod,
+) -> str | None:
+    month_count = inclusive_month_count(period.start_month, period.end_month)
+    if month_count == 1 and "ytd" in markers and "ptd" not in markers:
+        return "is YTD, not PTD/monthly"
+    if is_ttm(period.start_month, period.end_month):
+        if "ttm" not in markers and markers & {"ptd", "ytd"}:
+            return "is not TTM"
+        return None
+    if is_calendar_year(period.start_month, period.end_month):
+        if "ttm" in markers:
+            return "is TTM, not annual"
+        return None
+    if is_ytd(period.start_month, period.end_month):
+        if "ttm" in markers:
+            return "is TTM, not YTD"
+        if "ptd" in markers and "ytd" not in markers:
+            return "is PTD/monthly, not YTD"
+        return None
+    if month_count > 1 and "ptd" in markers and not markers & {"ytd", "ttm", "total"}:
+        return "is PTD/monthly, not YTD or annual"
     return None
 
 

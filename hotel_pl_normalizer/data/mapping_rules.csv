@@ -1,0 +1,40 @@
+rule,severity,category,outcome,description,resolution,auto_repairable
+execution,error,Validation error,rejected,The submitted mapping cannot be executed.,Correct the named mechanical issue without changing unrelated mappings.,false
+detail_mapping_collapsed,error,Validation error,rejected,A substantively rich workbook was mapped mostly to parent or no-value decisions.,Map identifiable child accounts from the routed financial detail.,false
+coverage,error,Validation error,rejected,A COA parent is missing its required decision.,Add a supported mapping or no_value decision and declare child coverage.,false
+hierarchy_complete,error,Validation error,rejected,A complete parent does not equal its immediate children.,Find omitted misplaced or overlapping detail without inventing values.,false
+hierarchy_partial_with_residual,error,Validation error,rejected,A partial hierarchy with a residual does not reconcile.,Map supported siblings and use only the legitimate residual.,false
+coverage_inconsistent,error,Validation error,rejected,A parent marked not present has active children.,Correct the children or the coverage declaration.,false
+coverage_unspecified,warning,Coverage gap,coverage_gap,A parent has no explicit child coverage state.,Set coverage from the source structure.,false
+parent_no_value_with_children,error,Validation error,rejected,A blank parent has populated children.,Map the supported parent or remove children that do not belong.,false
+summary_department,error,Validation error,rejected,Summary and independently mapped department amounts do not reconcile.,Check scope periods schedules offsets and source hierarchy.,false
+source_discrepancy,warning,Source presentation,source_exception,Independent supported source layers still differ.,Preserve both source values and disclose the difference.,false
+source_layer_conflict,warning,Source presentation,source_exception,A selected layer differs from a typed alternate layer.,Preserve the supported selection and its cited comparison.,false
+source_control_difference,warning,Source presentation,source_exception,A reported source subtotal differs from its cited components.,Review the source arithmetic without changing the mapped values automatically.,false
+source_control_unverified,warning,Validation warning,source_exception,A cited source subtotal cannot be checked in this period.,Inspect the missing source values without assuming zero.,false
+invalid_source_layer_comparison,error,Validation error,rejected,A typed selected layer does not reproduce its mapped target.,Correct the operations and cited row sets.,false
+period_detail_available,error,Validation error,rejected,An equivalent row supplies a period the selected row leaves blank.,Use the period-complete row or complementary non-overlapping rows.,false
+source_presentation_exception,warning,Source presentation,source_exception,A proven combined source presentation differs from standard categories.,Preserve the operator Summary and separate detailed categories.,false
+summary_combined_ood_misc,error,Validation error,rejected,The declared combined OOD and miscellaneous presentation does not reconcile.,Confirm the presentation mode and check detailed omissions or duplication.,false
+summary_combined_ood_misc_inactive_bucket,error,Validation error,rejected,A combined OOD and miscellaneous presentation populates both Summary buckets.,Put the combined amount only in the selected Summary bucket.,false
+summary_math,error,Validation error,rejected,A Summary subtotal fails its required equation.,Check missing duplicated or incorrectly signed Summary lines.,false
+kpi_math,error,Validation error,rejected,A reported KPI differs from its deterministic calculation.,Check KPI units and mapped room or revenue inputs.,false
+occupancy_above_capacity,warning,Source presentation,source_exception,Reported occupancy exceeds 100 percent.,Review the cited room counts and occupancy; do not cap the source value.,false
+invalid_rooms_available,warning,Source presentation,source_exception,Rooms sold is positive but available room nights is zero or negative.,Review the source capacity and period; do not invent room availability.,false
+non_residual_plug,error,Validation error,rejected,A named non-residual leaf was calculated as its parent less its siblings.,Use the directly identified source row or leave unsupported detail blank.,false
+non_operating_sign,error,Validation error,rejected,Non-operating income has the wrong normalized sign.,Apply the supported Standard COA sign convention.,false
+source_row_repeated,error,Validation error,rejected,A source row occurs more than once in one calculation.,Remove the duplicate occurrence.,false
+source_row_included_and_excluded,error,Validation error,rejected,One calculation both includes and excludes the same row.,Keep the row only on the required side.,true
+source_row_double_count,error,Validation error,rejected,A source row is assigned to unrelated accounts.,Choose one valid account or non-overlapping detail.,false
+small_source_reconciliation_difference,warning,Reconciliation difference,source_exception,Supported reported values differ slightly.,Preserve both reported values and disclose the difference.,false
+source_detail_incomplete,warning,Coverage gap,coverage_gap,The source supports a parent and only some child detail.,Preserve the parent and map every identifiable child.,false
+unsupported_residual_remainder,warning,Coverage gap,coverage_gap,A material residual is calculated rather than directly supported.,Prefer identifiable rows or disclose the retained remainder.,false
+large_residual_plug,warning,Coverage gap,coverage_gap,A material difference was assigned to a residual for final presentation.,Review the residual and preserve supported values.,false
+unresolved_negative_residual,warning,Coverage gap,coverage_gap,A material negative remainder was not forced into a residual.,Check duplicates offsets signs and already-netted amounts.,false
+unresolved_ambiguity,error,Validation error,rejected,Two materially different mappings remain plausible.,Preserve the evidence and request human classification.,false
+scope_exception,error,Validation error,scope_exception,A material scope decision requires operator direction.,Reject until the operator chooses the intended scope.,false
+scope_exclusion,warning,Scope exclusion,source_exception,A supported material item was excluded from the Standard COA.,Retain and visibly disclose the supported exclusion.,false
+coverage_review_not_completed,error,Validation error,rejected,The required focused coverage review did not complete.,Reject and rerun when another review turn is available.,false
+unused_financial_schedule,error,Validation error,rejected,A populated routed schedule was neither mapped nor explained.,Map it or name the exact superseding schedule and reason.,false
+ood_misc_summary_mode_unknown,error,Validation error,rejected,The Summary OOD and miscellaneous presentation mode is unknown.,Inspect the Summary and select the supported mode.,false
+mapping_repair_truncated,warning,Validation warning,clean,A repair response reached its output limit.,Use the best earlier completed validation and disclose truncation.,false

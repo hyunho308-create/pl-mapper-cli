@@ -136,7 +136,10 @@ Work from most important to least important:
 Never sacrifice a higher-priority structure merely to populate or reconcile a
 lower-priority child account.
 
-Within a parent department, classify rows using this evidence precedence:
+Explicit COA inclusions and exclusions control the normalized classification,
+even when the operator places a row in a different department. Apply a supported
+reclassification consistently to linked Summary and department accounts and
+explain it once. Otherwise, classify rows using this evidence precedence:
 
 1. Explicit operator subtotal or department membership.
 2. A dedicated department or outlet schedule.
@@ -194,6 +197,22 @@ consolidated row as the reconciliation control.
   allowances against banquet revenue. Map a consolidated department-wide F&B
   allowance to Food Allowances unless the source explicitly identifies it as a
   beverage allowance.
+- Do not assign a combined allowance to one named revenue category without
+  source evidence of that scope, even when that category is the largest.
+  Preserve the named revenue gross; cite the unsplit adjustment once in the
+  appropriate Other/allowance account and disclose the unsplit treatment. If
+  the department itself cannot be established, flag the ambiguity instead of
+  inventing an allocation.
+- Keep each named outlet attached to its own cited schedule or section. Match
+  `venue_name` to that source identity, not just a generic revenue label. A
+  Banquet/Conference/Catering schedule can have several non-overlapping revenue
+  blocks. Use either its consolidated category total OR the constituent blocks,
+  never both. Check the blocks against that total in every selected period;
+  your own overlapping selections are not a source discrepancy. Never label a
+  different outlet's figures as the missing venue to fill a period gap.
+- Before claiming a detail row is unavailable, check its exact identifier in
+  the supplied evidence; do not guess a sheet/page or line number. Directly
+  cite available detail instead of recreating its amount as a remainder.
 
 ## Common Structural Problems
 
@@ -217,6 +236,24 @@ amount. Labor remains labor even when a job title resembles an opex account.
 Within every department or subschedule, map separately reported payroll or labor
 to that department's labor hierarchy and non-labor costs to its opex accounts.
 Do not map an entire schedule to opex when payroll is separately reported.
+When the source does not distinguish management from nonmanagement, assign the
+unsplit wages to Nonmanagement and emit one `unusual_convention` review item
+stating that treatment, citing the affected accounts and wage rows. Preserve
+any explicitly identified management instead of applying that default.
+
+### Rooms statistics and segmentation
+
+Rooms Sold excludes complimentary rooms. Use an explicit paid count, sum the
+paid segments, or subtract cited comps from the occupied total. Rooms Available
+is available room-night capacity and does not decrease for complimentary rooms.
+Prefer occupancy explicitly excluding comps, otherwise calculate the paid-room
+ratio. ADR must use the same paid-room count. Never change a count or cap an
+impossible occupancy just to clear a warning; preserve and disclose source errors.
+
+If the source supplies unsegmented room revenue, assign that room revenue to
+Transient and emit one `unusual_convention` review item explaining that no
+segment breakout is reported. Keep ancillary revenue and allowances separate.
+An account rationale alone does not create a visible note; include the review item.
 
 ### Nonstandard Summary Sections
 
@@ -270,6 +307,8 @@ children and flag the questionable subtotal for review.
 - `no_value`: the account is absent; cite no rows.
 
 Python executes every operation.
+An explicit accounting dash in a bound amount cell is read as zero; an absent
+cell remains missing. Prefer the direct row even when one period displays a dash.
 
 ## Hierarchy Coverage and Residuals
 
@@ -294,6 +333,10 @@ Residual accounts are all-other children used to capture remaining compatible
 source accounts and complete a parent rollup. First consider every specific
 sibling and use it when supported. Then assign positively identified remaining
 source rows to the residual.
+Do not calculate a named non-residual leaf as its parent minus its siblings.
+Use its identifiable source row or leave unsupported detail blank. In particular,
+neither Government nor Other Group is a balancing plug. Do not allocate rounding
+differences to a child, including an otherwise legitimate residual.
 
 For a partial hierarchy with exactly one legitimate residual, cite any residual
 rows you can positively identify and set the parent coverage to `partial`.
@@ -359,7 +402,9 @@ Use `review_items` to prevent silent guessing and flag material oddities:
 - `scope_exception`: the source presents a material item whose inclusion or
   exclusion requires an operator decision outside the Standard COA mapping;
 - `source_discrepancy`: for a numeric conflict between independently reported
-  source layers. A Summary-to-department mismatch must first survive one
+  source layers. Always include both typed source-row comparisons and their
+  operations; a prose-only numeric claim is invalid. Omit rounding-only notes
+  within the stated reconciliation tolerance. A Summary-to-department mismatch must first survive one
   structural repair pass with both layers supported. A chosen component rollup
   that conflicts with a separately reported subtotal must put the selected COA
   target first in `coa_ids` and cite all rows in `source_rows`, then put the rows
@@ -369,8 +414,9 @@ Use `review_items` to prevent silent guessing and flag material oddities:
   Also provide `selected_source_operation` and `alternate_source_operation` as
   `direct`, `sum`, `adjusted_subtotal`, or `negate`, plus the corresponding
   selected or alternate excluded rows for `adjusted_subtotal`. The two typed
-  equations must be disjoint and the selected equation must equal the mapped
-  target.
+  equations may share an adjustment only with the same sign on both sides;
+  identical equations are not a comparison. The selected equation must still
+  equal the mapped target.
   Review any proposed offset rows
   using their labels and
   surrounding structure; do not use a numerical near-match from another
@@ -415,6 +461,45 @@ source-row references in their structured fields. Use an empty list for routine
 mappings and for both source-layer row lists unless a selected-versus-alternate
 numeric conflict is being reported. IT departments commonly have no labor; do
 not flag absent IT labor.
+
+## Source subtotal checks and concise notes
+
+Return `source_controls` for the explicitly reported financial subtotals with
+supporting components in each schedule. Walk each repeated revenue or expense
+block separately, including intermediate and net totals not selected for a COA
+mapping. Citing a subtotal as a component of a higher total does not check that
+subtotal's own arithmetic. Define the expected relationship from source labels
+and category membership, NOT by reverse-engineering sums that happen to tie.
+A mismatch is a valid source check, not a failed mapping: never drop a labeled
+component or choose a smaller subset merely to eliminate a difference.
+For example, check Food Revenue + Beverage Revenue
+against Net Food & Beverage Revenue, as well as net revenue against the next
+total; respect allowances already included in those component amounts.
+If the food and beverage component totals already include their allowances,
+compare their sum directly to the NET total, not a gross subtotal. Do not net
+the displayed combined allowance a second time. Record this independent
+category-total comparison even when Gross + Allowances = Net already ties;
+checking only that latter equation can hide omitted revenue categories.
+Follow the actual scope of
+each subtotal: a higher total may also include separately presented components
+above or outside the immediately preceding block. Do not assume that the
+nearest subtotal contains every earlier line merely from its caption.
+Give each control a short label, the responsible `coa_id`, one
+`total_row`, and the non-overlapping `component_rows` (and `excluded_rows` only
+for explicit subtractions). Python checks total = sum(components) - sum(excluded)
+for every selected period. Include controls that appear to reconcile too; do
+not calculate the differences yourself. Respect already-net allowances and
+signed credits, and never add a subtotal to its own components. An empty list
+is appropriate only when the source has no supported subtotal relationships.
+Patches retain controls unless `source_controls` explicitly replaces the list.
+
+For each review, put the responsible parent or populated account first in
+`coa_ids`. Keep one issue per review; do not repeat KPI or subtotal warnings
+already produced by code. Keep `message` factual and omit amounts, percentages,
+and claims that missing mapped detail proves the source has no detail. If a
+numeric comparison also explains a nonstandard mapping, put that explanation
+alone in `mapping_treatment`; otherwise use null. Code will add the period and
+amount and retain the treatment even when the numeric difference is rounding.
 
 ## Venue Names
 

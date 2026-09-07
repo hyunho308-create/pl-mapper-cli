@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -16,6 +18,7 @@ from hotel_pl_normalizer.models.pdf_structure import PdfExploration
 from hotel_pl_normalizer.structure.pdf import (
     PdfBindingToolset,
     PdfExplorationToolset,
+    PdfInspectionToolset,
     bind_pdf_periods,
     explore_pdf,
 )
@@ -234,6 +237,7 @@ def test_pdf_exploration_requires_exact_routing_and_an_open_summary_anchor():
     structure = PdfExploration.model_validate(result["structure"])
     assert structure.financial_pages == [1, 2, 3, 4, 5, 6]
     assert toolset.terminal_result("submit_periods", result) == result["structure"]
+    assert toolset.terminal_value == result["structure"]
 
 
 def test_pdf_period_submission_ignores_model_authored_identity():
@@ -411,6 +415,86 @@ def test_pdf_monthly_controlling_summary_cannot_collapse_to_ttm_only():
     )
     assert complete["accepted"] is True
     assert len(complete["structure"]["periods"]) == 13
+
+
+def test_pdf_monthly_summary_rejects_synthetic_month_after_total_column():
+    document = _document(5)
+    month_headers = (
+        "Oct 2024 Nov 2024 Dec 2024 Jan 2025 Feb 2025 Mar 2025 "
+        "Apr 2025 May 2025 Jun 2025 Jul 2025 Aug 2025 Sep 2025 Total"
+    )
+    first_page = document.pages[0]
+    header_line = replace(first_page.text_lines[0], text=month_headers)
+    document = replace(
+        document,
+        pages=[
+            replace(first_page, text_lines=[header_line, *first_page.text_lines[1:]]),
+            *document.pages[1:],
+        ],
+    )
+    toolset = PdfExplorationToolset(document)
+    routing = {
+        "layout": "consistent_multi_page_statement",
+        "page_ranges": [
+            {
+                "start_page": 1,
+                "end_page": 1,
+                "include_as_financial_evidence": True,
+                "role": "summary_p_and_l",
+                "confidence": "high",
+                "evidence": ["monthly controlling summary"],
+            },
+            *[
+                {
+                    "start_page": page,
+                    "end_page": page,
+                    "include_as_financial_evidence": True,
+                    "role": "department_p_and_l",
+                    "confidence": "high",
+                    "evidence": [f"normal department {page}"],
+                }
+                for page in range(2, 6)
+            ],
+        ],
+    }
+    assert toolset.dispatch("submit_routing", routing)["accepted"] is True
+    for page in range(1, 6):
+        toolset.dispatch("read_page_lines", {"page_number": page})
+
+    monthly_periods = []
+    for year, month in [(2024, month) for month in range(10, 13)] + [
+        (2025, month) for month in range(1, 11)
+    ]:
+        value = f"{year:04d}-{month:02d}"
+        monthly_periods.append(
+            {
+                "scenario": "actual",
+                "start_month": value,
+                "end_month": value,
+                "pages_present": [{"start_page": 1, "end_page": 5}],
+                "evidence": ["p1:l1"],
+            }
+        )
+    result = toolset.dispatch(
+        "submit_periods",
+        {
+            "controlling_summary_pages": {"start_page": 1, "end_page": 1},
+            "periods": [
+                *monthly_periods,
+                {
+                    "scenario": "actual",
+                    "start_month": "2024-10",
+                    "end_month": "2025-10",
+                    "pages_present": [{"start_page": 1, "end_page": 5}],
+                    "evidence": ["p1:l1"],
+                },
+            ],
+        },
+    )
+
+    assert result["accepted"] is False
+    assert "synthetic next month" in result["error"]
+    assert "2025-10" in result["error"]
 
 
 def test_pdf_routing_rejects_inclusion_role_contradictions():
@@ -686,6 +770,61 @@ def test_pdf_layout_binding_expands_to_page_level_bindings():
     ]
 
 
+def test_shared_layout_anchor_shift_requires_member_repair_not_unavailability():
+    document = _document()
+    for page in document.pages:
+        edges = [25 if page.page_number in {3, 4} else 20, 40, 60, 80]
+        words = [
+            PdfWord(f"p{page.page_number}:w{index}", str(index * 100),
+                    edge - 8, 20, edge, 30, numeric_value=index * 100)
+            for index, edge in enumerate(edges, start=1)
+        ]
+        page.words = words
+        page.text_lines = [
+            PdfTextLine(f"p{page.page_number}:l1", 1, "100 200 300 400",
+                        5, 20, 80, 30, tuple(word.word_id for word in words))
+        ]
+    period_id = "2025-01_2025-12_actual"
+    exploration = PdfExploration.model_validate({**_routing(), **_periods()})
+    toolset = PdfBindingToolset(document, exploration, [period_id])
+    for page in range(1, 6):
+        toolset.dispatch("read_page_lines", {"page_number": page})
+    layouts = toolset.dispatch("list_financial_layouts", {})["layout_groups"]
+    assert len(layouts) == 1
+    compact = {
+        "layout_bindings": [{
+            "layout_id": layouts[0]["layout_id"], "period_id": period_id,
+            "right_edge": 20, "header_text": "Actual",
+        }],
+        "layout_unavailable": [],
+    }
+
+    initial = toolset.dispatch("submit_layout_bindings", compact)
+
+    assert initial["accepted"] is False
+    assert "[3, 4]" in initial["error"]
+    assert "period headers" in initial["error"]
+    assert toolset.pending_submission is not None
+    assert toolset.pending_submission.unavailable == []
+
+    repaired = toolset.dispatch("submit_layout_bindings", {
+        **compact,
+        "page_bindings": [{
+            "period_id": period_id, "start_page": 3, "end_page": 4,
+            "right_edge": 25, "header_text": "Actual",
+            "evidence": ["Member headers show Actual at the shifted amount column."],
+        }],
+    })
+
+    assert repaired["accepted"] is True
+    assert repaired["structure"]["unavailable"] == []
+    assert [(item["start_page"], item["end_page"], item["right_edge"])
+            for item in repaired["structure"]["bindings"]] == [
+                (1, 2, 20.0), (5, 6, 20.0), (3, 4, 25.0)
+            ]
+    assert toolset.binding_submission_count == 2
+
+
 def test_pdf_layout_binding_excludes_explicit_ratio_subcolumns():
     period_id = "2025-01_2025-12_actual"
     exploration = PdfExploration.model_validate(
@@ -846,8 +985,14 @@ def test_pdf_layout_binding_stops_after_two_repairs():
 
     for _ in range(3):
         assert toolset.dispatch("submit_layout_bindings", invalid)["accepted"] is False
+    assert toolset.binding_submission_count == 3
+    assert toolset.binding_repair_count == 2
+    assert toolset.counter_value("binding_submissions") == 3
+    assert toolset.counter_value("binding_repairs") == 2
     with pytest.raises(RuntimeError, match="two repairs"):
         toolset.dispatch("submit_layout_bindings", invalid)
+    assert toolset.binding_submission_count == 4
+    assert toolset.binding_repair_count == 3
 
 
 def test_pdf_binding_cannot_mark_a_discovered_period_unavailable_everywhere():
@@ -1000,6 +1145,53 @@ def test_pdf_stage_declarations_have_no_duplicate_tool_names():
     ]
     assert "submit_layout_bindings" in binding_names
     assert "submit_bindings" not in binding_names
+
+
+def test_pdf_tool_declarations_keep_both_canonical_byte_families():
+    document = _document()
+    inspection = PdfInspectionToolset(document)
+    assert not hasattr(inspection, "reads")
+    assert not hasattr(inspection, "max_reads")
+    toolsets = [
+        (
+            inspection,
+            1751,
+            "b2ec97612d52d523db5f41544bcf501d458be2ccf9dc0dccfbb83276f02397ca",
+            "3ef62802a8c85440a895647d580eeb54298a4d599284aabff9e7de68dbb10af3",
+        ),
+        (
+            PdfExplorationToolset(document),
+            3892,
+            "5635727b546e8b8663448c5df8119afce3b048bea296bff7bf0805f16db0705f",
+            "f8ef31310ca7da447fde82c6837d13ae18f477b2ac57a140768d32265d391e85",
+        ),
+        (
+            PdfBindingToolset(
+                document,
+                _summary_and_department_exploration(),
+                ["2025-01_2025-12_actual"],
+            ),
+            3807,
+            "7b2e047c5811112bbabf8038d540c5bf362ccd38412dffa84273bdc99b162898",
+            "a762055e30f635959ca0850b8c76f308e359cad6b32a07000640ab134041dd7b",
+        ),
+    ]
+    for toolset, expected_length, compact_sha, sorted_sha in toolsets:
+        declarations = toolset.declarations()
+        compact = json.dumps(
+            declarations,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        sorted_compact = json.dumps(
+            declarations,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        assert len(compact) == expected_length
+        assert hashlib.sha256(compact).hexdigest() == compact_sha
+        assert hashlib.sha256(sorted_compact).hexdigest() == sorted_sha
 
 
 class _BareFinalClient:

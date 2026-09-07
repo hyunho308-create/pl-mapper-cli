@@ -1,7 +1,7 @@
 """Complete-workbook mapping API."""
 
+from .coa import DETERMINISTIC_SUMMARY_CALCULATIONS
 from .mapper import (
-    DETERMINISTIC_SUMMARY_CALCULATIONS,
     GENERIC_VENUE_SLOTS,
     map_workbook,
 )

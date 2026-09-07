@@ -95,6 +95,10 @@ class LabelLayoutTests(unittest.TestCase):
             "ACCOUNT_STYLE",
             "[schedule].[Income Statement]",
             "<<Member[Account]>>",
+            "<<C1001010,C1001040",
+            "<<P3001040,P3001090",
+            "<<9M010001,9M010005",
+            "<<0-BRKFST,0-LUNCH,0-DINNER",
             "#DIV/0!",
         ):
             with self.subTest(value=value):
@@ -102,6 +106,39 @@ class LabelLayoutTests(unittest.TestCase):
         for value in ("SPA", "FEES", "AAA WD", "A&G", "TOTAL EXPENSES"):
             with self.subTest(value=value):
                 self.assertFalse(is_technical_label(value))
+
+
+    def test_query_ranges_do_not_displace_account_captions_or_subtotals(self) -> None:
+        rows = [
+            _row(
+                index,
+                _cell(index, 4, "<<C1001010,C1001040"),
+                _cell(index, column, caption),
+                _cell(index, 18, amount),
+            )
+            for index, (column, caption, amount) in enumerate(
+                [
+                    (10, "Visa & MasterCard Commissions", 150.0),
+                    (10, "American Express Commissions", 100.0),
+                    (9, "Sub-Total: Credit Card Commissions", 250.0),
+                    (10, "Corporate Office Reimbursement", 80.0),
+                ],
+                start=1,
+            )
+        ]
+
+        layout = infer_label_layout(rows, value_columns={18})
+
+        self.assertEqual(layout.primary_column, 10)
+        self.assertEqual(
+            [select_row_label(row, layout).cell.raw_value for row in rows],
+            [
+                "Visa & MasterCard Commissions",
+                "American Express Commissions",
+                "Sub-Total: Credit Card Commissions",
+                "Corporate Office Reimbursement",
+            ],
+        )
 
 
 if __name__ == "__main__":

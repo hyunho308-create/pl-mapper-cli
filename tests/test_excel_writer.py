@@ -15,6 +15,10 @@ import pytest
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
+from hotel_pl_normalizer.feedback import FeedbackCompositionError
+from hotel_pl_normalizer.mapping.findings import Finding
+from hotel_pl_normalizer.mapping.mapper import SourceOperation
+from hotel_pl_normalizer.models.evidence import EvidenceRow
 from hotel_pl_normalizer.output import (
     COA_CSV,
     FEEDBACK_COL,
@@ -147,6 +151,40 @@ def test_one_column_per_period_and_the_rest_stay_hidden(tmp_path):
     assert sheet.column_dimensions["Z"].hidden is False
 
 
+def test_output_preserves_ratio_precision_and_rounds_counts_by_account_type(tmp_path):
+    ids = canonical_ids()
+    result = build_result(
+        coa={i: {} for i in ids},
+        values={
+            "S12.rooms_available": 36500.4,
+            "S12.rooms_sold": 27441.4,
+            "S12.occupancy": 27441 / 36500,
+            "S12.adr": 200.126,
+            "S12.revpar": (27441 / 36500) * 200.126,
+        },
+    )
+
+    sheet = load_workbook(
+        write_normalized_workbook(result, tmp_path / "precision.xlsx")
+    )["COA"]
+
+    def written(coa_id):
+        return sheet.cell(
+            row=FIRST_ACCOUNT_ROW + ids.index(coa_id),
+            column=FIRST_PERIOD_COL,
+        ).value
+
+    assert written("S12.rooms_available") == 36500
+    assert written("S12.rooms_sold") == 27441
+    assert written("S12.occupancy") == round(27441 / 36500, 6)
+    assert written("S12.occupancy") != 0.75
+    assert written("S12.adr") == 200.13
+    assert written("S12.revpar") == 150.46
+    assert round(written("S12.occupancy") * written("S12.adr"), 2) == written(
+        "S12.revpar"
+    )
+
+
 def test_output_preserves_the_period_labels_selected_by_the_user(tmp_path):
     ids = canonical_ids()
     result = build_result(
@@ -220,6 +258,29 @@ def test_model_tab_formulas_are_translated_per_period(tmp_path):
     # The header pull-through follows too, so each column names its own period.
     assert model["E17"].value == "=COA!E2"
     assert model.column_dimensions["F"].hidden is True
+
+
+def test_formula_output_forces_recalculation_and_uses_short_calculation_policy(
+    tmp_path,
+):
+    ids = canonical_ids()
+    path = write_normalized_workbook(
+        build_result(coa={i: {} for i in ids}), tmp_path / "recalculate.xlsx"
+    )
+
+    book = load_workbook(path, data_only=False)
+    assert book.calculation.calcMode == "auto"
+    assert book.calculation.fullCalcOnLoad is True
+    assert book.calculation.forceFullCalc is True
+    assert book.calculation.calcOnSave is True
+    assert book["Run Notes"]["C8"].value == "Every value is calculated by code from cited source rows"
+    book.close()
+
+    data_only = load_workbook(path, data_only=True, read_only=True)
+    try:
+        assert data_only["KHP Model Accounts"]["C238"].value is None
+    finally:
+        data_only.close()
 
 
 def test_model_tab_venue_labels_point_at_the_venue_column(tmp_path):
@@ -357,6 +418,78 @@ def test_mapped_label_amount_formatting(tmp_path, target, value, expected):
     assert expected in sheet.cell(row=row, column=LABELS_COL).value
 
 
+@pytest.mark.parametrize(
+    "raw_value, source_format, normalized, expected",
+    [
+        (71.4, "General", 0.714, "71.4%"),
+        (0.714, "0.0%", 0.714, "71.4%"),
+        (0.714, "General", 0.714, "71.4%"),
+        (1.25, "0.0%", 1.25, "125.0%"),
+        (3.2437, "#,##0.00 %", 3.2437, "324.4%"),
+        (2.5, "General", 0.025, "2.5%"),
+    ],
+)
+def test_occupancy_source_label_distinguishes_percentage_points_from_excel_ratios(
+    tmp_path, raw_value, source_format, normalized, expected
+):
+    ids = canonical_ids()
+    target = "S12.occupancy"
+    result = build_result(
+        coa={i: {} for i in ids}, values={target: normalized},
+        decisions=[SimpleNamespace(coa_id=target, operation=SourceOperation.DIRECT, source_rows=["Stats!10"], excluded_rows=[])],
+        evidence=[{
+            "row_key": "Stats!10", "label": "Paid occupancy",
+            "selected_values": {"selected": raw_value},
+            "selected_value_formats": {"selected": source_format},
+        }],
+    )
+    sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    row = FIRST_ACCOUNT_ROW + ids.index(target)
+    assert sheet.cell(row, LABELS_COL).value == f"Stats - Paid occupancy: {expected}"
+    assert sheet.cell(row, FIRST_PERIOD_COL).value == normalized
+    assert result.values[target] == normalized
+
+
+@pytest.mark.parametrize("operation", ["ratio", SourceOperation.RATIO])
+def test_calculated_occupancy_source_labels_show_room_counts(operation):
+    evidence = {
+        row["row_key"]: EvidenceRow.from_legacy_dict(row)
+        for row in [
+            {"row_key": "Stats!1", "label": "Paid sold", "selected_value": 36000},
+            {"row_key": "Stats!2", "label": "Available", "selected_value": 50000},
+        ]
+    }
+    decision = SimpleNamespace(
+        coa_id="S12.occupancy", operation=operation,
+        source_rows=list(evidence), excluded_rows=[],
+    )
+    text = _mapped_from(decision, evidence, ("selected", "Actual", {"S12.occupancy": 0.72}))
+    assert "Stats - Paid sold: 36,000" in text
+    assert "Stats - Available: 50,000" in text
+    assert "%" not in text
+
+
+@pytest.mark.parametrize("marker", ["-", " \u2013 ", "\u2014", "\u2212"])
+@pytest.mark.parametrize("target, expected", [("S1.government", "0"), ("S12.occupancy", "0.0%"), ("S12.adr", "$0")])
+def test_accounting_dash_source_labels_are_explicit_zero(marker, target, expected):
+    evidence = EvidenceRow.from_legacy_dict({"row_key": "Source!1", "label": "Reported amount", "selected_value": marker})
+    values = {target: 0.0}
+    decision = SimpleNamespace(coa_id=target, operation=SourceOperation.DIRECT, source_rows=["Source!1"], excluded_rows=[])
+    text = _mapped_from(decision, {evidence.row_key: evidence}, ("selected", "Budget", values))
+    assert text == f"Source - Reported amount: {expected}"
+    assert values == {target: 0.0}
+
+
+@pytest.mark.parametrize("target", ["S1.government", "S12.occupancy"])
+def test_missing_source_label_value_stays_blank(target):
+    evidence = EvidenceRow.from_legacy_dict({"row_key": "Source!1", "label": "Reported amount", "selected_value": None})
+    values = {target: None}
+    decision = SimpleNamespace(coa_id=target, operation=SourceOperation.DIRECT, source_rows=["Source!1"], excluded_rows=[])
+    text = _mapped_from(decision, {evidence.row_key: evidence}, ("selected", "Budget", values))
+    assert text == "Source - Reported amount: blank"
+    assert values == {target: None}
+
+
 def test_unnamed_venue_slots_still_get_a_label(tmp_path):
     """A blank venue label reads as a broken model, not an unused venue."""
     ids = canonical_ids()
@@ -406,7 +539,7 @@ def test_review_items_attach_to_their_accounts(tmp_path):
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
     assert note == "Mapping treatment: Contract labor sits inside the salary subtotal."
-    assert "Contract labor sits inside the salary subtotal." not in book["Run Notes"]["C9"].value
+    assert "Contract labor sits inside the salary subtotal." not in (book["Run Notes"]["C9"].value or "")
 
 
 def test_review_item_is_displayed_once_on_summary_account(tmp_path):
@@ -435,7 +568,7 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(detail), column=FEEDBACK_COL
     ).value
 
-    assert message not in book["Run Notes"]["C9"].value
+    assert message not in (book["Run Notes"]["C9"].value or "")
     assert message in (summary_note or "")
     assert message not in (detail_note or "")
 
@@ -463,7 +596,7 @@ def test_review_items_hide_internal_ids_but_keep_readable_source_rows(tmp_path):
     book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
     sheet = book["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
-    run_note = book["Run Notes"]["C9"].value
+    run_note = book["Run Notes"]["C9"].value or ""
 
     assert "Rooms row 40" in note
     assert "S12." not in note
@@ -602,7 +735,7 @@ def test_large_residual_plug_warning_is_human_readable(tmp_path):
     ).value
 
     assert "120" in note
-    assert "8%" in note
+    assert "7.5%" in note
     assert "all-other account" in note
 
 
@@ -767,9 +900,6 @@ def test_run_notes_keeps_targetless_validation_and_execution_detail(tmp_path):
     notes = book["Run Notes"]
     assert notes["B9"].value == "Notes"
     assert notes["C9"].value.splitlines() == [
-        "No summary math errors",
-        "No summary-to-department errors",
-        "No material rollup warnings",
         "Needs review: Rooms row 14 may have been assigned to unrelated accounts. "
         "Affected periods: YTD Actual.",
         "Needs review: Sheet 'Budget' could not be read.",
@@ -800,13 +930,9 @@ def test_run_notes_uses_the_approved_template_format(tmp_path):
     assert notes["C7"].number_format == "0"
     assert notes["C7"].alignment.horizontal == "left"
     assert notes["B8"].value == "Calculation policy"
-    assert notes.row_dimensions[8].height == 30.0
+    assert notes.row_dimensions[8].height == 15.0
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value.splitlines() == [
-        "No summary math errors",
-        "No summary-to-department errors",
-        "No material rollup warnings",
-    ]
+    assert notes["C9"].value is None
     assert "Accounts populated" not in {
         cell.value for row in notes.iter_rows() for cell in row
     }
@@ -881,9 +1007,6 @@ def test_run_notes_summarizes_final_validation_and_review_counts(tmp_path):
     assert notes["C7"].value == 1
     assert notes["B9"].value == "Notes"
     assert notes["C9"].value.splitlines() == [
-        "No summary math errors",
-        "No summary-to-department errors",
-        "No material rollup warnings",
         "Mapping incomplete: 269 COA accounts have no submitted mapping decision.",
     ]
 
@@ -949,6 +1072,47 @@ def test_run_notes_status_preserves_stopped_state(tmp_path):
     assert notes["C6"].value == "Stopped"
 
 
+def test_room_kpi_warning_is_counted_and_shows_the_cited_problem(tmp_path):
+    ids = canonical_ids()
+    message = "Occupancy is 125%, above available room-night capacity."
+    result = build_result(
+        coa={i: {} for i in ids},
+        checks=[Finding("warning", "occupancy_above_capacity", "S12.occupancy", note=message)],
+        outcome="source_exception",
+    )
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    assert book["Run Notes"]["C9"].value == "1 room KPI warning"
+    feedback = [row[FEEDBACK_COL - 1].value for row in book["COA"].iter_rows()]
+    assert any(message in (item or "") for item in feedback)
+
+
+def test_rounding_review_is_kept_in_audit_but_leaves_workbook_notes_blank(tmp_path):
+    ids = canonical_ids()
+    result = build_result(
+        coa={i: {} for i in ids},
+        review_items=[{
+            "kind": "source_discrepancy", "message": "The total has a rounding difference.",
+            "coa_ids": ["S2.total_food_and_beverage_revenue"],
+            "source_rows": ["Outlet!10", "Outlet!20"],
+            "selected_source_rows": ["Outlet!10"], "alternate_source_rows": ["Outlet!20"],
+            "selected_source_operation": "direct", "alternate_source_operation": "direct",
+        }],
+        evidence=[
+            {"row_key": "Outlet!10", "selected_value": 100.44},
+            {"row_key": "Outlet!20", "selected_value": 100.0},
+        ],
+    )
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    assert book["Run Notes"]["C9"].value is None
+    assert book["Run Notes"]["C6"].value == "Completed"
+    assert result.feedback_manifest["inputs"][0]["status"] == "internal_only"
+    assert result.feedback_manifest["rendered_count"] == 0
+    assert all(
+        row[FEEDBACK_COL - 1].value is None
+        for row in book["COA"].iter_rows(min_row=FIRST_ACCOUNT_ROW)
+    )
+
+
 def test_authored_khp_textbox_survives_output_save(tmp_path):
     ids = canonical_ids()
     path = write_normalized_workbook(
@@ -975,6 +1139,55 @@ def test_authored_khp_textbox_survives_output_save(tmp_path):
         assert b"TextBox 1" in archive.read("xl/drawings/drawing1.xml")
 
 
+def test_failed_post_save_step_preserves_the_previous_deliverable(
+    tmp_path, monkeypatch
+):
+    ids = canonical_ids()
+    target = tmp_path / "existing.xlsx"
+    previous = b"previous complete deliverable"
+    target.write_bytes(previous)
+
+    def fail_restore(_path):
+        raise OutputTemplateError("injected textbox failure")
+
+    monkeypatch.setattr(
+        "hotel_pl_normalizer.output._restore_template_textbox",
+        fail_restore,
+    )
+
+    with pytest.raises(OutputTemplateError, match="injected textbox failure"):
+        write_normalized_workbook(build_result(coa={i: {} for i in ids}), target)
+
+    assert target.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_feedback_composition_failure_falls_back_without_losing_workbook(
+    tmp_path, monkeypatch
+):
+    ids = canonical_ids()
+    result = build_result(
+        coa={i: {} for i in ids},
+        checks=["warning|coverage_unspecified|S12.total_revenue|review"],
+    )
+
+    def fail_feedback(_result):
+        raise FeedbackCompositionError("injected invariant failure")
+
+    monkeypatch.setattr(
+        "hotel_pl_normalizer.output.compose_result_feedback",
+        fail_feedback,
+    )
+    path = write_normalized_workbook(result, tmp_path / "fallback.xlsx")
+
+    assert path.is_file()
+    assert result.feedback_manifest["mode"] == "fallback"
+    assert "injected invariant failure" in result.feedback_manifest["composition_error"]
+    notes = load_workbook(path)["Run Notes"]["C9"].value
+    assert "Feedback detail could not be composed" in notes
+    assert "run_log.json" in notes
+
+
 def test_output_freeze_panes(tmp_path):
     ids = canonical_ids()
     book = load_workbook(
@@ -986,6 +1199,7 @@ def test_output_freeze_panes(tmp_path):
     assert book.active.title == "Run Notes"
 
     for sheet in book.worksheets:
+        assert sheet.sheet_view.tabSelected == (sheet.title == "Run Notes")
         assert sheet.sheet_view.topLeftCell == "A1"
         assert len(sheet.sheet_view.selection) == 1
         selection = sheet.sheet_view.selection[0]

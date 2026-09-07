@@ -49,6 +49,14 @@ def render_binding_prompt(
             if period.actual_months is not None
             else ""
         )
+        + (
+            "; discovery confirmation="
+            f"{period.department_confirmation.sheet_name}!"
+            f"{period.department_confirmation.excel_column} (retain this exact "
+            "department binding)"
+            if period.department_confirmation is not None
+            else ""
+        )
         for period in periods
     )
     routed = ", ".join(financial_sheets) or "none recorded; judge from list_sheets"
@@ -96,6 +104,7 @@ def bind_periods(
     toolset = PeriodBindingToolset(
         workbook,
         period_ids=period_ids,
+        periods=periods,
         financial_sheets=financial_sheets,
         controlling_summary_sheet=controlling_summary_sheet,
         max_reads=max_reads,
@@ -129,11 +138,19 @@ def bind_periods(
     # The tool normally enforces this matrix before accepting a submission, but
     # keep the stage boundary closed as well.  A provider-returned final object
     # or an exception salvage must never bypass complete sheet-period coverage.
+    unopened = toolset._unopened_claims(structure)
+    if unopened:
+        raise RuntimeError(
+            "Period binding failed final deterministic validation: provider "
+            "returned claims for uninspected sheet(s): "
+            + ", ".join(sorted(unopened))
+        )
     final_check = check_bindings(
         structure,
         toolset.sheets,
         period_ids=period_ids,
         financial_sheets=toolset.financial_sheets,
+        periods=periods,
     )
     if not final_check.accepted:
         raise RuntimeError(

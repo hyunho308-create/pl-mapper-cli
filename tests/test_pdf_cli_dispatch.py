@@ -22,6 +22,12 @@ def test_pdf_cli_dispatches_directly_without_excel_conversion(tmp_path, monkeypa
     discovery = SimpleNamespace(
         exploration=SimpleNamespace(periods=[period]),
     )
+    parsed_pdf = object()
+
+    def fake_discover_pdf_periods(path, **kwargs):
+        seen["discovery_path"] = path
+        seen["discovery_kwargs"] = kwargs
+        return discovery
 
     def fake_normalize_pdf(path, **kwargs):
         seen["path"] = path
@@ -44,7 +50,9 @@ def test_pdf_cli_dispatches_directly_without_excel_conversion(tmp_path, monkeypa
         )
 
     monkeypatch.setenv("OPENAI_API_KEY", "configured-for-test")
-    monkeypatch.setattr(cli, "discover_pdf_periods", lambda *args, **kwargs: discovery)
+    monkeypatch.setattr(cli, "shared_pdf_document", lambda path: parsed_pdf)
+    monkeypatch.setattr(cli, "discover_pdf_periods", fake_discover_pdf_periods)
+    monkeypatch.setattr(cli, "validated_pdf_period_ids", lambda discovery: {"fy"})
     monkeypatch.setattr(cli, "normalize_pdf", fake_normalize_pdf)
     monkeypatch.setattr(cli, "write_normalized_workbook", lambda *args: None)
     monkeypatch.setattr(cli, "write_run_log", lambda *args: None)
@@ -70,4 +78,6 @@ def test_pdf_cli_dispatches_directly_without_excel_conversion(tmp_path, monkeypa
     assert seen["path"] == source.resolve()
     assert seen["kwargs"]["selected_period_ids"] == ["fy"]
     assert seen["kwargs"]["discovery"] is discovery
+    assert seen["discovery_kwargs"]["parsed"] is parsed_pdf
+    assert seen["kwargs"]["parsed"] is parsed_pdf
     assert (output / "summary.json").is_file()

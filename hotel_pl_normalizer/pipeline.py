@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,9 +13,16 @@ from typing import Any
 
 from hotel_pl_normalizer.mapping import compact_pdf_evidence, map_workbook
 from hotel_pl_normalizer.mapping.evidence import compact_workbook_evidence
+from hotel_pl_normalizer.mapping.findings import Finding
+from hotel_pl_normalizer.mapping.tolerances import ZERO_EPSILON
+from hotel_pl_normalizer.models.evidence import (
+    EvidenceRow,
+    PeriodLocationSummary,
+    audit_evidence_dict,
+)
+from hotel_pl_normalizer.models.pdf import PdfDocumentRecord
 from hotel_pl_normalizer.models.period_selection import (
     PeriodCatalog,
-    PeriodColumnSelection,
     PeriodColumnSelectionMap,
 )
 from hotel_pl_normalizer.models.run import StructureRun
@@ -40,13 +48,14 @@ class NormalizationResult:
     period_labels: dict[str, str] = field(default_factory=dict)
     period_values: dict[str, dict[str, float | None]] = field(default_factory=dict)
     residual_plugs_by_period: dict[str, dict[str, float]] = field(default_factory=dict)
-    checks_by_period: dict[str, list[Any]] = field(default_factory=dict)
+    checks_by_period: dict[str, list[Finding]] = field(default_factory=dict)
     execution_issues_by_period: dict[str, list[str]] = field(default_factory=dict)
     dropped_periods: dict[str, str] = field(default_factory=dict)
     decisions: list[Any] = field(default_factory=list)
-    checks: list[Any] = field(default_factory=list)
+    checks: list[Finding] = field(default_factory=list)
     execution_issues: list[str] = field(default_factory=list)
     review_items: list[Any] = field(default_factory=list)
+    source_controls: list[Any] = field(default_factory=list)
     accepted: bool = False
     outcome: str = "rejected"
     exceptions: list[dict[str, Any]] = field(default_factory=list)
@@ -60,7 +69,7 @@ class NormalizationResult:
     mapping_provider: str = ""
     mapping_model: str = ""
     cost_details: dict[str, Any] = field(default_factory=dict)
-    evidence: list[dict] = field(default_factory=list)
+    evidence: list[EvidenceRow | dict] = field(default_factory=list)
     model_calls: list[dict] = field(default_factory=list)
     tool_trace: list[dict] = field(default_factory=list)
     mapping_selection: dict[str, Any] = field(default_factory=dict)
@@ -74,7 +83,7 @@ class NormalizationResult:
             1
             for coa_id in self.coa
             if any(
-                value is not None and abs(value) > 0.005
+                value is not None and abs(value) > ZERO_EPSILON
                 for values in period_values.values()
                 for value in [values.get(coa_id)]
             )
@@ -83,6 +92,63 @@ class NormalizationResult:
     @property
     def session_ms(self) -> int:
         return sum(self.session_call_ms)
+
+
+def _build_normalization_result(
+    *,
+    workbook_id: str,
+    source_name: str,
+    period_label: str,
+    period_labels: dict[str, str],
+    dropped_periods: dict[str, str],
+    mapping,
+    duration_ms: int,
+    cost_usd: float | None,
+    mapping_client: ModelClient,
+    cost_details: dict[str, Any],
+    evidence: list[EvidenceRow | dict],
+    model_calls: list[dict],
+    tool_trace: list[dict],
+    structure_stages: list[dict],
+) -> NormalizationResult:
+    """Build the common mapping result while callers retain stage policy."""
+
+    return NormalizationResult(
+        workbook_id=workbook_id,
+        source_name=source_name,
+        period_label=period_label,
+        values=mapping.values,
+        coa=mapping.coa,
+        period_labels=period_labels,
+        period_values=mapping.values_by_period,
+        residual_plugs_by_period=mapping.residual_plugs_by_period,
+        checks_by_period=mapping.checks_by_period,
+        execution_issues_by_period=mapping.execution_issues_by_period,
+        dropped_periods=dropped_periods,
+        decisions=mapping.decisions,
+        checks=mapping.checks,
+        execution_issues=mapping.execution_issues,
+        review_items=mapping.review_items,
+        source_controls=getattr(mapping, "source_controls", []),
+        accepted=mapping.accepted,
+        outcome=mapping.outcome.value,
+        exceptions=mapping.exceptions,
+        stopped_reason=mapping.stopped_reason,
+        duration_ms=duration_ms,
+        session_calls=mapping.session_calls,
+        session_call_ms=mapping.session_call_ms,
+        session_tool_calls=mapping.session_tool_calls,
+        session_exhausted=mapping.session_exhausted,
+        cost_usd=cost_usd,
+        mapping_provider=mapping_client.provider,
+        mapping_model=mapping_client.model_name,
+        cost_details=cost_details,
+        evidence=evidence,
+        model_calls=model_calls,
+        tool_trace=tool_trace,
+        mapping_selection=mapping.mapping_selection,
+        structure_stages=structure_stages,
+    )
 
 
 @dataclass
@@ -107,6 +173,32 @@ class SharedWorkbook:
 
 def shared_workbook(workbook: Path) -> SharedWorkbook:
     return SharedWorkbook(Path(workbook))
+
+
+@dataclass
+class SharedPdfDocument:
+    """One positioned PDF record retained through CLI period selection."""
+
+    path: Path
+    record: PdfDocumentRecord | None = None
+    released: bool = False
+
+    def require(self) -> PdfDocumentRecord:
+        if self.released:
+            raise ValueError("This PDF document was already released to mapping.")
+        if self.record is None:
+            self.record = read_pdf_document(
+                self.path, source_id=f"primary:{self.path.stem}"
+            )
+        return self.record
+
+    def release(self) -> None:
+        self.record = None
+        self.released = True
+
+
+def shared_pdf_document(pdf: Path) -> SharedPdfDocument:
+    return SharedPdfDocument(Path(pdf))
 
 
 def _artifact(run: StructureRun, stage_name: str, key: str) -> dict:
@@ -255,14 +347,15 @@ class _PdfStageSnapshot:
     tool_trace: list[dict] = field(default_factory=list)
 
 
-def _write_pdf_failure(
+def _write_stage_failure(
     path: Path,
     exc: Exception,
     *,
     client,
     stage: str,
+    context: dict[str, Any] | None = None,
 ) -> None:
-    """Persist paid PDF-stage context before the exception leaves the pipeline."""
+    """Persist paid-stage context before an exception leaves the pipeline."""
     diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
     diagnostics.setdefault("stage", stage)
     diagnostics.setdefault(
@@ -273,6 +366,7 @@ def _write_pdf_failure(
     )
     payload = {
         "error": f"{type(exc).__name__}: {exc}",
+        **(context or {}),
         **diagnostics,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,8 +378,9 @@ def discover_pdf_periods(
     *,
     output_dir: Path,
     progress: Callable[[str], None] | None = None,
+    parsed: SharedPdfDocument | None = None,
 ) -> PdfDiscoveryResult:
-    """Discover PDF periods, persist compact JSON, then release page text."""
+    """Discover PDF periods, optionally retaining page text for the CLI."""
     from hotel_pl_normalizer.models.pdf_structure import PdfExploration
 
     started = time.perf_counter()
@@ -294,7 +389,11 @@ def discover_pdf_periods(
     output_dir.mkdir(parents=True, exist_ok=True)
     if progress:
         progress("Reading positioned text from the PDF")
-    document = read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+    document = (
+        parsed.require()
+        if parsed is not None
+        else read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+    )
     if progress:
         progress("Finding financial pages and available periods")
     client = create_model_client(
@@ -304,7 +403,7 @@ def discover_pdf_periods(
     try:
         explored = explore_pdf(document, client=client)
     except Exception as exc:
-        _write_pdf_failure(
+        _write_stage_failure(
             output_dir / "failure.json",
             exc,
             client=client,
@@ -335,8 +434,9 @@ def discover_pdf_periods(
         ),
         encoding="utf-8",
     )
-    del document
-    gc.collect()
+    if parsed is None:
+        del document
+        gc.collect()
     return result
 
 
@@ -365,6 +465,46 @@ def load_pdf_discovery(output_dir: Path) -> PdfDiscoveryResult:
     )
 
 
+def _require_meaningful_period_evidence(
+    evidence: list[EvidenceRow | dict],
+    period_labels: dict[str, str],
+) -> None:
+    """Fail before paid mapping when any selected period is blank or all zero."""
+
+    def value_for(row: EvidenceRow | dict, period_id: str):
+        if isinstance(row, EvidenceRow):
+            return row.values_by_period.get(period_id)
+        selected = row.get("selected_values") or row.get("values") or {}
+        if isinstance(selected, dict) and period_id in selected:
+            return selected.get(period_id)
+        if len(period_labels) == 1:
+            return row.get("selected_value", row.get("value"))
+        return None
+
+    missing: list[str] = []
+    for period_id, label in period_labels.items():
+        meaningful = False
+        for row in evidence:
+            row_label = row.label if isinstance(row, EvidenceRow) else row.get("label")
+            if not str(row_label or "").strip():
+                continue
+            value = value_for(row, period_id)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                number = float(value)
+                if math.isfinite(number) and abs(number) > ZERO_EPSILON:
+                    meaningful = True
+                    break
+        if not meaningful:
+            missing.append(f"{label} [{period_id}]")
+    if missing:
+        raise RuntimeError(
+            "Selected period(s) produced no finite, non-zero labeled numeric "
+            "evidence before mapping: "
+            + ", ".join(missing)
+            + ". Recheck the period binding instead of treating blanks as zeros."
+        )
+
+
 def normalize_pdf(
     pdf: Path,
     *,
@@ -375,6 +515,7 @@ def normalize_pdf(
     on_activity: Callable[[str], None] | None = None,
     discovery: PdfDiscoveryResult | None = None,
     limiter=None,
+    parsed: SharedPdfDocument | None = None,
 ) -> NormalizationResult:
     """Normalize a PDF after the caller explicitly chooses discovered periods."""
     started = time.perf_counter()
@@ -385,12 +526,19 @@ def normalize_pdf(
     structure_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
-        progress(
-            "Re-reading positioned text from the PDF"
-            if discovery is not None
-            else "Reading positioned text from the PDF"
-        )
-    document = read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+        if parsed is not None:
+            progress("Reusing positioned text already held for this PDF")
+        else:
+            progress(
+                "Re-reading positioned text from the PDF"
+                if discovery is not None
+                else "Reading positioned text from the PDF"
+            )
+    document = (
+        parsed.require()
+        if parsed is not None
+        else read_pdf_document(pdf, source_id=f"primary:{pdf.stem}")
+    )
     structure_client = create_model_client(
         reasoning_effort="medium",
         repair_reasoning_effort="medium",
@@ -401,7 +549,7 @@ def normalize_pdf(
         try:
             exploration = explore_pdf(document, client=structure_client)
         except Exception as exc:
-            _write_pdf_failure(
+            _write_stage_failure(
                 structure_dir / "failure.json",
                 exc,
                 client=structure_client,
@@ -446,7 +594,7 @@ def normalize_pdf(
             cancel=limiter,
         )
     except Exception as exc:
-        _write_pdf_failure(
+        _write_stage_failure(
             structure_dir / "failure.json",
             exc,
             client=structure_client,
@@ -471,30 +619,17 @@ def normalize_pdf(
         binding.structure,
         period_ids=usable_ids,
     )
-    if not any(item.get("selected_value") is not None for item in evidence):
-        raise RuntimeError("PDF bindings produced no labeled numeric evidence rows.")
     labels = {period_id: discovered[period_id].label for period_id in usable_ids}
-    period_maps = {}
-    for period_id in usable_ids:
-        period_maps[period_id] = PeriodColumnSelectionMap(
-            selection_map_id=f"pdf:{document.document_id}:{period_id}",
-            workbook_id=document.document_id,
-            requested_period=labels[period_id],
-            sheet_selections=[
-                PeriodColumnSelection(
-                    sheet_name=f"Pages {item.start_page}-{item.end_page}",
-                    value_column=max(1, round(item.right_edge * 1000)),
-                    excel_column=f"x={item.right_edge:.3f}",
-                    period_label=labels[period_id],
-                    evidence=list(item.evidence),
-                )
-                for item in binding.structure.bindings
-                if item.period_id == period_id
-            ],
-            notes=["PDF point anchors; no intermediate Excel workbook was created."],
-        )
+    _require_meaningful_period_evidence(evidence, labels)
+    period_locations = PeriodLocationSummary.from_pdf(
+        binding.structure,
+        labels,
+        period_ids=usable_ids,
+    )
 
     document_id = document.document_id
+    if parsed is not None:
+        parsed.release()
     del document
     gc.collect()
 
@@ -505,7 +640,8 @@ def normalize_pdf(
         binding.structure.model_dump_json(indent=2), encoding="utf-8"
     )
     (structure_dir / "evidence.json").write_text(
-        json.dumps(evidence, indent=2), encoding="utf-8"
+        json.dumps([audit_evidence_dict(row) for row in evidence], indent=2),
+        encoding="utf-8",
     )
 
     if progress:
@@ -521,7 +657,7 @@ def normalize_pdf(
     mapping = map_workbook(
         workbook_id=document_id,
         requested_period=labels[usable_ids[0]],
-        periods=period_maps,
+        period_locations=period_locations,
         period_labels=labels,
         evidence=evidence,
         excluded_sheets=[],
@@ -532,35 +668,17 @@ def normalize_pdf(
     structure_cost = structure_client.estimate_cost(structure_calls)
     mapping_cost = mapping_client.estimate_cost(mapping.model_calls)
     cost_usd = round(structure_cost + mapping_cost, 6)
-    return NormalizationResult(
+    return _build_normalization_result(
         workbook_id=document_id,
         source_name=source_name,
         period_label=labels[usable_ids[0]],
-        values=mapping.values,
-        coa=mapping.coa,
         period_labels=labels,
-        period_values=mapping.values_by_period,
-        residual_plugs_by_period=mapping.residual_plugs_by_period,
-        checks_by_period=mapping.checks_by_period,
-        execution_issues_by_period=mapping.execution_issues_by_period,
         dropped_periods=dropped_periods,
-        decisions=mapping.decisions,
-        checks=mapping.checks,
-        execution_issues=mapping.execution_issues,
-        review_items=mapping.review_items,
-        accepted=mapping.accepted,
-        outcome=mapping.outcome.value,
-        exceptions=mapping.exceptions,
-        stopped_reason=mapping.stopped_reason,
+        mapping=mapping,
         duration_ms=(discovery.duration_ms if discovery is not None else 0)
         + round((time.perf_counter() - started) * 1000),
-        session_calls=mapping.session_calls,
-        session_call_ms=mapping.session_call_ms,
-        session_tool_calls=mapping.session_tool_calls,
-        session_exhausted=mapping.session_exhausted,
         cost_usd=cost_usd,
-        mapping_provider=mapping_client.provider,
-        mapping_model=mapping_client.model_name,
+        mapping_client=mapping_client,
         cost_details={
             "scope": "full_workflow_estimate",
             "provider": mapping_client.provider,
@@ -569,10 +687,9 @@ def normalize_pdf(
             "structure_cost_usd": structure_cost,
             "mapping_cost_usd": mapping_cost,
         },
-        evidence=evidence,
+        evidence=list(evidence),
         model_calls=[*structure_calls, *mapping.model_calls],
         tool_trace=[*exploration.tool_trace, *binding.tool_trace, *mapping.tool_trace],
-        mapping_selection=mapping.mapping_selection,
         structure_stages=[
             {
                 "stage_name": "pdf_period_discovery",
@@ -634,6 +751,12 @@ def normalize_workbook(
         include_sheets=included,
     )
     workbook_id = record.workbook_id
+    evidence_path = output_dir / "evidence.json"
+    evidence_path.write_text(
+        json.dumps([audit_evidence_dict(row) for row in evidence], indent=2),
+        encoding="utf-8",
+    )
+    _require_meaningful_period_evidence(evidence, period_labels)
     del record
     gc.collect()
 
@@ -646,18 +769,37 @@ def normalize_workbook(
     if limiter is not None:
         limiter.watch(client)
     primary_period_id = next(iter(period_maps))
-    mapping = map_workbook(
-        workbook_id=workbook_id,
-        requested_period=period_labels[primary_period_id],
-        periods=period_maps,
-        period_labels=period_labels,
-        evidence=evidence,
-        excluded_sheets=sorted(excluded),
-        client=client,
-        sheet_routing_context=sheet_routing_context,
-        on_activity=on_activity,
-        cancel=limiter,
-    )
+    try:
+        mapping = map_workbook(
+            workbook_id=workbook_id,
+            requested_period=period_labels[primary_period_id],
+            period_locations=PeriodLocationSummary.from_excel(
+                period_maps,
+                period_labels,
+            ),
+            period_labels=period_labels,
+            evidence=evidence,
+            excluded_sheets=sorted(excluded),
+            client=client,
+            sheet_routing_context=sheet_routing_context,
+            on_activity=on_activity,
+            cancel=limiter,
+        )
+    except Exception as exc:
+        _write_stage_failure(
+            output_dir / "failure.json",
+            exc,
+            client=client,
+            stage="excel_mapping",
+            context={
+                "source_name": source_name,
+                "workbook_id": workbook_id,
+                "period_labels": period_labels,
+                "evidence_path": str(evidence_path),
+                "structure_model_calls": _structure_usage(prior_run),
+            },
+        )
+        raise
     cost_usd, cost_details = estimate_workflow_cost(
         prior_run,
         mapping.model_calls,
@@ -667,39 +809,20 @@ def normalize_workbook(
     if prior_run.telemetry is not None:
         duration_ms += prior_run.telemetry.metrics.duration_ms
 
-    return NormalizationResult(
+    return _build_normalization_result(
         workbook_id=workbook_id,
         source_name=source_name,
         period_label=period_labels[primary_period_id],
-        values=mapping.values,
-        coa=mapping.coa,
         period_labels=period_labels,
-        period_values=mapping.values_by_period,
-        residual_plugs_by_period=mapping.residual_plugs_by_period,
-        checks_by_period=mapping.checks_by_period,
-        execution_issues_by_period=mapping.execution_issues_by_period,
         dropped_periods=dropped_periods,
-        decisions=mapping.decisions,
-        checks=mapping.checks,
-        execution_issues=mapping.execution_issues,
-        review_items=mapping.review_items,
-        accepted=mapping.accepted,
-        outcome=mapping.outcome.value,
-        exceptions=mapping.exceptions,
-        stopped_reason=mapping.stopped_reason,
+        mapping=mapping,
         duration_ms=duration_ms,
-        session_calls=mapping.session_calls,
-        session_call_ms=mapping.session_call_ms,
-        session_tool_calls=mapping.session_tool_calls,
-        session_exhausted=mapping.session_exhausted,
         cost_usd=cost_usd,
-        mapping_provider=client.provider,
-        mapping_model=client.model_name,
+        mapping_client=client,
         cost_details=cost_details,
         evidence=list(evidence),
         model_calls=mapping.model_calls,
         tool_trace=mapping.tool_trace,
-        mapping_selection=mapping.mapping_selection,
         structure_stages=[
             {
                 "stage_name": stage.stage_name,
@@ -722,3 +845,23 @@ def validated_period_ids(prior: StructureRun) -> set[str]:
         _artifact(prior, "period_discovery", "catalog")
     )
     return {option.period_id for option in catalog.options}
+
+
+def validated_pdf_period_ids(prior: PdfDiscoveryResult) -> set[str]:
+    """Return PDF periods validated against the controlling summary."""
+    exploration = prior.exploration
+    summary = exploration.controlling_summary_pages
+    if summary is None:
+        return set()
+
+    summary_pages = set(range(summary.start_page, summary.end_page + 1))
+    return {
+        period.period_id
+        for period in exploration.periods
+        if summary_pages
+        & {
+            page
+            for page_range in period.pages_present
+            for page in range(page_range.start_page, page_range.end_page + 1)
+        }
+    }

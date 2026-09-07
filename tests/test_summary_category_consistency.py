@@ -59,6 +59,10 @@ def _combined_fixture(
                 ),
                 coa_ids=[SUMMARY_OOD, SUMMARY_MISC, DETAIL_OOD, DETAIL_MISC],
                 source_rows=[summary_row, detail_ood_row, detail_misc_row],
+                selected_source_rows=[summary_row],
+                alternate_source_rows=[detail_ood_row, detail_misc_row],
+                selected_source_operation="direct",
+                alternate_source_operation="sum",
             )
         )
     plan = WorkbookSourcePlan(
