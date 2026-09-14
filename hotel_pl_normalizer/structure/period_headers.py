@@ -215,8 +215,8 @@ def column_scenario_markers(sheet: WorkbookSheet, column: int) -> set[str]:
 
     The sibling fallback is deliberately narrow: it applies only beneath a
     merged heading spanning at least a monthly-spread width, and only when the
-    selected column has a later direct period identity. Mixed sibling scenarios
-    remain ambiguous and therefore return no deterministic scenario marker.
+    selected column has a later direct period identity or merged Total. Mixed
+    sibling scenarios remain ambiguous and return no deterministic marker.
     """
 
     direct_entries_by_column = _direct_header_entries_by_column(sheet)
@@ -263,8 +263,9 @@ def column_scenario_markers(sheet: WorkbookSheet, column: int) -> set[str]:
     )
     identity_rows = [
         entry_row
-        for entry_row, _, markers in direct_entries
+        for entry_row, text, markers in _column_header_entries(sheet, column)
         if entry_row > row and _has_period_identity(markers)
+        and ((entry_row, text, markers) in direct_entries or text.casefold() == "total")
     ]
     if span < MONTHLY_SPREAD_THRESHOLD or not identity_rows:
         return set(scenarios)

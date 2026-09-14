@@ -51,6 +51,10 @@ from hotel_pl_normalizer.models.workbook import (
 from hotel_pl_normalizer.structure.binding.agent import bind_periods
 from hotel_pl_normalizer.structure.binding.checks import check_bindings
 from hotel_pl_normalizer.structure.binding.toolset import PeriodBindingToolset
+from hotel_pl_normalizer.structure.representation.builder import (
+    LabelLayout,
+    select_row_label,
+)
 
 
 def _strategy() -> WorkbookStrategy:
@@ -332,9 +336,9 @@ def test_canonical_mapping_prompt_prefix_has_golden_bytes_and_hash():
     }
     encoded = _stable_mapping_prompt_prefix(model_coa).encode("utf-8")
 
-    assert len(encoded) == 94537
+    assert len(encoded) == 103820
     assert hashlib.sha256(encoded).hexdigest() == (
-        "5e6ab0f8d0fa38a1d91606b4b0ee5504a9c693b066004ffa9842acae5b25af25"
+        "a14e1e9e7e6fd8328f93db137c428324a0a9ad043ad9d3a579af3d6f24fb81d5"
     )
 
 
@@ -399,6 +403,25 @@ def test_reordered_prompt_is_semantically_the_old_combined_json_payload():
     ]
     assert "mapping_rules" not in payload
     assert prompt.startswith(_stable_mapping_prompt_prefix(model_coa))
+
+
+def test_distant_source_caption_reaches_mapper_without_changing_values():
+    row = WorkbookRow(row_index=185, cells=[
+        CellRecord(row=185, column=column, address=f"R185C{column}", raw_value=value)
+        for column, value in [(2, "KITCHEN"), (3, "FDBP"), (4, "DPRM"),
+                              (5, "Kitchen Management"), (6, 397092.87)]
+    ])
+    selected = select_row_label(row, LabelLayout(primary_column=3))
+    evidence = [{"row_key": "Summary!185", "label": selected.cell.raw_value,
+                 "label_context": [cell.raw_value for cell in selected.context],
+                 "selected_values": {"actual": 397092.87, "prior": 310737.37}}]
+    prompt = _primary_prompt("wb-a", "2025 Actual", {"actual": _period_map()},
+        {"actual": "2025 Actual", "prior": "2024 Actual"}, evidence, _load_coa(), [])
+    payload = json.loads(prompt.split(f"{WORKBOOK_DYNAMIC_DATA_MARKER}\n\n", 1)[1])
+    assert selected.cell.raw_value == "FDBP"
+    assert payload["workbook_rows"][0]["rows"] == [
+        "185|FDBP / KITCHEN / DPRM / Kitchen Management|397092.87|310737.37"
+    ]
 
 
 def test_mapping_selection_records_stable_prefix_telemetry(monkeypatch):

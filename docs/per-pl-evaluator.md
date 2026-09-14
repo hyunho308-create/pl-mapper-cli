@@ -42,8 +42,12 @@ period IDs are available. Otherwise the check uses recorded periods plus
   with no source rows, against its siblings and source labels/amounts.
 - Feedback warnings/errors, raw validator findings/checks, execution errors, and
   unresolved human decisions. Referenced source rows are included even when no
-  child account uses them. Exact duplicate records are removed; a feedback
-  explanation and its distinct raw validator evidence may both be shown.
+  child account uses them. Repeated issues are grouped across periods and saved
+  feedback/check copies. Each group retains its highest severity, affected
+  periods/accounts, source references, distinct explanations and amounts, and
+  original occurrence count. Feedback and raw checks join only when account,
+  period, cited scope and quantified comparison agree unambiguously; distinct
+  source conflicts stay separate.
 - Source/output readability, evidence integrity, and workbook-to-log agreement.
 
 Python identifies gap candidates. Codex judges accounting meaning. An unused
@@ -52,8 +56,16 @@ of missing detail. Review source presentation notes as claims, not as proof.
 Zero stays distinct from missing. Do not sum all source rows: totals overlap.
 
 Tables use short A IDs for COA accounts, P IDs for periods, R IDs for source rows,
-and D IDs for original sheets/pages. Definitions appear once. All active child
-mappings and all nonzero numeric evidence rows are retained; no row cap is applied.
+and D IDs for original sheets/pages. Start with the complete child overview, with
+direct source labels, locations, columns and context inline, and expand the referenced supporting tables for
+context, adjustments, residuals and gap candidates. COA definitions include all
+synonyms; repeated wording is printed once under an N ID. Identical source
+labels/period values/headings are printed once while retaining every original
+R ID, location, column and use. This compression does not assert that two rows
+have the same accounting scope. A direct source whose values equal its child's
+values appears once in that child's overview row; the source table supplies all
+remaining rows. All active child mappings and all nonzero
+numeric evidence rows are retained; no row cap is applied.
 Amounts come from the saved log; workbook disagreements are listed separately.
 
 ## Status and timing
@@ -64,10 +76,19 @@ semantic review. Missing artifacts/references prevent a complete preparation.
 Local warnings and candidate gaps remain for review, even if the mapper accepted
 its result. Rejected runs still expose their available warnings and evidence.
 
-Codex separately returns `no issues found`, `issues found`, or `incomplete`, plus
-counts of periods, children, and findings actually reviewed. A skipped finding or
-child means incomplete. This is a quick output check, not a source ingestion audit:
+Codex separately returns `READY` or `REVIEW`, plus counts of periods, children,
+grouped findings and recorded occurrences actually reviewed. `READY` means no
+important issue requiring the analyst's attention was found in the completed
+review. `REVIEW` includes important mapping defects, material source conflicts,
+missing requested periods, rejected runs and incomplete reviews. Minor rounding,
+valid unsplit parents and harmless presentation notes remain background notes.
+Importance is a model judgment grounded in source evidence and affected amounts;
+there is no extra rule engine or fixed dollar cutoff. A skipped finding or
+child means incomplete and therefore `REVIEW`. This is a quick output check, not a source ingestion audit:
 data that never entered the saved evidence cannot be recovered by this evaluator.
+
+For unattended batches and one final analyst queue, see [the batch review
+workflow](comps-review-workflow.md).
 
 The command prints elapsed local processing time. Benchmark the complete Codex
 review separately; preparation speed is not a promise about model response time.

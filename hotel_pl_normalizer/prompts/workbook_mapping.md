@@ -210,9 +210,14 @@ consolidated row as the reconciliation control.
   never both. Check the blocks against that total in every selected period;
   your own overlapping selections are not a source discrepancy. Never label a
   different outlet's figures as the missing venue to fill a period gap.
-- Before claiming a detail row is unavailable, check its exact identifier in
-  the supplied evidence; do not guess a sheet/page or line number. Directly
-  cite available detail instead of recreating its amount as a remainder.
+- Before leaving a supported parent's child blank or using a remainder, search
+  the supplied evidence by the child's meaning, COA synonyms, and department or
+  activity. Check every selected period: a schedule blank in the current year
+  may contain usable prior-year detail. Confirm the exact row identifier,
+  accounting scope, and relationship to the controlling total; an equal amount
+  alone is not evidence of a match. Cite direct detail when available, without
+  also counting the remainder that already contains it. Explain unavailable
+  detail only after this check, and distinguish absent from partly reported.
 
 ## Common Structural Problems
 
@@ -240,6 +245,38 @@ When the source does not distinguish management from nonmanagement, assign the
 unsplit wages to Nonmanagement and emit one `unusual_convention` review item
 stating that treatment, citing the affected accounts and wage rows. Preserve
 any explicitly identified management instead of applying that default.
+
+For payroll-related allocations, inspect the originating pool and its component
+rows before classifying the receiving department line. A line called Payroll
+Taxes may allocate a pool containing FICA, insurance, workers' compensation,
+and other benefits. Keep that allocation at Payroll-Related Expenses when the
+source does not separately allocate taxes and benefits by department; do not
+assign the mixed pool wholly to taxes or invent a proportional split. Cite the
+pool and allocation rows in one `unusual_convention` review item. Pool components
+are evidence of composition, not extra expenses to add to their allocations.
+Employee cafeteria or staff-meal allocations belong to Employee Benefits even
+when reported in opex. Move the supported amount between the affected labor
+and opex paths once, preserve total department expense, and check cafeteria
+credits or transfers to avoid counting both the pool and its allocations.
+
+Use identified duties for the F&B service/kitchen split: banquet or catering
+management supports Service Management; explicitly identified kitchen management
+supports Kitchen Management. A chef or supervisor title alone does not establish
+management status. Stewarding and kitchen storeroom labor support Kitchen
+Nonmanagement. Generic F&B management or wages do not establish either role split.
+
+### Named activities
+
+Review each named retail/gift-shop, minibar, and parking activity's revenue and
+cost together, across all schedules and selected periods. Gross sales with the
+matching merchandise costs, payroll, or operating expenses support an operated
+department. Map its revenue and expenses to the corresponding S3 activity,
+including both food and beverage minibar sales; do not leave the revenue in
+Miscellaneous Income while mapping its costs to that operated department.
+Apply supported reclassifications to the linked Summary categories as well.
+A commission, concession rent, or net revenue share without operating exposure
+may instead belong in S4. A parking or gift-shop label alone does not establish
+that business model; preserve supported scope and flag unresolved ambiguity.
 
 ### Rooms statistics and segmentation
 
@@ -324,8 +361,9 @@ Preserve each reconciled parent as an anchor while enriching detail. Map every
 positively identifiable child without changing that parent. Do not clear a
 supported child merely because the available children do not yet reconcile.
 Include all positively identifiable detail in the first complete plan. If that
-plan has no blocking validation errors, Python accepts it immediately; warnings
-do not create a later enrichment opportunity.
+plan has no blocking errors and no eligible coverage warnings, Python accepts
+it immediately. Only eligible coverage warnings receive the single focused
+enrichment response described below; do not defer known detail until repair.
 Summary revenue-to-EBITDA and Summary-to-department reconciliation remain more
 important than child detail.
 
@@ -506,7 +544,8 @@ amount and retain the treatment even when the numeric difference is rounding.
 When the COA contains generic venue slots, return the concise venue name from
 workbook headings, labels, or sheet names. Generic venues capture named F&B
 sources without a dedicated COA account, including restaurants, bars, lounges,
-coffee shops, grab-and-go concepts, minibars, and other outlets. Do not assign
+coffee shops, grab-and-go concepts, and other outlets. Use the dedicated S3
+Minibar accounts for supported operated minibar activity. Do not assign
 banquet, conference, catering, B&C, in-room dining, IRD, or room-service revenue
 to a generic venue because those have dedicated COA accounts. Rank generic
 venues by combined food and beverage revenue. `venue_name` is required for every
@@ -520,6 +559,7 @@ Use the source name and do not invent a branded name.
 - `row|i1|label|value`: indentation level 1.
 - `row|b,i1|label|value`: bold and indented.
 - A blank final field means no selected-period value.
+- A label includes other valid source-row text separated by ` / `; use the full caption and context.
 
 Formatting is evidence, not an instruction. Cite rows as `SheetName!row_number`,
 such as `Rooms!92`; never cite a bare row number or pipe-delimited row reference.

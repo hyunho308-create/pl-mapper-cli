@@ -17,6 +17,7 @@ from hotel_pl_normalizer.pipeline import (
     normalize_pdf,
     normalize_workbook,
     shared_workbook,
+    validated_pdf_period_ids,
     validated_period_ids,
 )
 from hotel_pl_normalizer.run_log import write_run_log
@@ -36,10 +37,29 @@ def _choose_period_ids(
     valid_ids: set[str],
     requested_ids: list[str],
     annual_periods: int = 0,
+    actual_year: int | None = None,
 ) -> list[str]:
     """Batch-only policy that replaces the normal human selection boundary."""
     if requested_ids:
         return _validate_period_ids(catalog, valid_ids, requested_ids)
+    if actual_year is not None:
+        selected = []
+        for year in (actual_year, actual_year - 1):
+            matches = [
+                item["period_id"]
+                for item in catalog["options"]
+                if item["period_id"] in valid_ids
+                and item["scenario"] == "actual"
+                and item["start_month"] == f"{year:04d}-01"
+                and item["end_month"] == f"{year:04d}-12"
+            ]
+            if len(matches) > 1 or (year == actual_year and not matches):
+                raise RuntimeError(
+                    f"Expected one validated full-calendar-year Actual for {year}; "
+                    f"found {len(matches)}. Review the discovery catalog."
+                )
+            selected.extend(matches)
+        return selected
     annual = [
         item["period_id"]
         for item in catalog["options"]
@@ -71,6 +91,12 @@ def main() -> None:
         help="Period id to map; repeat to map multiple periods.",
     )
     selection.add_argument(
+        "--actual-year",
+        type=int,
+        metavar="YEAR",
+        help="Map full-calendar-year Actual for YEAR and prior-year Actual if validated.",
+    )
+    selection.add_argument(
         "--annual-periods",
         type=int,
         default=0,
@@ -81,7 +107,9 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    if not args.period_id and args.annual_periods < 1:
+    if args.actual_year is not None and not 1000 <= args.actual_year <= 9999:
+        parser.error("--actual-year must be a four-digit year")
+    if not args.period_id and args.actual_year is None and args.annual_periods < 1:
         parser.error("--annual-periods must be at least 1")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,9 +128,10 @@ def main() -> None:
         }
         selected_ids = _choose_period_ids(
             catalog,
-            {item["period_id"] for item in catalog["options"]},
+            validated_pdf_period_ids(discovery),
             args.period_id,
             annual_periods=args.annual_periods,
+            actual_year=args.actual_year,
         )
         result = normalize_pdf(
             args.workbook,
@@ -129,6 +158,7 @@ def main() -> None:
             validated_period_ids(discovery),
             args.period_id,
             annual_periods=args.annual_periods,
+            actual_year=args.actual_year,
         )
         labels = {
             item["period_id"]: item["label"] for item in catalog["options"]

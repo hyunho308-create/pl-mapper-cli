@@ -116,10 +116,12 @@ partial.
 Description: A partial child mapping does not reconcile to its parent even
 though the hierarchy has a residual account.
 
-Resolution: First consider whether amounts belong in specific sibling accounts.
-Keep the reconciled parent fixed, map every positively identifiable child, and
-use the legitimate residual for remaining supported accounts. A plug of 5% or
-more remains blocking during repair; never invent source detail.
+Resolution: Search the supplied department and activity evidence for specific
+siblings in every selected period before accepting a remainder. Confirm label,
+scope, and subtotal membership; an equal amount alone is insufficient. Keep the
+reconciled parent fixed, replace any overlapping remainder with direct detail,
+and use the legitimate residual for remaining supported accounts. A plug of 5%
+or more remains blocking during repair; never invent source detail.
 
 ### `coverage_inconsistent`
 
@@ -303,19 +305,24 @@ detail to complete the COA hierarchy.
 
 Resolution: Preserve the reconciled parent as an anchor and map every positively
 identifiable child without changing it. Do not clear supported children merely
-because coverage is incomplete. Use `not_present` only when the source contains
-no usable evidence for this child hierarchy. After validation has no blocking
-errors, use one focused enrichment pass for all such parents, then finish with
-the warnings preserved rather than guessing or repeatedly revisiting unavailable
-detail.
+because coverage is incomplete. Search by child meaning and COA synonyms across
+the relevant schedules, including periods where a current-year blank conceals
+prior-year detail. Verify the row's department, role, and accounting scope before
+using it. Use `not_present` only when no selected period has usable child
+evidence. An unsplit mixed payroll-tax/benefit allocation or generic F&B wage
+line can remain at its supported parent; do not invent a split. After validation
+has no blocking errors, use one focused enrichment pass for all such parents,
+then finish with the warnings preserved rather than repeatedly revisiting them.
 
 ### `unsupported_residual_remainder`
 
 Description: A material all-other amount was calculated as a subtotal remainder
 rather than supported by directly identified source detail.
 
-Resolution: Prefer identifiable residual source rows. If none exist, retain the
-reconciled remainder and disclose the coverage gap.
+Resolution: Search the affected department or named activity for direct detail
+in every selected period. Confirm meaning and scope before replacing a remainder;
+do not add a row already included in it. If no supported detail exists, retain
+the reconciled remainder and disclose the coverage gap.
 
 ### `unresolved_ambiguity`
 

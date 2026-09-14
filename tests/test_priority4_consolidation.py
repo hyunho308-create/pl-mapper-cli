@@ -297,9 +297,9 @@ def test_shared_coa_loader_preserves_projection_order_and_isolation():
     assert list(first) == canonical_coa_ids()
     assert list(first) == list(_load_coa())
     assert len(first) == 271
-    assert len(_compact_bytes(first)) == 95714
+    assert len(_compact_bytes(first)) == 101912
     assert hashlib.sha256(_compact_bytes(first)).hexdigest() == (
-        "d1208f75ed10f21316c6e4e5469161c8d1a4187e05744d088dda4fe27ba76d45"
+        "d6fe7e74388c0f8c44424be18f5e49cf68dd86ae256a4e0f6aa261198906fd69"
     )
     assert set(next(iter(first.values()))) == {
         "department",

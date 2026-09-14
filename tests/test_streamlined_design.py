@@ -53,7 +53,10 @@ from hotel_pl_normalizer.structure.exploration.agent import render_exploration_p
 from hotel_pl_normalizer.structure.exploration.toolset import (
     WorkbookExplorationToolset,
 )
-from hotel_pl_normalizer.structure.period_headers import period_column_problem
+from hotel_pl_normalizer.structure.period_headers import (
+    column_scenario_markers,
+    period_column_problem,
+)
 
 
 def _record() -> WorkbookRecord:
@@ -1116,6 +1119,37 @@ class StreamlinedDesignTests(unittest.TestCase):
                 latest_period_year=2025,
             )
         )
+
+        sheet.max_column = 15
+        sheet.merged_ranges.append(MergedRange("N3:O3", 3, 14, "Total"))
+        for month_scenario, total_caption, expected in (
+            ("ACT", "Total", {"actual"}),
+            ("FCST", "Total", set()),
+            ("ACT", "Budget", {"budget"}),
+        ):
+            with self.subTest(month_scenario=month_scenario, total=total_caption):
+                december = sheet.rows[2].cells[-2]
+                december.raw_value = december.display_value = (
+                    f"December 2025 ({month_scenario})"
+                )
+                sheet.merged_ranges[-1].value = total_caption
+                sheet.rows[2].cells[-1].raw_value = total_caption
+                sheet.rows[2].cells[-1].display_value = total_caption
+                self.assertEqual(column_scenario_markers(sheet, 14), expected)
+                problem = period_column_problem(
+                    sheet,
+                    CanonicalPeriod(
+                        scenario=PeriodScenario.ACTUAL,
+                        start_month="2025-01",
+                        end_month="2025-12",
+                    ),
+                    "N",
+                    latest_period_year=2025,
+                )
+                if expected == {"budget"}:
+                    self.assertIn("budget", problem)
+                else:
+                    self.assertIsNone(problem)
 
     def test_scripted_binding_reaches_the_period_selection_map(self) -> None:
         class ScriptedClient:

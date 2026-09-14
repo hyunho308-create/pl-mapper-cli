@@ -127,11 +127,11 @@ def select_row_label(row: WorkbookRow, layout: LabelLayout) -> LabelSelection:
         # indented/rightward cell when both sides contain text.
         selected = max(candidates, key=lambda cell: cell.column)
         rule = "local_override_adjacent" if override is not None else "adjacent_indent"
-    context = tuple(cell for cell in candidates if cell is not selected)
+    context = tuple(cell for cell in valid if cell is not selected)
     return LabelSelection(
         cell=selected,
         context=context,
-        status="selected" if len(candidates) == 1 else "selected_with_context",
+        status="selected_with_context" if context else "selected",
         rule=rule,
     )
 

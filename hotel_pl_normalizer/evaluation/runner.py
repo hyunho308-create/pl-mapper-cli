@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any
 
 from hotel_pl_normalizer.evaluation.evidence import build_evidence_index
+from hotel_pl_normalizer.evaluation.grouping import group_findings
 from hotel_pl_normalizer.evaluation.mechanical import run_mechanical_checks
 from hotel_pl_normalizer.evaluation.models import (
     EvaluationResult,
@@ -102,6 +103,7 @@ def _collect_review(log: dict, result: EvaluationResult, expected: list[str]) ->
         refs=(),
         detail: Any = None,
         origin: str = "local",
+        metadata: dict | None = None,
     ) -> None:
         references = list(dict.fromkeys(refs))
         needed.update(references)
@@ -115,6 +117,7 @@ def _collect_review(log: dict, result: EvaluationResult, expected: list[str]) ->
                 "refs": references,
                 "detail": detail,
                 "origin": origin,
+                **(metadata or {}),
             }
         )
 
@@ -248,12 +251,15 @@ def _collect_review(log: dict, result: EvaluationResult, expected: list[str]) ->
                     )
 
     for parent, child_ids in children.items():
+        if not any(
+            _nonzero(values.get(pid, {}).get(cid))
+            for pid in periods for cid in [parent, *child_ids]
+        ):
+            continue
         for pid in periods:
             period_values = values.get(pid, {})
             amount = period_values.get(parent)
             count = sum(_nonzero(period_values.get(cid)) for cid in child_ids)
-            if not _nonzero(amount) and not count:
-                continue
             declaration = accounts.get(parent, {}).get("child_coverage")
             result.coverage.append(
                 {
@@ -305,7 +311,9 @@ def _collect_review(log: dict, result: EvaluationResult, expected: list[str]) ->
     for key, row in rows.items():
         row_values = [_row_value(row, pid) for pid in periods]
         scope = _label_key(row)[:2]
-        label = str(row.get("label") or "")
+        label = " / ".join(dict.fromkeys(filter(None, [
+            row.get("label"), *(row.get("label_context") or []),
+        ])))
         if not any(_number(v) for v in row_values) and label:
             context[scope] = label
         if key not in needed and not any(_nonzero(v) for v in row_values):
@@ -345,30 +353,63 @@ def _collect_review(log: dict, result: EvaluationResult, expected: list[str]) ->
             "name": meta["account_name"],
             "parent": meta["parent_coa_id"],
             "note": meta["mapping_note"],
+            "synonyms": meta["synonyms"],
         }
         for cid, meta in coa.items()
         if cid in definitions
     ]
+    result.findings = group_findings(result.findings)
 
 
 def _collect_findings(log: dict, accounts: dict, add) -> None:
-    """Keep explanations AND raw errors; remove exact duplicates."""
-    seen = set()
+    """Collect all occurrences; group their underlying issues after collection."""
+    period_labels: dict[str, set[str]] = defaultdict(set)
+    for period in log["source"]["periods"]:
+        period_labels[period["label"]].add(period["period_id"])
+    recorded_ids = {period["period_id"] for period in log["source"]["periods"]}
+
+    def resolve_period(item: dict) -> dict:
+        value = item.get("period_id") or (item.get("details") or {}).get("period")
+        if value in recorded_ids:
+            return {**item, "period_id": value}
+        matches = period_labels.get(value, set())
+        if len(matches) == 1:
+            return {**item, "period_id": next(iter(matches))}
+        return item
+
+    reviews = {
+        item.get("review_item_id"): item for item in log.get("review_items", [])
+        if item.get("review_item_id")
+    }
+    structured = [*log.get("findings", []), *[
+        {**item, "period_id": item.get("period_id") or pid}
+        for pid, items in log.get("findings_by_period", {}).items() for item in items
+    ]]
+    scopes: dict[str, set[tuple[str, ...]]] = defaultdict(set)
+    for item in structured:
+        item = resolve_period(item)
+        review = reviews.get(item.get("review_item_id"), {})
+        scope = tuple(sorted(_refs(review.get("source_rows", [])) or _refs(item.get("source_refs", []))))
+        if scope:
+            scopes[_raw_signature(item)].add(scope)
 
     def emit(item: dict, origin: str) -> None:
         if item.get("severity") not in {"warning", "error"}:
             return
-        signature = json.dumps(
-            {k: v for k, v in item.items() if k != "legacy"}, sort_keys=True
-        )
-        if signature in seen:
-            return
-        seen.add(signature)
+        item = resolve_period(item)
+        primary = item.get("target") or item.get("primary_coa_id")
         targets = item.get("affected_coa_ids") or [
             item.get("target") or item.get("primary_coa_id")
         ]
         targets = [cid for cid in targets if cid]
         refs = _refs(item.get("source_refs", []))
+        review = reviews.get(item.get("review_item_id"), {})
+        scope = tuple(sorted(_refs(review.get("source_rows", [])) or refs))
+        if not scope:
+            alternatives = scopes.get(_raw_signature(item), set())
+            if len(alternatives) == 1:
+                scope = next(iter(alternatives))
+        refs.extend(scope)
         for cid in targets:
             refs.extend(_refs(accounts.get(cid, {}).get("source_rows", [])))
             refs.extend(_refs(accounts.get(cid, {}).get("excluded_rows", [])))
@@ -377,8 +418,21 @@ def _collect_findings(log: dict, accounts: dict, add) -> None:
         ]
         if item.get("period_id"):
             periods.append(item["period_id"])
+        detail = item.get("details", item.get("periods"))
+        if item.get("consequences"):
+            detail = {"periods": detail, "consequences": item["consequences"]}
+        code = item.get("finding_id") or item.get("rule") or "finding"
+        if origin == "feedback":
+            identity = ("feedback", primary, scope, item.get("explanation"), item.get("category"))
+        else:
+            # Period amounts vary; equation/residual identity and source scope do not.
+            structural = {
+                key: value for key, value in (item.get("details") or {}).items()
+                if isinstance(value, str) and key != "period"
+            }
+            identity = (item.get("rule") or code, primary, scope, json.dumps(structural, sort_keys=True))
         add(
-            item.get("finding_id") or item.get("rule") or "finding",
+            code,
             item.get("explanation")
             or item.get("note")
             or item.get("rule", "Unexplained finding"),
@@ -386,8 +440,10 @@ def _collect_findings(log: dict, accounts: dict, add) -> None:
             targets=targets,
             refs=refs,
             period_ids=list(dict.fromkeys(periods)),
-            detail=item.get("details", item.get("periods")),
+            detail=detail,
             origin=origin,
+            metadata={"_identity": identity, "_primary": primary, "_scope": scope,
+                      "_comparisons": item.get("periods", [])},
         )
 
     for item in (log.get("feedback_manifest") or {}).get("findings", []):
@@ -405,7 +461,7 @@ def _collect_findings(log: dict, accounts: dict, add) -> None:
     ]
     for pid, item in checks:
         try:
-            emit(ensure_finding(item, period_id=pid).to_dict(), "validator")
+            emit(ensure_finding(item, period_id=pid).to_dict(), "check")
         except (TypeError, ValueError):
             add("unparsed_check", str(item), origin="validator")
     errors = [(None, item) for item in log.get("execution_issues", [])]
@@ -414,7 +470,7 @@ def _collect_findings(log: dict, accounts: dict, add) -> None:
         for pid, items in log.get("execution_issues_by_period", {}).items()
         for item in items
     ]
-    for pid, item in dict.fromkeys(errors):
+    for pid, item in errors:
         add(
             "execution_error",
             str(item),
@@ -422,6 +478,16 @@ def _collect_findings(log: dict, accounts: dict, add) -> None:
             period_ids=[pid] if pid else [],
             origin="execution",
         )
+
+
+def _raw_signature(item: dict) -> str:
+    """Connect rounded legacy checks to their typed, source-linked equivalent."""
+    return json.dumps(
+        [item.get("rule"), item.get("target"), item.get("period_id"), {
+            key: round(value, 4) if _number(value) else value
+            for key, value in (item.get("details") or {}).items() if key != "period"
+        }], sort_keys=True,
+    )
 
 
 def _refs(items) -> list[str]:

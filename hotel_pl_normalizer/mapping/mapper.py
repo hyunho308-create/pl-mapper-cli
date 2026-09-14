@@ -4715,7 +4715,9 @@ def _group_rows(evidence, period_labels=None):
         fields = [row]
         if flags:
             fields.append(",".join(flags))
-        fields.append(item.get("label") or "")
+        fields.append(" / ".join(dict.fromkeys(filter(None, [
+            item.get("label"), *(item.get("label_context") or []),
+        ]))))
         selected_values = item.get("selected_values") or {}
         fields.extend(
             _prompt_value(

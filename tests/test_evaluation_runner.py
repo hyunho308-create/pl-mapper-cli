@@ -8,8 +8,10 @@ import openpyxl
 import pytest
 from test_evaluation_mechanical import _excel_row, _row_ref, _write_mapped
 
+from hotel_pl_normalizer.evaluation.grouping import group_findings
 from hotel_pl_normalizer.evaluation.report import render_evaluation_markdown
 from hotel_pl_normalizer.evaluation.runner import evaluate_run
+from hotel_pl_normalizer.mapping.coa import load_coa
 from hotel_pl_normalizer.mapping.findings import Finding
 
 PARENT = "S1.other_expenses"
@@ -280,3 +282,205 @@ def test_absent_feedback_manifest_still_exposes_raw_errors(review_log, run_revie
     result = run_review(review_log)
     assert result.status == "incomplete"
     assert any(f["code"] == "execution_error" for f in result.findings)
+
+
+def test_review_includes_authoritative_synonyms(review_log, run_review):
+    result = run_review(review_log)
+    definition = next(item for item in result.definitions if item["coa_id"] == LAUNDRY)
+    assert definition["synonyms"] == load_coa()[LAUNDRY]["synonyms"]
+    assert definition["synonyms"].replace("|", "&#124;") in render_evaluation_markdown(result)
+
+
+def test_feedback_and_raw_copies_group_without_losing_period_amounts(review_log, run_review):
+    review_log["feedback_manifest"]["findings"] = [{
+        "finding_id": "source-conflict", "severity": "warning",
+        "primary_coa_id": PARENT, "affected_coa_ids": [PARENT],
+        "source_refs": ["P&L!4", "P&L!5"], "explanation": "Preserve both source layers.",
+        "periods": [
+            {"period_id": "actual", "selected_value": 100, "comparison_value": 90, "variance": 10},
+            {"period_id": "prior", "selected_value": 100, "comparison_value": 80, "variance": 20},
+        ],
+    }]
+    checks = [Finding("warning", "hierarchy_complete", PARENT,
+                      {"parent": 100, "children": amount, "variance": 100 - amount}, period_id=pid)
+              for pid, amount in (("actual", 90), ("prior", 80))]
+    review_log["findings"] = [item.to_dict() for item in checks]
+    review_log["findings_by_period"] = {item.period_id: [item.to_dict()] for item in checks}
+    review_log["checks_by_period"] = {item.period_id: [str(item)] for item in checks}
+    review_log["checks"] = [f"{item}|period={label}" for item, label in zip(checks, ("Actual", "Prior"))]
+    result = run_review(review_log)
+    assert len(result.findings) == 1
+    issue = result.findings[0]
+    assert issue["occurrences"] == 9
+    assert issue["periods"] == ["actual", "prior"]
+    assert {"feedback", "validator", "check"} == set(issue["origins"])
+    assert {"P&L!4", "P&L!5"} <= set(issue["refs"])
+    report = render_evaluation_markdown(result)
+    assert '"variance":10' in report and '"variance":20' in report
+    assert "9 recorded occurrences" in report
+
+
+def test_equal_amount_conflicts_with_different_source_scopes_stay_separate(review_log, run_review):
+    review_log["review_items"] = [
+        {"review_item_id": "first", "source_rows": ["P&L!4", "P&L!5"]},
+        {"review_item_id": "second", "source_rows": ["P&L!4", "P&L!6"]},
+    ]
+    review_log["findings"] = [
+        Finding("warning", "source_layer_conflict", PARENT,
+                {"actual": 100, "expected": 90, "variance": 10},
+                period_id="actual", review_item_id=identifier).to_dict()
+        for identifier in ("first", "second")
+    ]
+    result = run_review(review_log)
+    assert len(result.findings) == 2
+    assert {tuple(item["refs"]) for item in result.findings} == {
+        ("P&L!4", "P&L!5"), ("P&L!4", "P&L!6")
+    }
+
+
+def test_repeated_findings_keep_highest_severity(review_log, run_review):
+    review_log["findings"] = [
+        Finding(severity, "hierarchy_complete", PARENT, {"variance": 30},
+                period_id=pid).to_dict()
+        for severity, pid in (("warning", "actual"), ("error", "prior"))
+    ]
+    result = run_review(review_log)
+    assert len(result.findings) == 1
+    assert result.findings[0]["severity"] == "error"
+    assert result.findings[0]["occurrences"] == 2
+    assert result.status == "issues_found"
+    report = render_evaluation_markdown(result)
+    parent_id = next(f"A{i}" for i, item in enumerate(result.definitions, 1) if item["coa_id"] == PARENT)
+    assert f"warning / validator / hierarchy_complete|{parent_id},P1|" in report
+    assert f"error / validator / hierarchy_complete|{parent_id},P2|" in report
+
+
+def test_repeated_source_content_keeps_each_location_columns_and_use(review_log, run_review):
+    alternative = deepcopy(review_log["evidence_rows"][1])
+    alternative["row_key"] = "P&L!8"
+    alternative["locator"].update(identity="excel:P&L!8", display="P&L row 8", row_index=8)
+    alternative["selected_value_columns"]["prior"] = 5
+    alternative["anchors_by_period"]["prior"].update(column_index=5, excel_column="E", display="E")
+    review_log["evidence_rows"].append(alternative)
+    result = run_review(review_log)
+    report = render_evaluation_markdown(result)
+    assert len(result.rows) == 4
+    assert "4 source rows (3 distinct content rows)" in report
+    assert "R2=D1!5, R4=D1!8" in report
+    assert "C / D; C / E" in report
+    assert "child; unused *" in report
+    assert len(result.children) == 2
+    assert "|R2|" in report
+
+
+def test_equal_labels_with_different_periods_or_context_are_not_compressed(review_log, run_review):
+    alternative = deepcopy(review_log["evidence_rows"][1])
+    alternative["row_key"] = "P&L!8"
+    alternative["locator"].update(identity="excel:P&L!8", display="P&L row 8", row_index=8)
+    alternative["selected_values"]["prior"] = None
+    review_log["evidence_rows"].append(alternative)
+    result = run_review(review_log)
+    assert "4 source rows (4 distinct content rows)" in render_evaluation_markdown(result)
+
+
+def test_direct_source_in_overview_is_complete_and_not_repeated(review_log, run_review):
+    result = run_review(review_log)
+    report = render_evaluation_markdown(result)
+    assert report.count("R2=D1!5") == 1
+    assert "R2=D1!5 [C / D; child] Laundry" in report
+    assert "R3=D1!6 [C / D; child] Uniform laundry" in report
+    assert "Source rows" in report and "R1=D1!4" in report
+
+
+def test_parent_period_overview_preserves_zero(review_log, run_review):
+    for cid in (PARENT, LAUNDRY, UNIFORMS):
+        review_log["values_by_period"]["prior"][cid] = 0
+    result = run_review(review_log)
+    parent = next(item for item in result.coverage if item["parent"] == PARENT and item["period"] == "prior")
+    assert parent["value"] == 0 and parent["populated"] == 0
+    assert "100 / 0|2/" in render_evaluation_markdown(result)
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_shared_source_is_inlined_only_beside_its_matching_direct_child(
+    review_log, run_review, excluded
+):
+    review_log["accounts"][1]["operation"] = "adjusted_subtotal" if excluded else "sum"
+    if excluded:
+        review_log["accounts"][1]["excluded_rows"] = [_row_ref(review_log["evidence_rows"][2])]
+    else:
+        review_log["accounts"][1]["source_rows"].append(_row_ref(review_log["evidence_rows"][2]))
+    result = run_review(review_log)
+    report = render_evaluation_markdown(result)
+    direct_line = next(line for line in report.splitlines() if "R3=D1!6" in line)
+    assert "30 / 30|direct" in direct_line
+    assert report.count("R3=D1!6") == 1
+
+
+@pytest.mark.parametrize("rule,details", [
+    ("occupancy_above_capacity", {"occupancy": 3.24, "rooms_sold": 84154, "rooms_available": 25944}),
+    ("invalid_rooms_available", {"rooms_sold": 81146, "rooms_available": 0}),
+])
+def test_room_statistics_feedback_groups_only_matching_quantities(review_log, run_review, rule, details):
+    review_log["feedback_manifest"]["findings"] = [{
+        "finding_id": "room-stat", "severity": "warning", "primary_coa_id": PARENT,
+        "affected_coa_ids": [PARENT], "explanation": "Review source room statistics.",
+        "source_refs": [], "periods": [{"period_id": "actual", **details}],
+    }]
+    review_log["checks"] = [f"{Finding('warning', rule, PARENT, details)}|period=Actual"]
+    result = run_review(review_log)
+    assert len(result.findings) == 1 and result.findings[0]["occurrences"] == 2
+    assert result.findings[0]["periods"] == ["actual"]
+    review_log["feedback_manifest"]["findings"][0]["periods"][0]["rooms_sold"] += 1
+    assert len(run_review(review_log).findings) == 2
+
+
+def test_ambiguous_period_label_is_not_assigned_to_a_period(review_log, run_review):
+    for period in review_log["source"]["periods"]:
+        period["label"] = "Actual"
+    review_log["checks"] = [f"{Finding('warning', 'source_detail_incomplete', PARENT, {'parent': 100, 'children': 90})}|period=Actual"]
+    result = run_review(review_log)
+    assert result.findings[0]["periods"] == []
+    assert result.findings[0]["detail"]["period"] == "Actual"
+
+
+def test_recorded_period_id_takes_precedence_over_another_period_label(review_log, run_review):
+    review_log["source"]["periods"][1]["label"] = "actual"
+    review_log["checks"] = [f"{Finding('warning', 'source_detail_incomplete', PARENT, {'parent': 100, 'children': 90})}|period=actual"]
+    assert run_review(review_log).findings[0]["periods"] == ["actual"]
+
+
+def test_group_variants_keep_affected_accounts_and_promote_info_to_warning():
+    common = {"origin": "local", "code": "gap", "message": "Review detail.",
+              "refs": [], "detail": None, "_identity": ("same",)}
+    groups = group_findings([
+        {**common, "severity": "info", "targets": [PARENT, LAUNDRY], "periods": ["actual"]},
+        {**common, "severity": "warning", "targets": [PARENT, UNIFORMS], "periods": ["prior"]},
+    ])
+    assert len(groups) == 1 and groups[0]["severity"] == "warning"
+    assert groups[0]["occurrences"] == 2
+    assert [variant["targets"] for variant in groups[0]["variants"]] == [
+        [PARENT, LAUNDRY], [PARENT, UNIFORMS],
+    ]
+
+
+def test_matching_room_amounts_with_distinct_source_scopes_do_not_join(review_log, run_review):
+    details = {"occupancy": 3.24, "rooms_sold": 84154, "rooms_available": 25944}
+    review_log["feedback_manifest"]["findings"] = [{
+        "finding_id": "room-stat", "severity": "warning", "primary_coa_id": PARENT,
+        "affected_coa_ids": [PARENT], "explanation": "Review source room statistics.",
+        "source_refs": ["P&L!4", "P&L!5"], "periods": [{"period_id": "actual", **details}],
+    }]
+    raw = Finding("warning", "occupancy_above_capacity", PARENT, details, period_id="actual").to_dict()
+    raw["source_refs"] = ["P&L!4", "P&L!6"]
+    review_log["findings"] = [raw]
+    assert len(run_review(review_log).findings) == 2
+
+
+def test_source_caption_context_is_visible_without_changing_period_values(review_log, run_review):
+    review_log["evidence_rows"][1].update(label="DCUR", label_context=["Laundry", "DCUR"])
+    result = run_review(review_log)
+    row = next(row for row in result.rows if row["key"] == "P&L!5")
+    assert row["label"] == "DCUR / Laundry"
+    assert row["values"] == [70, 70]
+    assert "DCUR / Laundry" in render_evaluation_markdown(result)
