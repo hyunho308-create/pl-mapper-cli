@@ -8,6 +8,8 @@ from hotel_pl_normalizer.mapping.mapper import (
     MappingReviewItem,
     SourceOperation,
     WorkbookStrategy,
+    WorkbookSourcePlan,
+    WorkbookMappingValidator,
     _apply_residual_plugs,
     _execute,
     _kpi_sanity_issues,
@@ -16,6 +18,7 @@ from hotel_pl_normalizer.mapping.mapper import (
     _validate,
 )
 from hotel_pl_normalizer.mapping.reviews import normalize_review_item
+from hotel_pl_normalizer.mapping.checks import run_checks
 
 
 @pytest.mark.parametrize('raw', ['-', '- ', '\u2013', '\u2014', '\u2212', None])
@@ -128,3 +131,42 @@ def test_nonnumeric_treatment_and_legacy_review_remain_available():
     assert treatment.selected_source_rows == []
     assert normalize_review_item(legacy).message == "Historical unverified note."
     assert normalize_review_item(legacy).kind == "source_discrepancy"
+
+
+@pytest.mark.parametrize("scope", [["cur"], ["missing"]])
+def test_review_scope_limits_source_exceptions_and_rejects_unknown_periods(scope):
+    review = MappingReviewItem(
+        kind="source_discrepancy", message="Reported totals differ.", period_ids=scope,
+        coa_ids=["total"], source_rows=["Summary!9", "Detail!12"],
+        selected_source_rows=["Summary!9"], alternate_source_rows=["Detail!12"],
+        selected_source_operation="direct", alternate_source_operation="direct",
+    )
+    plan = WorkbookSourcePlan(
+        plan_id="p", workbook_id="wb",
+        strategy=WorkbookStrategy(reporting_layout="test", summary_source="test", ood_misc_summary_mode="separate"),
+        decisions=[AccountSourceDecision(coa_id="total", operation="direct", source_rows=["Summary!9"])],
+        review_items=[review],
+    )
+    checked = run_checks(
+        plan=plan, coa={"total": {}}, expected_workbook_id="wb", stage="session",
+        period_labels={"cur": "2025 Actual", "pri": "2024 Actual"}, preserve_blanks=True,
+        evidence=[
+            {"row_key": "Summary!9", "selected_values": {"cur": 1000, "pri": 5000}},
+            {"row_key": "Detail!12", "selected_values": {"cur": 750, "pri": 6000}},
+        ],
+    )
+    assert not any(f.rule == "source_layer_conflict" for f in checked.findings_by_period["pri"])
+    if scope == ["cur"]:
+        assert any(f.rule == "source_layer_conflict" for f in checked.findings_by_period["cur"])
+        assert checked.execution_issues == []
+    else:
+        assert "review items cite unknown period ids: missing" in checked.execution_issues
+
+
+def test_model_review_schema_requires_selected_periods_and_short_notes():
+    validator = WorkbookMappingValidator("wb", [], {"total": {}}, period_labels={"cur": "2025 Actual"})
+    declaration = next(item for item in validator.declarations() if item["name"] == "validate_mapping")
+    review = declaration["parameters"]["properties"]["review_items"]["items"]
+    assert "period_ids" in review["required"]
+    assert review["properties"]["period_ids"]["items"]["enum"] == ["cur"]
+    assert review["properties"]["message"]["maxLength"] == 180

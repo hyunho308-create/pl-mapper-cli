@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 
@@ -28,6 +28,7 @@ class ReviewItemView:
     requires_human_decision: bool
     review_item_id: str | None
     mapping_treatment: str | None = None
+    period_ids: list[str] = field(default_factory=list)
 
 
 def _field(value: Any, name: str, default=None):
@@ -43,6 +44,7 @@ def normalize_review_item(value: Any) -> ReviewItemView:
         kind=str(_field(value, "kind", "") or ""),
         message=str(_field(value, "message", "") or ""),
         mapping_treatment=_field(value, "mapping_treatment"),
+        period_ids=list(_field(value, "period_ids", []) or []),
         coa_ids=list(_field(value, "coa_ids", []) or []),
         source_rows=list(_field(value, "source_rows", []) or []),
         selected_source_rows=list(

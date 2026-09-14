@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import re
+import textwrap
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Literal
 
@@ -181,6 +182,7 @@ class _Review:
     requires_human_decision: bool
     review_item_id: str | None
     mapping_treatment: str | None = None
+    period_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -329,6 +331,7 @@ def _parse_reviews(values: Iterable[Any]) -> tuple[list[_Review], list[_Input]]:
                 kind=value.kind,
                 message=value.message.strip(),
                 mapping_treatment=value.mapping_treatment,
+                period_ids=value.period_ids,
                 coa_ids=value.coa_ids,
                 source_rows=list(dict.fromkeys([
                     *value.source_rows, *value.selected_source_rows,
@@ -407,6 +410,10 @@ def _expected_review_kind(rule: str) -> str | None:
 
 
 def _match_review(exception: _Exception, reviews: list[_Review]) -> _Review | None:
+    reviews = [
+        review for review in reviews
+        if not review.period_ids or exception.period_id in review.period_ids
+    ]
     if exception.review_item_id:
         return next(
             (
@@ -858,7 +865,15 @@ def _render(
         source_ref_displays=source_ref_displays,
     )
     prefix = "Needs review" if builder.severity == "error" else builder.category
+    if builder.review_input_ids:
+        # Bound the authored clause, never the calculated discrepancy sentence.
+        explanation = textwrap.shorten(explanation, width=180, placeholder="...")
     first = f"{prefix}: {explanation}" if explanation else f"{prefix}."
+    if builder.review_input_ids and builder.periods and not quantified:
+        return "\n".join(
+            f"{period.period_label}: {first}"
+            for period in builder.periods.values()
+        ) + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
     sentences = [first]
     period_sentence = _period_sentence(
         builder.category,
@@ -911,7 +926,9 @@ def _primary_for_review(review: _Review, coa: dict[str, dict], values_by_period=
     if not candidates:
         return None
     populated = [item for item in candidates if any(
-        values.get(item) not in (None, 0) for values in (values_by_period or {}).values()
+        values.get(item) not in (None, 0)
+        for period, values in (values_by_period or {}).items()
+        if not review.period_ids or period in review.period_ids
     )]
     if populated:
         candidates = populated
@@ -1105,6 +1122,8 @@ def _review_comparisons(
     }
     comparisons = {}
     for period_id, label in labels.items():
+        if review.period_ids and period_id not in review.period_ids:
+            continue
         # The legacy arithmetic falls back to the primary value when a period
         # key is missing. That cannot prove a difference is small in this period.
         if any(
@@ -1158,6 +1177,8 @@ def _same_adjustment(
     """Link a treatment only when its cited adjustment explains the conflict."""
     from hotel_pl_normalizer.mapping.mapper import _source_layer_value
 
+    if set(treatment.period_ids) != set(discrepancy.period_ids):
+        return False
     if not treatment.source_rows or not set(treatment.coa_ids) & set(discrepancy.coa_ids):
         return False
     value = normalize_review_items([discrepancy.source.payload])[0]
@@ -1351,6 +1372,12 @@ def compose_feedback(
     # arithmetic is below tolerance and does not need a visible warning.
     for review in reviews:
         if review.source.input_id in dispositions:
+            key, _ = dispositions[review.source.input_id]
+            for period in review.period_ids:
+                if period in labels:
+                    builders[key].periods.setdefault(
+                        period, PeriodComparison(period_id=period, period_label=labels[period])
+                    )
             continue
         if review.source.input_id in derived_summary_supersessions:
             continue
@@ -1376,6 +1403,10 @@ def compose_feedback(
         finding.add_input(review.source, review=True)
         finding.add_accounts(review.coa_ids)
         finding.add_refs(review.source_rows)
+        finding.periods.update({
+            period: PeriodComparison(period_id=period, period_label=labels[period])
+            for period in review.period_ids if period in labels
+        })
         finding.periods.update(review_comparisons[review.source.input_id])
         dispositions[review.source.input_id] = (key, "rendered")
 
@@ -1454,7 +1485,8 @@ def compose_feedback(
             (
                 item
                 for item in reviews
-                if (
+                if (not item.period_ids or check.period_id in item.period_ids)
+                and (
                     item.review_item_id == check.review_item_id
                     if check.review_item_id
                     else item.kind == expected_kind and check.target in item.coa_ids
@@ -1652,7 +1684,10 @@ def compose_feedback(
         if (
             comparisons
             and all(_below_reconciliation_tolerance(item) for item in finding.periods.values())
-            and (not source_reviews or set(labels) <= comparisons.keys())
+            and (not source_reviews or all(
+                set(review.period_ids or labels) <= comparisons.keys()
+                for review in source_reviews
+            ))
             and all(_below_reconciliation_tolerance(item) for item in comparisons.values())
         ):
             treatments = list(dict.fromkeys(filter(None, (

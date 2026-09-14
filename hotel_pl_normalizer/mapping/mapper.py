@@ -233,6 +233,7 @@ class MappingReviewItem(StrictModel):
         "scope_exception",
     ]
     message: str
+    period_ids: list[str] = Field(default_factory=list)
     mapping_treatment: str | None = None
     coa_ids: list[str] = Field(default_factory=list)
     source_rows: list[str] = Field(default_factory=list)
@@ -1104,7 +1105,11 @@ class WorkbookMappingValidator(AgentToolset):
                         "scope_exception",
                     ],
                 },
-                "message": {"type": "string"},
+                "message": {"type": "string", "maxLength": 180},
+                "period_ids": {
+                    "type": "array", "minItems": 1,
+                    "items": {"type": "string", "enum": list(self.period_labels)},
+                },
                 "coa_ids": coa_id_list,
                 "source_rows": string_list,
                 "selected_source_rows": string_list,
@@ -1130,11 +1135,12 @@ class WorkbookMappingValidator(AgentToolset):
                     ],
                 },
                 "requires_human_decision": {"type": "boolean"},
-                "mapping_treatment": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "mapping_treatment": {"anyOf": [{"type": "string", "maxLength": 180}, {"type": "null"}]},
             },
             "required": [
                 "kind",
                 "message",
+                "period_ids",
                 "coa_ids",
                 "source_rows",
                 "selected_source_rows",
@@ -1683,6 +1689,10 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
     records = []
     review_items = normalize_review_items(review_items)
     for period_id, checks in checks_by_period.items():
+        period_reviews = [
+            item for item in review_items
+            if not item.period_ids or period_id in item.period_ids
+        ]
         for finding in _compatibility_findings(
             checks, default_severity="warning", period_id=period_id
         ):
@@ -1701,7 +1711,7 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
                 matching_review = next(
                     (
                         item
-                        for item in review_items
+                        for item in period_reviews
                         if item.review_item_id == finding.review_item_id
                     ),
                     None,
@@ -1711,7 +1721,7 @@ def _structured_exceptions(checks_by_period, period_labels, review_items):
                 matching_review = next(
                     (
                         item
-                        for item in review_items
+                        for item in period_reviews
                         if item.kind
                         == (
                             "scope_exception"

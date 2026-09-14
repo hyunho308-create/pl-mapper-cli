@@ -41,8 +41,9 @@ from copy import copy
 from pathlib import Path
 
 import openpyxl
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.formula.translate import Translator
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.views import Selection
 
@@ -500,6 +501,18 @@ def _canonical_feedback(
             (priorities[finding.severity], finding.rendered_text)
         )
 
+    periods = _periods(result)
+    labels = {period: label for period, label, _ in periods}
+    rows = {account: FIRST_ACCOUNT_ROW + i for i, account in enumerate(_canonical_coa_ids())}
+    _, child_notes = _review_value_targets(result, periods)
+    for (child, period), parent in sorted(child_notes.items()):
+        if child not in known_ids or parent not in by_account:
+            continue
+        name = result.coa.get(parent, {}).get("account_name") or parent.split(".", 1)[-1].replace("_", " ")
+        by_account.setdefault(child, []).append((1,
+            f"{labels[period]}: Partial child detail; see {name} (COA row {rows[parent]})."
+        ))
+
     decided = {
         str(_field(decision, "coa_id", ""))
         for decision in result.decisions or []
@@ -953,6 +966,79 @@ def _unhide_existing_columns_after(sheet, column: int) -> None:
             dimension.hidden = False
 
 
+def _review_value_targets(result, periods):
+    """Share account/period routing between yellow cells and their child notes."""
+    period_ids = {period for period, _, _ in periods}
+    targets = set()
+    note_owners = {}
+    child_notes = {}
+    for finding in (result.feedback_manifest or {}).get("findings", []):
+        if finding["destination"] == "internal_only":
+            continue
+        accounts = set(finding["affected_coa_ids"])
+        accounts.add(finding["primary_coa_id"])
+        affected_periods = {item["period_id"] for item in finding["periods"]} or period_ids
+        if "selected" in affected_periods and "selected" not in period_ids:
+            affected_periods = period_ids
+        affected_periods = affected_periods & period_ids
+        targets.update((account, period) for account in accounts for period in affected_periods)
+        note_owners.update({
+            (account, period): finding["primary_coa_id"]
+            for account in accounts for period in affected_periods
+        })
+
+    # A partial branch needs review as a group, including its blank siblings.
+    # Keep ordinary absent accounts unmarked unless their branch is flagged.
+    checks_by_period = result.checks_by_period or {"selected": result.checks}
+    for period_id, checks in checks_by_period.items():
+        for raw in checks:
+            try:
+                check = ensure_finding(raw, period_id=period_id)
+            except ValueError:
+                continue
+            if check.rule not in {"source_detail_incomplete", "hierarchy_partial_with_residual"}:
+                continue
+            affected_periods = period_ids if period_id == "selected" else [period_id]
+            for period in affected_periods:
+                if (check.target, period) in targets:
+                    for child, metadata in result.coa.items():
+                        if metadata.get("parent_coa_id") == check.target:
+                            targets.add((child, period))
+                            child_notes[child, period] = note_owners.get((check.target, period), check.target)
+    return targets, child_notes
+
+
+def _highlight_review_values(book, result, periods, canonical) -> None:
+    """Color visible findings and partial child detail in the affected periods."""
+    columns = {period_id: FIRST_PERIOD_COL + i for i, (period_id, _, _) in enumerate(periods)}
+    rows = {coa_id: FIRST_ACCOUNT_ROW + i for i, coa_id in enumerate(canonical)}
+    targets, _ = _review_value_targets(result, periods)
+    coa, model = book["COA"], book["KHP Model Accounts"]
+    yellow = PatternFill("solid", fgColor="FFFF00")
+    references = {coa: set(), model: set()}
+    for account, period in targets:
+        if account in rows and period in columns:
+            references[coa].add(coa.cell(rows[account], columns[period]).coordinate)
+    links = {f"=COA!{ref}" for ref in references[coa]}
+    # Compound formulas can represent a reconciled parent; mirror direct links only.
+    for row in model:
+        for cell in row:
+            if cell.data_type == "f" and cell.value in links:
+                references[model].add(cell.coordinate)
+    for sheet, refs in references.items():
+        if not refs:
+            continue
+        for ref in refs:
+            sheet[ref].fill = yellow
+        # Static fill alone is hidden by the template's conditional row banding.
+        for scope in sheet.conditional_formatting:
+            for rule in sheet.conditional_formatting[scope]:
+                rule.priority += 1
+        rule = FormulaRule(formula=["TRUE"], fill=yellow, stopIfTrue=True)
+        rule.priority = 1
+        sheet.conditional_formatting.add(" ".join(sorted(refs)), rule)
+
+
 def _autofit_coa_rows(sheet, last_row: int) -> None:
     """Estimate Excel row heights for the two variable wrapped-text columns."""
     for row in range(FIRST_ACCOUNT_ROW, last_row + 1):
@@ -1092,6 +1178,7 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
     model_sheet = book["KHP Model Accounts"]
     _fill_model_periods(model_sheet, len(periods))
     _unhide_existing_columns_after(model_sheet, FIRST_PERIOD_COL + MAX_PERIODS - 1)
+    _highlight_review_values(book, result, periods, canonical)
     _reset_sheet_views(book)
 
     # openpyxl cannot calculate formulas. Mark their cached values stale and

@@ -210,6 +210,52 @@ def test_unknown_review_kind_is_visible_and_actionable():
     assert bundle.unmatched_count == 0
 
 
+def test_short_authored_review_names_only_its_explicit_periods():
+    target = "S1.other_expenses"
+    review = _review("unusual_convention", "Confirm the operator's allocation. " * 12, [target])
+    review["period_ids"] = ["budget"]
+    original = review["message"]
+    finding = _compose(reviews=[review]).findings[0]
+    assert [item.period_id for item in finding.periods] == ["budget"]
+    assert finding.rendered_text.startswith("2025 Budget: Mapping treatment: ")
+    assert "2025 Actual" not in finding.rendered_text
+    assert len(finding.rendered_text.split("Mapping treatment: ", 1)[1]) <= 180
+    assert review["message"] == original  # The audit retains the full original.
+
+
+def test_period_review_does_not_replace_or_relabel_numeric_errors():
+    target = "S1.other_expenses"
+    review = _review("unusual_convention", "Confirm the operator's allocation.", [target])
+    review["period_ids"] = ["budget"]
+    bundle = _compose(
+        reviews=[review],
+        checks={"actual": [f"error|hierarchy_complete|{target}|parent=1000|children=600|variance=400"]},
+    )
+    error = next(item for item in bundle.findings if item.severity == "error")
+    assert "400" in error.rendered_text and "2025 Actual" in error.rendered_text
+    assert [item.period_id for item in error.periods] == ["actual"]
+    assert any("2025 Budget: Mapping treatment:" in item.rendered_text for item in bundle.findings)
+
+
+def test_scoped_source_comparison_does_not_borrow_other_period_evidence():
+    target = "S1.total_rooms_revenue"
+    review = {
+        "kind": "source_discrepancy", "message": "Reported totals differ.",
+        "period_ids": ["actual"], "coa_ids": [target],
+        "source_rows": ["Summary!9", "Rooms!12"],
+        "selected_source_rows": ["Summary!9"], "alternate_source_rows": ["Rooms!12"],
+        "selected_source_operation": "direct", "alternate_source_operation": "direct",
+    }
+    bundle = _compose(reviews=[review], evidence=[
+        {"row_key": "Summary!9", "selected_values": {"actual": 1000, "budget": 5000}},
+        {"row_key": "Rooms!12", "selected_values": {"actual": 750, "budget": 6000}},
+    ])
+    finding = bundle.findings[0]
+    assert [item.period_id for item in finding.periods] == ["actual"]
+    assert "250 higher in 2025 Actual" in finding.rendered_text
+    assert "Budget" not in finding.rendered_text
+
+
 def test_flattened_execution_issue_does_not_duplicate_period_issue():
     bundle = _compose(
         issues=["2025 Actual: invalid source row", "global execution failure"],

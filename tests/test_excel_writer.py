@@ -9,6 +9,7 @@ calculates, and is wrong throughout.
 import csv
 import re
 import zipfile
+from copy import copy
 from types import SimpleNamespace
 
 import pytest
@@ -1108,6 +1109,11 @@ def test_rounding_review_is_kept_in_audit_but_leaves_workbook_notes_blank(tmp_pa
     assert result.feedback_manifest["inputs"][0]["status"] == "internal_only"
     assert result.feedback_manifest["rendered_count"] == 0
     assert all(
+        cell.fill.fgColor.rgb != "00FFFF00"
+        for row in book["COA"].iter_rows(min_col=FIRST_PERIOD_COL, max_col=FIRST_PERIOD_COL)
+        for cell in row
+    )
+    assert all(
         row[FEEDBACK_COL - 1].value is None
         for row in book["COA"].iter_rows(min_row=FIRST_ACCOUNT_ROW)
     )
@@ -1322,6 +1328,137 @@ def test_conditional_formatting_spans_the_full_coa_table(tmp_path):
     assert [str(block.sqref) for block in sheet.conditional_formatting] == [
         f"B{FIRST_ACCOUNT_ROW}:Y{FIRST_ACCOUNT_ROW + len(ids) - 1}"
     ]
+
+
+@pytest.mark.parametrize("severity", ["warning", "error"])
+def test_findings_highlight_only_the_affected_period(tmp_path, severity):
+    ids = canonical_ids()
+    target = "S1.total_rooms_expenses"
+    result = build_result(
+        coa={i: {} for i in ids},
+        period_values={"cur": {target: 100}, "pri": {target: 100}},
+        period_labels={"cur": "2025 Actual", "pri": "2024 Actual"},
+        checks_by_period={"pri": [
+            f"{severity}|hierarchy_complete|{target}|parent=100|children=80"
+        ]},
+    )
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    row = FIRST_ACCOUNT_ROW + ids.index(target)
+    assert book["COA"].cell(row, 4).fill.fgColor.rgb == "00FFFF00"
+    assert book["COA"].cell(row, 3).fill.fgColor.rgb != "00FFFF00"
+    assert book["COA"].cell(row, 5).fill.fgColor.rgb != "00FFFF00"
+    book.close()
+
+
+def test_review_flag_highlights_all_affected_accounts_including_zero_and_blank(tmp_path):
+    ids = canonical_ids()
+    summary = "S12.total_property_operation_and_maintenance_expenses"
+    detail = "S8.total_property_operation_and_maintenance_expenses"
+    result = build_result(
+        coa={i: {} for i in ids},
+        period_values={"cur": {summary: 0}, "pri": {summary: 90, detail: 80}},
+        review_items=[{
+            "kind": "unusual_convention",
+            "message": "A source-only adjustment was retained in Summary POM.",
+            "coa_ids": [detail, summary],
+            "source_rows": ["Summary!40"],
+        }],
+    )
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    for account in (summary, detail):
+        row = FIRST_ACCOUNT_ROW + ids.index(account)
+        for column in (3, 4):
+            assert book["COA"].cell(row, column).fill.fgColor.rgb == "00FFFF00"
+    assert book["COA"].cell(FIRST_ACCOUNT_ROW + ids.index(detail), 3).value is None
+    assert book["COA"].cell(FIRST_ACCOUNT_ROW + ids.index(summary), 3).value == 0
+    book.close()
+
+
+def test_partial_child_highlights_preserve_values_formulas_and_clear_on_rebuild(tmp_path):
+    with COA_CSV.open(encoding="utf-8-sig", newline="") as handle:
+        coa = {item["coa_id"]: item for item in csv.DictReader(handle)}
+    ids = canonical_ids()
+    parent = "S1.other_expenses"
+    children = [key for key, item in coa.items() if item["parent_coa_id"] == parent]
+    result = build_result(
+        coa=coa,
+        period_values={
+            "cur": {parent: 100000, children[0]: 70000},
+            "pri": {parent: 100000, children[0]: 100000},
+        },
+        period_labels={"cur": "2025 Actual", "pri": "2024 Actual"},
+    )
+    path = tmp_path / "o.xlsx"
+    baseline = load_workbook(write_normalized_workbook(result, path))
+    result.checks_by_period = {"cur": [
+        f"warning|source_detail_incomplete|{parent}|parent=100000|children=70000|variance=30000"
+    ]}
+    flagged = load_workbook(write_normalized_workbook(result, path))
+    targets = {f"C{FIRST_ACCOUNT_ROW + ids.index(account)}" for account in [parent, *children]}
+    parent_row = FIRST_ACCOUNT_ROW + ids.index(parent)
+    for child in children:
+        note = flagged["COA"].cell(FIRST_ACCOUNT_ROW + ids.index(child), FEEDBACK_COL).value
+        assert "2025 Actual: Partial child detail; see " in note
+        assert f"COA row {parent_row}" in note
+        assert "2024 Actual" not in note
+    links = {f"=COA!{ref}" for ref in targets}
+    model_targets = {
+        cell.coordinate for row in flagged["KHP Model Accounts"] for cell in row
+        if cell.data_type == "f" and cell.value in links
+    }
+    assert model_targets
+    assert any(flagged["COA"][ref].value is None for ref in targets)
+    for name, expected in (("COA", targets), ("KHP Model Accounts", model_targets)):
+        for row in flagged[name]:
+            for after in row:
+                before = baseline[name][after.coordinate]
+                if name != "COA" or after.column != FEEDBACK_COL:
+                    assert after.value == before.value
+                expected_style = copy(before._style)
+                if after.coordinate in expected:
+                    assert after.fill.fgColor.rgb == "00FFFF00"
+                    expected_style.fillId = after._style.fillId
+                assert after._style == expected_style
+        rules = [
+            (str(scope.sqref), rule)
+            for scope in flagged[name].conditional_formatting
+            for rule in flagged[name].conditional_formatting[scope]
+            if rule.formula == ["TRUE"]
+        ]
+        assert len(rules) == 1
+        scope, rule = rules[0]
+        assert set(scope.split()) == expected
+        assert rule.priority == 1 and rule.stopIfTrue
+        assert rule.dxf.fill.fgColor.rgb == "00FFFF00"
+    result.checks_by_period = {}
+    rebuilt = load_workbook(write_normalized_workbook(result, path))
+    for name in ("COA", "KHP Model Accounts"):
+        for row in rebuilt[name]:
+            for cell in row:
+                assert cell._style == baseline[name][cell.coordinate]._style
+    for book in (baseline, flagged, rebuilt):
+        book.close()
+
+
+def test_period_scoped_review_note_keeps_unaffected_value_neutral(tmp_path):
+    ids = canonical_ids()
+    target = "S1.total_rooms_expenses"
+    result = build_result(
+        coa={i: {} for i in ids},
+        period_labels={"cur": "2025 Actual", "pri": "2024 Actual"},
+        period_values={"cur": {target: 100}, "pri": {target: 90}},
+        review_items=[{
+            "kind": "unusual_convention", "message": "Confirm the operator's allocation.",
+            "coa_ids": [target], "period_ids": ["pri"],
+        }],
+    )
+    book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
+    row = FIRST_ACCOUNT_ROW + ids.index(target)
+    assert book["COA"].cell(row, FEEDBACK_COL).value.startswith("2024 Actual: Mapping treatment:")
+    assert book["COA"].cell(row, 4).fill.fgColor.rgb == "00FFFF00"
+    assert book["COA"].cell(row, 3).fill.fgColor.rgb != "00FFFF00"
+    assert book["Run Notes"]["C9"].value is None
+    book.close()
 
 
 def test_drifted_template_is_refused_rather_than_written(tmp_path):

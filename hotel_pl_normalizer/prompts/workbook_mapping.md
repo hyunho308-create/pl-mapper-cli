@@ -434,6 +434,12 @@ the corresponding `status=rejected` completion unchanged.
 
 Use `review_items` to prevent silent guessing and flag material oddities:
 
+Set `period_ids` to the selected period IDs affected by each review. Use one
+item with several IDs when the treatment is the same; use separate items when
+it differs by period. Keep `message` and any `mapping_treatment` to at most
+180 characters each. State the issue, treatment, or decision needed in plain
+language; Python supplies the period labels and calculated discrepancies.
+
 - `ambiguity`: two materially different mappings remain plausible;
 - `unusual_convention`: the mapping is supported, but the presentation is
   unusual enough that a human should know;

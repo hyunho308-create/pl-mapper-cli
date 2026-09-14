@@ -110,6 +110,14 @@ def run_checks(
         execution_issues.append(
             "review items cite unknown COA ids: " + ", ".join(unknown_review_ids)
         )
+    unknown_review_periods = sorted({
+        period for item in plan.review_items for period in item.period_ids
+        if period not in period_labels
+    })
+    if unknown_review_periods:
+        execution_issues.append(
+            "review items cite unknown period ids: " + ", ".join(unknown_review_periods)
+        )
     evidence_rows = {item["row_key"] for item in evidence}
     execution_issues.extend(control_reference_issues(plan.source_controls, evidence_rows, coa))
     unknown_review_rows = sorted(
@@ -127,13 +135,13 @@ def run_checks(
         )
 
     global_findings = [
-        *core._review_item_blockers(plan.review_items),
+        *core._review_item_blockers([item for item in plan.review_items if not item.period_ids]),
         *core._non_residual_plug_issues(plan, coa),
         *core._period_completeness_issues(plan, evidence, period_labels),
         *core._unused_financial_schedule_issues(
             plan, evidence, sheet_routing_context or []
         ),
-        *core._review_item_warnings(plan.review_items),
+        *core._review_item_warnings([item for item in plan.review_items if not item.period_ids]),
     ]
     collapse_issue = core._detail_collapse_issue(plan, evidence)
     if collapse_issue:
@@ -156,6 +164,11 @@ def run_checks(
     findings_by_period: dict[str, list[Finding]] = {}
     residual_plugs_by_period: dict[str, dict[str, float]] = {}
     for period_id, period_label in period_labels.items():
+        period_reviews = [
+            item for item in plan.review_items
+            if not item.period_ids or period_id in item.period_ids
+        ]
+        period_plan = plan.model_copy(update={"review_items": period_reviews})
         values, calculation_issues = core._execute(
             plan.decisions,
             evidence,
@@ -189,23 +202,26 @@ def run_checks(
                 coa,
                 plan.decisions,
                 plan.strategy,
-                plan.review_items,
+                period_reviews,
                 summary_only_pushdown_rows or set(),
             )
         ]
+        scoped_reviews = [item for item in period_reviews if item.period_ids]
+        checks.extend(core._review_item_blockers(scoped_reviews))
+        checks.extend(core._review_item_warnings(scoped_reviews))
         checks.extend(
             core._source_layer_conflict_warnings(
-                plan, evidence, values, period_id
+                period_plan, evidence, values, period_id
             )
         )
         checks.extend(
             core._source_layer_comparison_issues(
-                plan, evidence, values, period_id
+                period_plan, evidence, values, period_id
             )
         )
         checks = core._qualify_source_discrepancies(
             checks,
-            plan,
+            period_plan,
             evidence,
             coa,
             history or [],
