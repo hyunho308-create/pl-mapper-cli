@@ -522,7 +522,7 @@ def test_validation_checks_reach_the_feedback_column(tmp_path):
 
 def test_review_items_attach_to_their_accounts(tmp_path):
     ids = canonical_ids()
-    target = ids[3]
+    target = "S1.other_expenses"
     result = build_result(
         coa={i: {} for i in ids},
         review_items=[
@@ -539,8 +539,8 @@ def test_review_items_attach_to_their_accounts(tmp_path):
     sheet = book["COA"]
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
-    assert note == "Mapping treatment: Contract labor sits inside the salary subtotal."
-    assert "Contract labor sits inside the salary subtotal." not in (book["Run Notes"]["C9"].value or "")
+    assert note == "Contract labor sits inside the salary subtotal."
+    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
 
 
 def test_review_item_is_displayed_once_on_summary_account(tmp_path):
@@ -569,9 +569,9 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(detail), column=FEEDBACK_COL
     ).value
 
-    assert message not in (book["Run Notes"]["C9"].value or "")
+    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
     assert message in (summary_note or "")
-    assert message not in (detail_note or "")
+    assert message in detail_note
 
 
 def test_review_items_hide_internal_ids_but_keep_readable_source_rows(tmp_path):
@@ -603,7 +603,7 @@ def test_review_items_hide_internal_ids_but_keep_readable_source_rows(tmp_path):
     assert "S12." not in note
     assert "no_value" not in note
     assert "left blank" in note
-    assert "Franchise Fees" not in run_note
+    assert run_note == "See highlighted COA accounts for details."
 
 
 def test_per_period_checks_name_their_period(tmp_path):
@@ -625,7 +625,7 @@ def test_per_period_checks_name_their_period(tmp_path):
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
     assert note == (
-        "Coverage gap: Identified children are 20 below the parent in 2024 YTD."
+        "Identified children are 20 below the parent in 2024."
     )
 
 
@@ -656,8 +656,8 @@ def test_repeated_period_rollups_are_combined_into_one_feedback_line(tmp_path):
     ).value
 
     assert note == (
-        "Coverage gap: Identified children are 20 below the parent in 2025 Actual "
-        "and 15 below the parent in 2024 Actual."
+        "Identified children are 20 below the parent in 2025 "
+        "and 15 below the parent in 2024."
     )
 
 
@@ -747,22 +747,19 @@ def test_large_residual_plug_warning_is_human_readable(tmp_path):
             "S12.total_sales_and_marketing_expenses",
             1_872_364.54,
             1_441_814.20,
-            "Needs review: The Summary amount is 430,550 above the independently "
-            "reported department amount in YTD Actual.",
+            "S&M department expenses are below Summary by 430,550 in YTD Actual.",
         ),
         (
             "S12.total_administrative_and_general_expenses",
             5_143_848.14,
             5_150_329.75,
-            "Needs review: The Summary amount is 6,482 below the independently "
-            "reported department amount in YTD Actual.",
+            "A&G department expenses are above Summary by 6,482 in YTD Actual.",
         ),
         (
             "S12.total_departmental_expenses",
             11_822_120.13,
             11_786_544.37,
-            "Needs review: The Summary amount is 35,576 above the independently "
-            "reported department amount in YTD Actual.",
+            "Combined Rooms, F&B, and OOD department expenses are below Summary by 35,576 in YTD Actual.",
         ),
     ],
 )
@@ -779,9 +776,16 @@ def test_summary_department_feedback_shows_direction_and_variance(
     )
 
     sheet = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))["COA"]
+    from hotel_pl_normalizer.mapping.coa import SUMMARY_LINKS
+    destination = SUMMARY_LINKS.get(target, target)
+    if target == "S12.total_departmental_expenses":
+        destination = "S1.total_rooms_expenses"
     note = sheet.cell(
-        row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL
+        row=FIRST_ACCOUNT_ROW + ids.index(destination), column=FEEDBACK_COL
     ).value
+    if destination != target:
+        assert sheet.cell(FIRST_ACCOUNT_ROW + ids.index(target), FEEDBACK_COL).value is None
+        assert sheet.cell(FIRST_ACCOUNT_ROW + ids.index(target), 3).fill.fgColor.rgb != "00FFFF00"
 
     assert note == message
 
@@ -877,11 +881,7 @@ def test_run_notes_lists_final_rollup_mismatches_over_ten(tmp_path):
     )["Run Notes"]
 
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value.splitlines() == [
-        "1 summary math error",
-        "1 summary-to-department error",
-        "1 material rollup warning",
-    ]
+    assert notes["C9"].value == "See highlighted COA accounts for details."
     assert notes["C9"].font.sz == 11
     assert notes["C9"].alignment.wrap_text is True
     assert notes.row_dimensions[9].height > 14.5
@@ -900,7 +900,7 @@ def test_run_notes_keeps_targetless_validation_and_execution_detail(tmp_path):
     assert book.sheetnames[0] == "Run Notes"
     notes = book["Run Notes"]
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value.splitlines() == [
+    assert notes["C9"].value.splitlines()[:-1] == [
         "Needs review: Rooms row 14 may have been assigned to unrelated accounts. "
         "Affected periods: YTD Actual.",
         "Needs review: Sheet 'Budget' could not be read.",
@@ -1004,12 +1004,10 @@ def test_run_notes_summarizes_final_validation_and_review_counts(tmp_path):
         write_normalized_workbook(result, tmp_path / "o.xlsx")
     )["Run Notes"]
 
-    assert notes["C6"].value == "Rejected"
+    assert notes["C6"].value == "Needs attention — unresolved errors"
     assert notes["C7"].value == 1
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value.splitlines() == [
-        "Mapping incomplete: 269 COA accounts have no submitted mapping decision.",
-    ]
+    assert "Mapping incomplete: 269 COA accounts have no submitted mapping decision." in notes["C9"].value
 
 
 @pytest.mark.parametrize(
@@ -1036,7 +1034,7 @@ def test_run_notes_status_uses_warning_level_without_errors(tmp_path, overrides)
         write_normalized_workbook(result, tmp_path / "o.xlsx")
     )["Run Notes"]
 
-    assert notes["C6"].value == "Completed with warnings"
+    assert notes["C6"].value == "Completed — review highlighted items"
 
 
 def test_run_notes_status_treats_rollup_mismatch_as_warning(tmp_path):
@@ -1054,8 +1052,8 @@ def test_run_notes_status_treats_rollup_mismatch_as_warning(tmp_path):
         write_normalized_workbook(result, tmp_path / "o.xlsx")
     )["Run Notes"]
 
-    assert notes["C6"].value == "Completed with warnings"
-    assert "1 material rollup warning" in notes["C9"].value
+    assert notes["C6"].value == "Completed — review highlighted items"
+    assert notes["C9"].value == "See highlighted COA accounts for details."
 
 
 def test_run_notes_status_preserves_stopped_state(tmp_path):
@@ -1070,7 +1068,7 @@ def test_run_notes_status_preserves_stopped_state(tmp_path):
         write_normalized_workbook(result, tmp_path / "o.xlsx")
     )["Run Notes"]
 
-    assert notes["C6"].value == "Stopped"
+    assert notes["C6"].value == "Stopped — no mapped results"
 
 
 def test_room_kpi_warning_is_counted_and_shows_the_cited_problem(tmp_path):
@@ -1082,7 +1080,7 @@ def test_room_kpi_warning_is_counted_and_shows_the_cited_problem(tmp_path):
         outcome="source_exception",
     )
     book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
-    assert book["Run Notes"]["C9"].value == "1 room KPI warning"
+    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
     feedback = [row[FEEDBACK_COL - 1].value for row in book["COA"].iter_rows()]
     assert any(message in (item or "") for item in feedback)
 
@@ -1398,8 +1396,8 @@ def test_partial_child_highlights_preserve_values_formulas_and_clear_on_rebuild(
     parent_row = FIRST_ACCOUNT_ROW + ids.index(parent)
     for child in children:
         note = flagged["COA"].cell(FIRST_ACCOUNT_ROW + ids.index(child), FEEDBACK_COL).value
-        assert "2025 Actual: Partial child detail; see " in note
-        assert f"COA row {parent_row}" in note
+        assert "30,000 below the parent in 2025" in note
+        assert note == flagged["COA"].cell(parent_row, FEEDBACK_COL).value
         assert "2024 Actual" not in note
     links = {f"=COA!{ref}" for ref in targets}
     model_targets = {
@@ -1454,10 +1452,10 @@ def test_period_scoped_review_note_keeps_unaffected_value_neutral(tmp_path):
     )
     book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
     row = FIRST_ACCOUNT_ROW + ids.index(target)
-    assert book["COA"].cell(row, FEEDBACK_COL).value.startswith("2024 Actual: Mapping treatment:")
+    assert book["COA"].cell(row, FEEDBACK_COL).value == "Confirm the operator's allocation."
     assert book["COA"].cell(row, 4).fill.fgColor.rgb == "00FFFF00"
     assert book["COA"].cell(row, 3).fill.fgColor.rgb != "00FFFF00"
-    assert book["Run Notes"]["C9"].value is None
+    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
     book.close()
 
 

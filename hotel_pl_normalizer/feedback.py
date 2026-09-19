@@ -17,10 +17,12 @@ import json
 import math
 import re
 import textwrap
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable, Literal
 
 from hotel_pl_normalizer.mapping.coa import (
+    SUMMARY_LINKS,
+    SUMMARY_EQUATIONS,
     children_by_parent,
     dependency_coefficient,
     load_coa,
@@ -215,6 +217,8 @@ class _FindingBuilder:
     source_input_ids: list[str] = field(default_factory=list)
     review_input_ids: list[str] = field(default_factory=list)
     rules: set[str] = field(default_factory=set)
+    department_comparison: str | None = None
+    alternate_subtotal: str | None = None
 
     def add_input(self, item: _Input, *, review: bool = False) -> None:
         if item.input_id not in self.source_input_ids:
@@ -489,6 +493,11 @@ def _comparison_from_check(check: _Check) -> PeriodComparison:
         rooms_sold=_number(check.details.get("rooms_sold")),
         rooms_available=_number(check.details.get("rooms_available")),
     )
+
+
+def _is_summary_department_check(check: _Check) -> bool:
+    return (check.rule == "summary_department"
+            or check.details.get("rule") == "summary_department")
 
 
 def _merge_comparison(
@@ -850,6 +859,28 @@ def _render(
     coa: dict[str, dict],
     source_ref_displays: dict[str, str] | None = None,
 ) -> str:
+    if builder.department_comparison:
+        measured = [item for item in builder.periods.values() if item.variance is not None]
+        phrases = [
+            f"{'below' if item.variance > 0 else 'above'} Summary by "
+            f"{_rounded_number(item.variance)} in {item.period_label}"
+            for item in builder.periods.values() if item.variance is not None
+        ]
+        if phrases:
+            verb = "is" if builder.department_comparison.endswith("revenue") else "are"
+            if all(item.variance > 0 for item in measured) or all(item.variance < 0 for item in measured):
+                direction = "below" if measured[0].variance > 0 else "above"
+                amounts = _join_phrases([
+                    f"{_rounded_number(item.variance)} in {item.period_label}" for item in measured
+                ])
+                return f"{builder.department_comparison} {verb} {direction} Summary by {amounts}."
+            return f"{builder.department_comparison} {verb} {_join_phrases(phrases)}."
+    if builder.alternate_subtotal:
+        phrases = _variance_phrases(list(builder.periods.values()), "relative")
+        name = SECTION_LABELS.get((builder.primary_coa_id or "").split(".")[0], "Department")
+        return (f"Mapped {name} expenses match Summary. The mapped total is "
+                f"{_join_phrases(phrases)} than the separately reported "
+                f"{builder.alternate_subtotal} subtotal.")
     quantified = any(item.variance is not None for item in builder.periods.values())
     if quantified and builder.category in {SOURCE_PRESENTATION, COVERAGE_GAP, RECONCILIATION_DIFFERENCE} and not builder.review_input_ids:
         # Numeric findings state what was measured, not a model's diagnosis of
@@ -864,16 +895,13 @@ def _render(
         quantified=quantified,
         source_ref_displays=source_ref_displays,
     )
-    prefix = "Needs review" if builder.severity == "error" else builder.category
+    prefix = "Needs review" if builder.severity == "error" else ""
     if builder.review_input_ids:
         # Bound the authored clause, never the calculated discrepancy sentence.
         explanation = textwrap.shorten(explanation, width=180, placeholder="...")
-    first = f"{prefix}: {explanation}" if explanation else f"{prefix}."
+    first = f"{prefix}: {explanation}" if prefix else explanation
     if builder.review_input_ids and builder.periods and not quantified:
-        return "\n".join(
-            f"{period.period_label}: {first}"
-            for period in builder.periods.values()
-        ) + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
+        return first + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
     sentences = [first]
     period_sentence = _period_sentence(
         builder.category,
@@ -882,13 +910,13 @@ def _render(
         explanation=explanation,
     )
     if period_sentence and builder.rules & {"occupancy_above_capacity", "invalid_rooms_available"}:
-        return f"{prefix}: {period_sentence}"
+        return f"{prefix}: {period_sentence}" if prefix else period_sentence
     if period_sentence and "source_control_difference" in builder.rules:
         label = _clean_message(builder.explanation, coa, builder.source_refs, source_ref_displays=source_ref_displays)
-        return f"{prefix}: {label} {period_sentence}"
+        return f"{prefix + ': ' if prefix else ''}{label} {period_sentence}"
     if period_sentence and builder.category in {COVERAGE_GAP, RECONCILIATION_DIFFERENCE}:
         # Treatment, if present, is added by the structured merge below.
-        return f"{prefix}: {period_sentence}" + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
+        return f"{prefix + ': ' if prefix else ''}{period_sentence}" + (f" {' '.join(builder.consequences)}" if builder.consequences else "")
     if (
         period_sentence
         and builder.rules & {"summary_department", "hierarchy_complete"}
@@ -898,7 +926,7 @@ def _render(
             "The reported parent and its mapped child accounts do not reconcile.",
         }
     ):
-        return f"{prefix}: {period_sentence}"
+        return f"{prefix + ': ' if prefix else ''}{period_sentence}"
     if (
         period_sentence
         and "summary_math" in builder.rules
@@ -1016,7 +1044,9 @@ def _is_downstream_consequence(
     downstream: _FindingBuilder,
     coa: dict[str, dict],
 ) -> bool:
-    if upstream.category != SOURCE_PRESENTATION or not upstream.review_input_ids:
+    if upstream.category not in {SOURCE_PRESENTATION, RECONCILIATION_DIFFERENCE}:
+        return False
+    if upstream.category == SOURCE_PRESENTATION and not upstream.review_input_ids:
         return False
     if downstream.review_input_ids or downstream.severity == "error":
         return False
@@ -1463,7 +1493,11 @@ def compose_feedback(
             finding.add_input(check.source)
             finding.rules.add(check.rule)
             comparison = _comparison_from_check(check)
-            if check.period_id in finding.periods:
+            if _is_summary_department_check(check):
+                # Review comparisons may use detail-minus-Summary; this check
+                # always uses Summary-minus-detail and controls that wording.
+                finding.periods[check.period_id] = comparison
+            elif check.period_id in finding.periods:
                 finding.periods[check.period_id] = _merge_comparison(
                     finding.periods[check.period_id], comparison
                 )
@@ -1499,10 +1533,13 @@ def compose_feedback(
             finding = builders[key]
             finding.add_input(check.source)
             finding.rules.add(check.rule)
-            finding.periods.setdefault(
-                check.period_id,
-                _comparison_from_check(check),
-            )
+            if _is_summary_department_check(check):
+                finding.periods[check.period_id] = _comparison_from_check(check)
+            else:
+                finding.periods.setdefault(
+                    check.period_id,
+                    _comparison_from_check(check),
+                )
             dispositions[check.source.input_id] = (key, "superseded_by")
             continue
 
@@ -1705,6 +1742,65 @@ def compose_feedback(
             for input_id in finding.source_input_ids:
                 dispositions[input_id] = (key, "internal_only")
 
+    # Presentation-only routing. Keep the original checks and comparisons in
+    # the audit; a Summary/detail difference belongs beside the detail value.
+    for finding in builders.values():
+        if (finding.category == MAPPING_TREATMENT and finding.severity == "info"
+                and finding.affected_coa_ids
+                and set(finding.affected_coa_ids) <= kpi_ids):
+            internal_keys.add(finding.key)
+            for input_id in finding.source_input_ids:
+                dispositions[input_id] = (finding.key, "internal_only")
+        summary = finding.primary_coa_id
+        detail = SUMMARY_LINKS.get(summary)
+        detail_accounts = [detail] if detail in coa else []
+        terms = SUMMARY_EQUATIONS.get(summary, [])
+        if not detail_accounts and terms and all(
+            coefficient == 1 and SUMMARY_LINKS.get(source) in coa
+            for coefficient, source in terms
+        ):
+            detail_accounts = [SUMMARY_LINKS[source] for _, source in terms]
+        matching_checks = [check for check in checks
+                           if check.source.input_id in finding.source_input_ids]
+        is_summary_comparison = any(_is_summary_department_check(check)
+                                    for check in matching_checks)
+        if detail_accounts and is_summary_comparison:
+            finding.primary_coa_id = detail_accounts[0]
+            finding.affected_coa_ids = detail_accounts
+            section = _join_phrases([SECTION_LABELS.get(account.split(".")[0], "Related")
+                                     for account in detail_accounts])
+            if len(detail_accounts) > 1:
+                section = "Combined " + section
+            kind = "revenue" if "revenue" in detail_accounts[0] else "expenses"
+            finding.department_comparison = f"{section} department {kind}"
+            finding.consequences = []
+        elif (detail in coa and "source_layer_conflict" in finding.rules
+              and detail in finding.affected_coa_ids and values_by_period
+              and finding.periods and all(
+                  item.selected_value is not None and item.variance is not None
+                  and _same_number(values_by_period.get(period, {}).get(detail), item.selected_value)
+                  and _same_number(values_by_period.get(period, {}).get(summary), item.selected_value)
+                  for period, item in finding.periods.items())):
+            # The source comparison still matters, but it is not a difference
+            # between the final mapped Summary and department values.
+            alternate_sheets = sorted({ref.rsplit("!", 1)[0]
+                for review in reviews if review.source.input_id in finding.review_input_ids
+                for ref in review.alternate_source_rows if "!" in ref})
+            if alternate_sheets:
+                finding.primary_coa_id = detail
+                finding.affected_coa_ids = [detail]
+                finding.alternate_subtotal = ", ".join(alternate_sheets)
+
+    # Shorten only when the year uniquely identifies a selected period.
+    # Actual/Budget and multiple months in one year must remain distinguishable.
+    years = {key: re.findall(r"\b(?:19|20)\d{2}\b", label)
+             for key, label in labels.items()}
+    short_labels = {
+        key: matches[0] if len(matches) == 1
+        and sum(other == matches for other in years.values()) == 1 else labels[key]
+        for key, matches in years.items()
+    }
+
     final_findings = []
     key_to_id = {}
     for finding in sorted(
@@ -1721,6 +1817,21 @@ def compose_feedback(
         primary_coa_id = (
             finding.primary_coa_id if finding.primary_coa_id in coa else None
         )
+        rendered_text = _render(replace(finding, periods={
+            key: replace(value, period_label=short_labels.get(key, value.period_label))
+            for key, value in finding.periods.items()
+        }), coa, source_ref_displays)
+        # When two distinct treatments apply to different periods on the same
+        # account, color alone cannot tell the reader which treatment is which.
+        if finding.review_input_ids and finding.periods and any(
+            other.key != finding.key and other.category == finding.category
+            and other.explanation != finding.explanation and other.periods
+            and set(other.affected_coa_ids) & set(finding.affected_coa_ids)
+            and not set(other.periods) & set(finding.periods)
+            for other in builders.values()
+        ):
+            rendered_text = _join_phrases([short_labels.get(p, labels.get(p, p))
+                                         for p in finding.periods]) + ": " + rendered_text
         final_findings.append(
             CanonicalFeedbackFinding(
                 finding_id=finding_id,
@@ -1747,7 +1858,7 @@ def compose_feedback(
                 periods=list(finding.periods.values()),
                 consequences=finding.consequences,
                 source_input_ids=list(dict.fromkeys(finding.source_input_ids)),
-                rendered_text=_render(finding, coa, source_ref_displays),
+                rendered_text=rendered_text,
             )
         )
 

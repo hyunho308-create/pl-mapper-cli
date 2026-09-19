@@ -293,6 +293,7 @@ def build_run_log(result: NormalizationResult) -> dict[str, Any]:
         # be visible: the values below simply would not mention the missing one.
         "dropped_periods": dict(result.dropped_periods),
         "review_items": [_review_plain(item) for item in result.review_items],
+        "run_summary": result.run_summary,
         "source_controls": [_plain(item) for item in result.source_controls],
         "exceptions": list(result.exceptions),
         "feedback_manifest": feedback_manifest,

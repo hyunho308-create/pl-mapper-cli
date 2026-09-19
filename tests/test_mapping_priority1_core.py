@@ -317,7 +317,7 @@ def test_mapper_tool_declarations_match_canonical_golden_sha():
     ).encode("utf-8")
 
     assert hashlib.sha256(payload).hexdigest() == (
-        "d0278c8dfb05a0e6e32bdca912c2fec687131f0d93678f0701e51a001078a915"
+        "db02c4b5b7e3ef77898b04662ce4c5bb41c69aa30fbd0b2e991aa736c1a7dd31"
     )
     assert b"review_item_id" not in payload
 

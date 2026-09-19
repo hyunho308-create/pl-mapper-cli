@@ -45,3 +45,23 @@ discovery on a new P&L, and this feature is not a replacement for human sign-off
 Implementation: `mapping/source_controls.py` owns arithmetic; the mapping plan,
 validator and run log carry the controls; `feedback.py` composes visible notes.
 See [the quick output review](per-pl-evaluator.md) for a separate saved-run review.
+
+## Workbook feedback presentation
+
+Feedback is composed from the final saved checks, exceptions and model reviews;
+it does not require a separate model call or change mapped amounts. Routine
+informational room-KPI explanations stay in the audit, while actual KPI warnings
+remain visible. Identical comments appear once per account, without repeated
+period labels. Numeric comparisons use the year when it uniquely identifies the
+period; differing treatments retain enough period context to be distinguished.
+
+Summary-to-department comparisons appear beside department totals, using Summary
+as the reference. This does not suppress Summary arithmetic errors. Every affected
+highlighted COA account receives the concise issue, including partial children.
+Run Notes uses the mapper's `run_summary` (up to 500 characters), saved with each
+mapping version. Every repair refreshes that summary and the complete review
+list; restoring an earlier mapping restores its comments too. Old logs without
+a summary use a simple pointer to highlighted accounts, not reconstructed prose.
+Its deterministic status describes completion, review needs, unresolved
+errors, a required scope decision, or a stopped run. Raw findings remain in the
+run log even when merged or hidden from the workbook.

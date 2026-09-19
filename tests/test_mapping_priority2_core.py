@@ -336,9 +336,9 @@ def test_canonical_mapping_prompt_prefix_has_golden_bytes_and_hash():
     }
     encoded = _stable_mapping_prompt_prefix(model_coa).encode("utf-8")
 
-    assert len(encoded) == 104203
+    assert len(encoded) == 105475
     assert hashlib.sha256(encoded).hexdigest() == (
-        "c815b608a56e1b2db0833be743b89cba725ad727cbd482aafd95d25c93c29992"
+        "a4bbe934eab83a6b3144a97ac82ac5d28055f155a796dab3ccb05e36ed3f9c12"
     )
 
 
@@ -350,9 +350,9 @@ def test_mapper_tool_declarations_have_golden_bytes_and_no_private_review_ids():
         separators=(",", ":"),
     ).encode("utf-8")
 
-    assert len(encoded) == 38568
+    assert len(encoded) == 38763
     assert hashlib.sha256(encoded).hexdigest() == (
-        "82c0bea10faf788fc4b0205f71757bb87aca019e807161ada9824055a6d1ff31"
+        "2d78d7abe66f0b87185674f89f8f9aaebab596a6937ee122cf5ce98ecae35152"
     )
     assert b"review_item_id" not in encoded
 

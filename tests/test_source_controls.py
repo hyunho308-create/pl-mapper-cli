@@ -46,7 +46,8 @@ def test_unmapped_source_total_is_checked_for_each_period_without_changing_evide
     note = feedback({"actual": findings}).findings[0]
     assert "$10.00 shortfall" in note.rendered_text
     assert "Outlet row 4" in note.rendered_text
-    assert "2025 Actual" in note.rendered_text
+    assert "2025:" in note.rendered_text
+    assert note.periods[0].period_label == "2025 Actual"
     assert set(note.source_refs) == {"Outlet!1", "Outlet!2", "Outlet!4"}
 
 

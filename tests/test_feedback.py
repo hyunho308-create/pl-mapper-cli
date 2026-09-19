@@ -9,9 +9,118 @@ from hotel_pl_normalizer.feedback import (
     compose_feedback,
     load_canonical_coa,
 )
+from hotel_pl_normalizer.mapping.findings import Finding
 
 COA = load_canonical_coa()
 LABELS = {"actual": "2025 Actual", "budget": "2025 Budget"}
+
+
+@pytest.mark.parametrize("variance,direction", [(106, "below"), (-106, "above")])
+def test_review_comparison_cannot_reverse_summary_department_direction(variance, direction):
+    summary = "S12.total_food_and_beverage_expenses"
+    detail = "S2.total_food_and_beverage_expenses"
+    review = {
+        "review_item_id": "review:direction", "kind": "source_discrepancy",
+        "message": "The schedule and Summary differ.", "coa_ids": [summary, detail],
+        "period_ids": ["actual"], "source_rows": ["Detail!1", "Summary!1"],
+        "selected_source_rows": ["Detail!1"], "alternate_source_rows": ["Summary!1"],
+        "selected_source_operation": "direct", "alternate_source_operation": "direct",
+    }
+    bundle = _compose(reviews=[review], evidence=[
+        {"row_key": "Summary!1", "selected_values": {"actual": 1000}},
+        {"row_key": "Detail!1", "selected_values": {"actual": 1000 - variance}},
+    ], checks={"actual": [
+        Finding("warning", "small_source_reconciliation_difference", summary,
+                details={"rule": "summary_department", "actual": 1000,
+                         "expected": 1000 - variance, "variance": variance},
+                review_item_id="review:direction"),
+        f"warning|small_source_reconciliation_difference|S12.total_departmental_expenses|"
+        f"rule=summary_department|actual=1000|expected={1000-variance}|variance={variance}",
+    ]})
+    assert len(bundle.findings) == 1
+    assert bundle.findings[0].rendered_text == (
+        f"F&B department expenses are {direction} Summary by 106 in 2025 Actual."
+    )
+
+
+def test_routine_kpi_treatment_is_audited_but_real_kpi_warning_survives():
+    bundle = _compose(
+        reviews=[_review("unusual_convention", "Ratios calculated from rooms and revenue.", ["S12.occupancy"])],
+        checks={"actual": ["warning|occupancy_above_capacity|S12.occupancy|occupancy=1.2"]},
+    )
+    visible = [f for f in bundle.findings if f.destination != "internal_only"]
+    assert len(visible) == 1 and visible[0].severity == "warning"
+    assert bundle.unmatched_count == 0
+
+
+def test_small_summary_difference_routes_to_detail_and_collapses_proven_consequence():
+    bundle = compose_feedback(
+        checks_by_period={p: [
+            f"warning|small_source_reconciliation_difference|{target}|rule=summary_department|actual=1000|expected={1000-variance}|variance={variance}"
+            for target in ["S12.total_food_and_beverage_expenses", "S12.total_departmental_expenses"]
+        ] for p, variance in [("prior", 106), ("current", 141)]},
+        review_items=[], exceptions=[], execution_issues=[], execution_issues_by_period={},
+        period_labels={"prior": "July 2025 YTD Actual", "current": "July 2026 YTD Actual"}, coa=COA,
+    )
+    assert len(bundle.findings) == 1
+    finding = bundle.findings[0]
+    assert finding.primary_coa_id == "S2.total_food_and_beverage_expenses"
+    assert finding.affected_coa_ids == [finding.primary_coa_id]
+    assert finding.rendered_text == "F&B department expenses are below Summary by 106 in 2025 and 141 in 2026."
+    assert len(bundle.inputs) == 4
+    assert {p.period_label for p in finding.periods} == {"July 2025 YTD Actual", "July 2026 YTD Actual"}
+
+
+def test_review_repeated_across_periods_is_shown_once():
+    review = _review("unusual_convention", "An allocation needs confirmation.", ["S1.other_expenses"])
+    review["period_ids"] = ["actual", "budget"]
+    finding = _compose(reviews=[review]).findings[0]
+    assert finding.rendered_text == review["message"]
+    assert len(finding.periods) == 2
+
+
+def test_different_period_treatments_remain_distinguishable():
+    first = _review("unusual_convention", "First allocation.", ["S1.other_expenses"])
+    second = _review("unusual_convention", "Second allocation.", ["S1.other_expenses"])
+    first["period_ids"], second["period_ids"] = ["actual"], ["budget"]
+    bundle = _compose(reviews=[first, second])
+    assert {f.rendered_text for f in bundle.findings} == {
+        "2025 Actual: First allocation.", "2025 Budget: Second allocation."
+    }
+
+
+def test_routine_kpi_comment_alone_is_hidden_but_preserved_in_audit():
+    bundle = _compose(reviews=[_review(
+        "unusual_convention", "Ratios calculated from source counts.", ["S12.occupancy"]
+    )])
+    assert bundle.rendered_count == 0
+    assert bundle.findings[0].destination == "internal_only"
+    assert bundle.inputs[0].status == "internal_only"
+
+
+def test_source_comparison_is_not_described_as_a_final_department_difference():
+    summary = "S12.total_non_operating_income_and_expenses"
+    detail = "S11.total_non_operating_income_and_expenses"
+    review = _review("source_discrepancy", "Retain two different bases.", [summary, detail],
+                     source_rows=["Summary!60", "Expenses!18"])
+    review.update(selected_source_rows=["Summary!60"], alternate_source_rows=["Expenses!18"],
+                  selected_source_operation="direct", alternate_source_operation="direct",
+                  period_ids=["actual"], mapping_treatment="Retain two different bases.")
+    bundle = compose_feedback(
+        checks_by_period={}, review_items=[review],
+        exceptions=[_exception("source_layer_conflict", "actual", summary, 100000,
+            "Retain two different bases.", reported=1000000, comparison=900000,
+            source_rows=["Summary!60", "Expenses!18"])],
+        execution_issues=[], execution_issues_by_period={}, period_labels=LABELS, coa=COA,
+        values_by_period={"actual": {summary: 1000000, detail: 1000000}},
+    )
+    finding = bundle.findings[0]
+    assert finding.primary_coa_id == detail
+    assert finding.affected_coa_ids == [detail]
+    assert "match Summary" in finding.rendered_text
+    assert "separately reported Expenses subtotal" in finding.rendered_text
+    assert "100,000" in finding.rendered_text
+    assert "Retain two different bases" not in finding.rendered_text
 
 
 def _review(kind, message, coa_ids, *, source_rows=None):
@@ -217,9 +326,9 @@ def test_short_authored_review_names_only_its_explicit_periods():
     original = review["message"]
     finding = _compose(reviews=[review]).findings[0]
     assert [item.period_id for item in finding.periods] == ["budget"]
-    assert finding.rendered_text.startswith("2025 Budget: Mapping treatment: ")
+    assert finding.rendered_text.startswith("Confirm the operator's allocation.")
     assert "2025 Actual" not in finding.rendered_text
-    assert len(finding.rendered_text.split("Mapping treatment: ", 1)[1]) <= 180
+    assert len(finding.rendered_text) <= 180
     assert review["message"] == original  # The audit retains the full original.
 
 
@@ -234,7 +343,7 @@ def test_period_review_does_not_replace_or_relabel_numeric_errors():
     error = next(item for item in bundle.findings if item.severity == "error")
     assert "400" in error.rendered_text and "2025 Actual" in error.rendered_text
     assert [item.period_id for item in error.periods] == ["actual"]
-    assert any("2025 Budget: Mapping treatment:" in item.rendered_text for item in bundle.findings)
+    assert any(item.rendered_text == "Confirm the operator's allocation." for item in bundle.findings)
 
 
 def test_scoped_source_comparison_does_not_borrow_other_period_evidence():
@@ -360,7 +469,7 @@ def test_generic_coverage_instruction_is_replaced_by_the_actual_difference():
     finding = bundle.findings[0]
     assert finding.destination == f"coa:{target}"
     assert finding.rendered_text == (
-        "Coverage gap: Identified children are 20 below the parent in 2025 Actual."
+        "Identified children are 20 below the parent in 2025 Actual."
     )
     assert treatment not in finding.rendered_text
 
@@ -552,7 +661,7 @@ def test_legacy_adjustment_treatment_reconstructed_from_labels_not_model_prose()
         row["label"] = label
     bundle = _compose(reviews=[review], evidence=evidence)
     assert bundle.findings[0].category == MAPPING_TREATMENT
-    assert bundle.findings[0].rendered_text == "Mapping treatment: Mapped from Combined revenue, less Facility fees."
+    assert bundle.findings[0].rendered_text == "Mapped from Combined revenue, less Facility fees."
 
 
 def test_populated_parent_owns_note_and_combines_unsplit_coverage():

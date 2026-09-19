@@ -351,6 +351,7 @@ class WorkbookSourcePlan(StrictModel):
     decisions: list[AccountSourceDecision]
     review_items: list[MappingReviewItem] = Field(default_factory=list)
     source_controls: list[SourceControl] = Field(default_factory=list)
+    run_summary: str | None = Field(default=None, max_length=500)
 
 
 class WorkbookSourcePatch(StrictModel):
@@ -369,6 +370,7 @@ class WorkbookSourcePatch(StrictModel):
     source_detail_incomplete: list[str] | None = None
     review_items: list[MappingReviewItem] | None = None
     source_controls: list[SourceControl] | None = None
+    run_summary: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def validate_repair_tracking(self):
@@ -435,6 +437,7 @@ class MappingResult:
     tool_trace: list[dict]
     mapping_selection: dict[str, Any]
     source_controls: list[SourceControl] = field(default_factory=list)
+    run_summary: str | None = None
 
 
 class WorkbookMappingValidator(AgentToolset):
@@ -714,6 +717,13 @@ class WorkbookMappingValidator(AgentToolset):
         )
         if unknown:
             raise ModelToolError("unknown replacement COA ids: " + ", ".join(unknown))
+        if "run_summary" in self.current_plan.model_fields_set and (
+            "run_summary" not in patch.model_fields_set or patch.review_items is None
+        ):
+            raise ModelToolError(
+                "Refresh run_summary (or null) and the complete current review_items list "
+                "on every repair. Remove resolved notes and update changed treatments."
+            )
         existing = {item.coa_id: item for item in self.current_plan.decisions}
         changes_decisions = any(
             coa_id not in existing
@@ -767,7 +777,8 @@ class WorkbookMappingValidator(AgentToolset):
         changes_review = (
             patch.review_items is not None
             and patch.review_items != self.current_plan.review_items
-        )
+        ) or ("run_summary" in patch.model_fields_set
+              and patch.run_summary != self.current_plan.run_summary)
         changes_controls = (
             patch.source_controls is not None
             and patch.source_controls != self.current_plan.source_controls
@@ -837,6 +848,8 @@ class WorkbookMappingValidator(AgentToolset):
                 "plan_id": patch.patch_id,
                 "strategy": strategy,
                 "decisions": decisions,
+                **({"run_summary": patch.run_summary}
+                   if "run_summary" in patch.model_fields_set else {}),
                 "review_items": (
                     patch.review_items
                     if patch.review_items is not None
@@ -1265,11 +1278,12 @@ class WorkbookMappingValidator(AgentToolset):
                     "strategy": strategy,
                     "decisions": {"type": "array", "items": decision},
                     "review_items": review_items,
+                    "run_summary": {"anyOf": [{"type": "string", "maxLength": 500}, {"type": "null"}]},
                     "source_controls": source_controls,
                 },
                 "required": [
                     "plan_id", "workbook_id", "strategy", "decisions",
-                    "review_items",
+                    "review_items", "run_summary",
                     "source_controls",
                 ],
             },
@@ -1324,11 +1338,12 @@ class WorkbookMappingValidator(AgentToolset):
                         "anyOf": [string_list, {"type": "null"}],
                     },
                     "review_items": review_items,
+                    "run_summary": {"anyOf": [{"type": "string", "maxLength": 500}, {"type": "null"}]},
                     "source_controls": source_controls,
                 },
                 "required": [
                     "patch_id", "workbook_id", "replacements",
-                    "repair_hypothesis", "expected_fix",
+                    "repair_hypothesis", "expected_fix", "review_items", "run_summary",
                 ],
             },
         }]
@@ -2920,6 +2935,7 @@ def map_workbook(
         execution_issues=list(execution_issues),
         execution_issues_by_period=execution_issues_by_period,
         review_items=list(plan.review_items),
+        run_summary=plan.run_summary,
         source_controls=list(plan.source_controls),
         accepted=accepted,
         outcome=outcome,

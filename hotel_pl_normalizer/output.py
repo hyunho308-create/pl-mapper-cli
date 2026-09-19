@@ -479,7 +479,7 @@ def _canonical_feedback(
     result: NormalizationResult,
     known_ids: set[str],
 ) -> tuple[dict[str, list[tuple[int, str]]], list[str]]:
-    """Route each canonical finding once, to one account or Run Notes."""
+    """Repeat each concise finding on its affected accounts, once per cell."""
     bundle = compose_result_feedback(result)
     result.feedback_manifest = bundle.to_dict()
     by_account: dict[str, list[tuple[int, str]]] = {}
@@ -497,21 +497,19 @@ def _canonical_feedback(
             raise OutputTemplateError(
                 f"Feedback destination {finding.destination!r} is not in the output COA."
             )
-        by_account.setdefault(coa_id, []).append(
-            (priorities[finding.severity], finding.rendered_text)
-        )
+        for account in set(finding.affected_coa_ids) | {coa_id}:
+            if account in known_ids:
+                by_account.setdefault(account, []).append(
+                    (priorities[finding.severity], finding.rendered_text)
+                )
 
     periods = _periods(result)
-    labels = {period: label for period, label, _ in periods}
-    rows = {account: FIRST_ACCOUNT_ROW + i for i, account in enumerate(_canonical_coa_ids())}
     _, child_notes = _review_value_targets(result, periods)
+    parent_notes = {account: list(notes) for account, notes in by_account.items()}
     for (child, period), parent in sorted(child_notes.items()):
-        if child not in known_ids or parent not in by_account:
+        if child not in known_ids or parent not in parent_notes:
             continue
-        name = result.coa.get(parent, {}).get("account_name") or parent.split(".", 1)[-1].replace("_", " ")
-        by_account.setdefault(child, []).append((1,
-            f"{labels[period]}: Partial child detail; see {name} (COA row {rows[parent]})."
-        ))
+        by_account.setdefault(child, []).extend(parent_notes[parent])
 
     decided = {
         str(_field(decision, "coa_id", ""))
@@ -862,28 +860,19 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         sum(item.get("destination") != "internal_only" for item in manifest_findings)
         if manifest_findings is not None else len(result.review_items or [])
     )
-    mismatch_counts = _run_note_mismatch_counts(result, periods)
-    status_by_outcome = {
-        "clean": "Completed",
-        "source_exception": "Completed — source exception",
-        "coverage_gap": "Completed — coverage gap",
-        "scope_exception": "Rejected — scope decision required",
-        "rejected": "Rejected",
-    }
+    visible = [item for item in manifest_findings or []
+               if item.get("destination") != "internal_only"]
     if result.stopped_reason:
-        status = "Stopped"
-    elif result.accepted and result.outcome == "rejected":
-        # Compatibility for callers that predate the explicit outcome field.
-        status = None
+        status = ("Stopped — partial results available" if result.mapped_account_count
+                  else "Stopped — no mapped results")
+    elif result.outcome == "scope_exception":
+        status = "Needs input — scope decision required"
+    elif not result.accepted or errors:
+        status = "Needs attention — unresolved errors"
+    elif visible or warnings or human_notes or orphans:
+        status = "Completed — review highlighted items"
     else:
-        status = status_by_outcome.get(result.outcome)
-    if status is None:
-        if errors:
-            status = "Completed with errors"
-        elif warnings or human_notes or any(mismatch_counts.values()):
-            status = "Completed with warnings"
-        else:
-            status = "Completed"
+        status = "Completed"
 
     details = {
         4: result.source_name,
@@ -914,12 +903,18 @@ def _write_run_notes(book, result, orphans, periods) -> None:
         if row_number == 8:
             sheet.row_dimensions[row_number].height = 15.0
 
-    note_lines = _run_note_mismatches(result, periods)
+    # The narrative belongs to the selected mapping plan, not a second model
+    # call or a concatenation of account-level diagnostics.
+    summary = str(result.run_summary or "").strip()
+    note_lines = [summary] if summary else []
     note_lines.extend(dict.fromkeys(orphans))
+    if visible:
+        note_lines.append("See highlighted COA accounts for details.")
     label_cell = sheet.cell(row=9, column=2, value="Notes")
     label_cell._style = copy(sheet.cell(row=8, column=2)._style)
     label_cell.alignment = Alignment(horizontal="left", vertical="bottom")
     note_cell = sheet.cell(row=9, column=3, value="\n".join(note_lines) or None)
+    note_cell.data_type = "s"  # Model-written notes are text, never Excel formulas.
     note_cell._style = copy(sheet.cell(row=8, column=3)._style)
     note_font = copy(note_cell.font)
     note_font.sz = 11

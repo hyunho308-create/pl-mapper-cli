@@ -55,6 +55,7 @@ class NormalizationResult:
     checks: list[Finding] = field(default_factory=list)
     execution_issues: list[str] = field(default_factory=list)
     review_items: list[Any] = field(default_factory=list)
+    run_summary: str | None = None
     source_controls: list[Any] = field(default_factory=list)
     accepted: bool = False
     outcome: str = "rejected"
@@ -129,6 +130,7 @@ def _build_normalization_result(
         checks=mapping.checks,
         execution_issues=mapping.execution_issues,
         review_items=mapping.review_items,
+        run_summary=getattr(mapping, "run_summary", None),
         source_controls=getattr(mapping, "source_controls", []),
         accepted=mapping.accepted,
         outcome=mapping.outcome.value,

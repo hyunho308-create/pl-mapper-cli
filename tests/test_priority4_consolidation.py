@@ -593,6 +593,7 @@ def test_shared_result_builder_preserves_all_fields_and_mapping_values():
         "checks",
         "execution_issues",
         "review_items",
+        "run_summary",
         "source_controls",
         "accepted",
         "outcome",
@@ -625,6 +626,7 @@ def test_shared_result_builder_preserves_all_fields_and_mapping_values():
         checks=[],
         execution_issues=[],
         review_items=[],
+        run_summary="Payroll remains grouped in the source.",
         accepted=True,
         outcome=SimpleNamespace(value="clean"),
         exceptions=[],
@@ -653,6 +655,7 @@ def test_shared_result_builder_preserves_all_fields_and_mapping_values():
     )
 
     assert result.values is mapping.values
+    assert result.run_summary == mapping.run_summary
     assert result.period_values is mapping.values_by_period
     assert result.outcome == "clean"
     assert result.duration_ms == 10

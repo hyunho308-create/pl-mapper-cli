@@ -432,13 +432,36 @@ the corresponding `status=rejected` completion unchanged.
 
 ## Human Review Items
 
-Use `review_items` to prevent silent guessing and flag material oddities:
+Write COA review notes for a hotel analyst. Include only meaningful uncertainty,
+incomplete detail, material mapping judgments, or source conflicts.
 
-Set `period_ids` to the selected period IDs affected by each review. Use one
-item with several IDs when the treatment is the same; use separate items when
-it differs by period. Keep `message` and any `mapping_treatment` to at most
-180 characters each. State the issue, treatment, or decision needed in plain
-language; Python supplies the period labels and calculated discrepancies.
+Keep one issue per review. In one plain sentence, name the issue and explain the
+treatment used or decision needed. Use specific account or source labels rather
+than vague phrases such as "reported total" or "selected layer."
+
+Keep `message` and any `mapping_treatment` to at most 180 characters each. Omit
+amounts, percentages, period labels, and technical prefixes; Python supplies
+verified comparisons and identifies affected periods.
+
+Do not comment on routine calculations, straightforward mappings, or ordinary
+absent accounts. Do not repeat a validation warning unless you add a useful
+explanation or decision. Missing mapped detail does not prove the source lacks
+detail. IT departments commonly have no labor; do not flag absent IT labor.
+
+Examples:
+- "Management payroll could not be separated; wages remain in nonmanagement payroll."
+- "Facility fees were moved from Rooms to miscellaneous income."
+- Do not add: "Occupancy was calculated from rooms occupied and available."
+
+Put every affected account in `coa_ids`, with the responsible account first.
+Put source references in `source_rows` and affected periods in `period_ids`.
+Use one item across periods when the explanation is the same.
+
+Comments must describe the current mapping. Every repair must return the complete
+current `review_items` list and refreshed `run_summary` (or null), even when
+unchanged. Remove resolved comments and update explanations whose treatment
+changed. These fields replace the previous notes; use an empty review list when
+no meaningful issues remain. Do not retransmit unchanged account decisions.
 
 - `ambiguity`: two materially different mappings remain plausible;
 - `unusual_convention`: the mapping is supported, but the presentation is
@@ -495,16 +518,30 @@ For a Summary-to-department difference, add one only when it identifies the
 likely cause, a specific source adjustment, a nonstandard mapping decision, or
 a question requiring human judgment. Otherwise rely on the validation message.
 
-Escalate when necessary evidence is missing, sources conflict without a
-supported resolution, or two classifications remain plausible. Keep each
-message to one plain sentence stating the issue, provisional treatment, and any
-decision needed. The message may identify source labels, calculations used, and
-validation findings when they help explain the decision. Write for a hotel
-analyst and avoid implementation jargon or unnecessary detail. Put COA IDs and
-source-row references in their structured fields. Use an empty list for routine
-mappings and for both source-layer row lists unless a selected-versus-alternate
-numeric conflict is being reported. IT departments commonly have no labor; do
-not flag absent IT labor.
+Use empty source-layer row lists unless a selected-versus-alternate numeric
+conflict is being reported. If that comparison also explains a nonstandard
+mapping, put that explanation alone in `mapping_treatment`; otherwise use null.
+Code retains the treatment even when the numeric difference is rounding.
+
+## Run Notes summary
+
+Return `run_summary` with every mapping submission as two or three short
+sentences, at most 500 characters, for the Run Notes tab.
+
+Summarize the most consequential mapping decisions, source limitations,
+exclusions, and unresolved questions. Prioritize what the analyst needs to
+understand; do not list every COA comment.
+
+Use plain language and specific subjects. Omit technical terminology, account
+IDs, row references, routine calculations, issue counts, and exact financial
+amounts. Those details are available elsewhere in the workbook.
+
+Describe the current mapping. Do not claim that validation passed, all accounts
+reconcile, or no issues remain; Python determines the final status.
+
+Refresh this summary whenever a repair changes its conclusions. If there is
+nothing material to explain, return null. There may be no further model turn
+after validation passes, so include the summary in the plan or patch itself.
 
 ## Source subtotal checks and concise notes
 
@@ -536,14 +573,6 @@ not calculate the differences yourself. Respect already-net allowances and
 signed credits, and never add a subtotal to its own components. An empty list
 is appropriate only when the source has no supported subtotal relationships.
 Patches retain controls unless `source_controls` explicitly replaces the list.
-
-For each review, put the responsible parent or populated account first in
-`coa_ids`. Keep one issue per review; do not repeat KPI or subtotal warnings
-already produced by code. Keep `message` factual and omit amounts, percentages,
-and claims that missing mapped detail proves the source has no detail. If a
-numeric comparison also explains a nonstandard mapping, put that explanation
-alone in `mapping_treatment`; otherwise use null. Code will add the period and
-amount and retain the treatment even when the numeric difference is rounding.
 
 ## Venue Names
 
