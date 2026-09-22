@@ -59,6 +59,7 @@ from hotel_pl_normalizer.mapping import (
 )
 from hotel_pl_normalizer.mapping.coa import canonical_coa_ids
 from hotel_pl_normalizer.mapping.findings import ensure_finding
+from hotel_pl_normalizer.mapping.tolerances import reconciliation_tolerance
 from hotel_pl_normalizer.models.evidence import (
     EvidenceRow,
     PdfLineLocator,
@@ -478,6 +479,8 @@ def _describe_check(check) -> tuple[str, str, str]:
 def _canonical_feedback(
     result: NormalizationResult,
     known_ids: set[str],
+    omitted=frozenset(),
+    collapsed=frozenset(),
 ) -> tuple[dict[str, list[tuple[int, str]]], list[str]]:
     """Repeat each concise finding on its affected accounts, once per cell."""
     bundle = compose_result_feedback(result)
@@ -499,14 +502,24 @@ def _canonical_feedback(
             )
         for account in set(finding.affected_coa_ids) | {coa_id}:
             if account in known_ids:
+                affected = {p.period_id for p in finding.periods} or set(result.period_labels) or {"selected"}
+                if all((account, period) in omitted for period in affected):
+                    continue
+                text = finding.rendered_text
+                if finding.category == "Coverage gap" and any(
+                    (coa_id, period) in collapsed for period in affected
+                ):
+                    text = "Detailed breakdown omitted because it does not add up to the total."
                 by_account.setdefault(account, []).append(
-                    (priorities[finding.severity], finding.rendered_text)
+                    (priorities[finding.severity], text)
                 )
 
     periods = _periods(result)
     _, child_notes = _review_value_targets(result, periods)
     parent_notes = {account: list(notes) for account, notes in by_account.items()}
     for (child, period), parent in sorted(child_notes.items()):
+        if (child, period) in omitted:
+            continue
         if child not in known_ids or parent not in parent_notes:
             continue
         by_account.setdefault(child, []).extend(parent_notes[parent])
@@ -920,8 +933,12 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     note_cell.alignment = Alignment(
         horizontal="left", vertical="bottom", wrap_text=True
     )
-    estimated_lines = sum(max(1, math.ceil(len(line) / 115)) for line in note_lines)
-    sheet.row_dimensions[9].height = min(409, max(14.5, 15 * estimated_lines))
+    width = max(10, (sheet.column_dimensions["C"].width or 95) * 0.74)
+    estimated_lines = sum(max(1, math.ceil(len(line) / width))
+                          for text in note_lines for line in text.splitlines())
+    sheet.row_dimensions[9].height = (
+        min(409, max(30, 20 * estimated_lines + 8)) if note_lines else 14.5
+    )
 
 
 def _fill_model_periods(sheet, count: int) -> None:
@@ -1001,7 +1018,7 @@ def _review_value_targets(result, periods):
     return targets, child_notes
 
 
-def _highlight_review_values(book, result, periods, canonical) -> None:
+def _highlight_review_values(book, result, periods, canonical, omitted=frozenset()) -> None:
     """Color visible findings and partial child detail in the affected periods."""
     columns = {period_id: FIRST_PERIOD_COL + i for i, (period_id, _, _) in enumerate(periods)}
     rows = {coa_id: FIRST_ACCOUNT_ROW + i for i, coa_id in enumerate(canonical)}
@@ -1010,6 +1027,8 @@ def _highlight_review_values(book, result, periods, canonical) -> None:
     yellow = PatternFill("solid", fgColor="FFFF00")
     references = {coa: set()}
     for account, period in targets:
+        if (account, period) in omitted:
+            continue
         if account in rows and period in columns:
             references[coa].add(coa.cell(rows[account], columns[period]).coordinate)
     for sheet, refs in references.items():
@@ -1050,6 +1069,47 @@ def _autofit_coa_rows(sheet, last_row: int) -> None:
         sheet.row_dimensions[row].height = min(409, max(18, 15 * max(line_counts)))
 
 
+def _incomplete_detail_omissions(result, periods):
+    """Output-only mask. Never change the saved plan, values or validation.
+
+    Major department subtotals anchor independent branches, so a higher-level
+    discrepancy cannot erase otherwise usable labor or operating detail.
+    """
+    protected = {"total_cost_of_sales_and_other_revenue", "salaries_and_wages",
+                 "labor_costs_and_related_expenses", "other_expenses"}
+    children = {}
+    for key, metadata in result.coa.items():
+        children.setdefault(metadata.get("parent_coa_id"), []).append(key)
+    omitted, collapsed = set(), set()
+    for period, _, values in periods:
+        checks = (result.checks_by_period or {period: result.checks}).get(period, [])
+        for raw in checks:
+            finding = ensure_finding(raw, period_id=period)
+            parent = finding.target
+            siblings = children.get(parent, [])
+            value = values.get(parent)
+            if finding.rule != "source_detail_incomplete" or value is None or not siblings:
+                continue
+            if any(str(result.coa[c].get("is_residual", "")).lower() == "true" for c in siblings):
+                continue
+            amounts = [values.get(c) for c in siblings]
+            if not math.isfinite(value) or any(v is not None and not math.isfinite(v) for v in amounts):
+                continue
+            if abs(value - sum(v or 0 for v in amounts)) <= reconciliation_tolerance(value):
+                continue
+            branch, pending = set(), list(siblings)
+            while pending:
+                child = pending.pop()
+                if child in branch or child.partition(".")[2] in protected:
+                    continue
+                branch.add(child)
+                pending.extend(children.get(child, []))
+            if any(values.get(c) is not None for c in branch):
+                omitted.update((c, period) for c in branch)
+                collapsed.add((parent, period))
+    return omitted, collapsed - omitted
+
+
 def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
     """Write the standardized output and return the path written."""
     if not TEMPLATE.is_file():
@@ -1074,8 +1134,9 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
         row.row_key: row for row in ensure_evidence_rows(result.evidence or [])
     }
     known_ids = set(canonical)
+    omitted, collapsed = _incomplete_detail_omissions(result, periods)
     try:
-        feedback, orphans = _canonical_feedback(result, known_ids)
+        feedback, orphans = _canonical_feedback(result, known_ids, omitted, collapsed)
     except (
         FeedbackCompositionError,
         OutputTemplateError,
@@ -1093,11 +1154,11 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
         value=f"Mapped Labels - {mapped_label_period[1]}",
     )
 
-    for offset, (_, label, values) in enumerate(periods):
+    for offset, (period_id, label, values) in enumerate(periods):
         column = FIRST_PERIOD_COL + offset
         sheet.cell(row=HEADER_ROW, column=column, value=label)
         for index, coa_id in enumerate(canonical):
-            value = values.get(coa_id)
+            value = None if (coa_id, period_id) in omitted else values.get(coa_id)
             # Blank, not zero, when a period has no figure: a written zero is a
             # claim that the account was mapped and came to nothing.
             target = sheet.cell(
@@ -1159,13 +1220,19 @@ def write_normalized_workbook(result: NormalizationResult, path: Path) -> Path:
 
         if coa_id in venues:
             sheet.cell(row=row, column=VENUE_COL, value=venues[coa_id])
+        if (coa_id, mapped_label_period[0]) in omitted:
+            sheet.cell(row=row, column=LABELS_COL).value = None
+        if any((coa_id, p) in omitted for p, _, _ in periods) and all(
+            (coa_id, p) in omitted or values.get(coa_id) is None for p, _, values in periods
+        ):
+            sheet.cell(row=row, column=FEEDBACK_COL).value = None
 
     _autofit_coa_rows(sheet, last_row)
     _write_run_notes(book, result, orphans, periods)
     model_sheet = book["KHP Model Accounts"]
     _fill_model_periods(model_sheet, len(periods))
     _unhide_existing_columns_after(model_sheet, FIRST_PERIOD_COL + MAX_PERIODS - 1)
-    _highlight_review_values(book, result, periods, canonical)
+    _highlight_review_values(book, result, periods, canonical, omitted)
     _reset_sheet_views(book)
 
     # openpyxl cannot calculate formulas. Mark their cached values stale and

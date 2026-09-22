@@ -89,8 +89,28 @@ venue; only OOD minibar uses S3. Unsegmented room revenue stays at its supported
 parent, and wages with unknown management status stay at Salaries and Wages.
 Use partial coverage and a parent rationale for an unreliable split. That
 explanation ends enrichment for this incomplete-detail warning, but preserves
-the parent, supported children and visible coverage note. It never waives
+the parent and supported children in the saved mapping. It never waives
 Summary arithmetic, Summary/detail reconciliation or large residual errors.
+
+### Final Excel detail cleanup
+
+The shared writer applies an output-only mask per period to incomplete child
+groups without a residual sibling. It preserves reconciled groups and rounding
+differences within the existing tolerance. Department COGS, Salaries and Wages,
+Labor, and Opex subtotals anchor independent branches: a higher discrepancy does
+not erase those totals or their usable detail. Their own incomplete children
+are still eligible for cleanup.
+
+Omitted cells are blank, without issue highlighting or mapped-label text for
+the displayed source period. Comments remain only when relevant to retained
+periods. The parent reads: "Detailed breakdown omitted because it does not add
+up to the total." Discrepancies between retained totals remain visible. Run Notes
+wraps with a saved height based on text length and column width.
+
+This changes neither mapping acceptance nor original values, decisions and
+findings in the run log. KHP Model Accounts formulas and formatting are unchanged;
+Excel recalculates their results from the cleaned COA on opening. CLI and web
+exports both use this same writer; no additional model call is involved.
 
 ### Instruction audit
 
