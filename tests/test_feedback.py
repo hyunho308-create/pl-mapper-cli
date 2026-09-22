@@ -15,6 +15,59 @@ COA = load_canonical_coa()
 LABELS = {"actual": "2025 Actual", "budget": "2025 Budget"}
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_typed_summary_comparison_names_both_sides_and_merges_duplicate(reverse):
+    summary, detail = "S12.total_food_and_beverage_expenses", "S2.total_food_and_beverage_expenses"
+    selected, alternate = (["Detail!1"], ["Summary!1"]) if reverse else (["Summary!1"], ["Detail!1"])
+    review = {"kind": "source_discrepancy", "message": "Summary controls Summary; detail controls detail.",
+        "mapping_treatment": "Summary components control Summary; Detail controls F&B.",
+        "coa_ids": [summary, detail], "period_ids": ["actual"],
+        "source_rows": ["Summary!1", "Detail!1"], "selected_source_rows": selected,
+        "alternate_source_rows": alternate, "selected_source_operation": "direct",
+        "alternate_source_operation": "direct"}
+    bundle = compose_feedback(
+        checks_by_period={"actual": [Finding("error", "summary_department", summary,
+            {"actual": 10000, "expected": 6241, "variance": 3759})]},
+        review_items=[review], exceptions=[], execution_issues=[], execution_issues_by_period={},
+        period_labels=LABELS, coa=COA,
+        evidence_rows=[{"row_key": k, "selected_values": {"actual": n}} for k,n in
+                       [("Summary!1", 10000), ("Detail!1", 6241)]],
+        values_by_period={"actual": {summary: 10000, detail: 6241}},
+    )
+    visible = [f for f in bundle.findings if f.destination != "internal_only"]
+    assert len(visible) == 1
+    assert visible[0].rendered_text == "F&B department expenses are below Summary by 3,759 in 2025 Actual."
+    assert visible[0].affected_coa_ids == [detail]
+    assert len(bundle.inputs) == 2
+
+
+def test_unreached_coverage_review_is_audited_when_another_error_stopped_the_run():
+    bundle = _compose(checks={"actual": [
+        Finding("info", "coverage_review_not_completed", "mapping_session", note="detail review was not reached"),
+        Finding("error", "summary_department", "S12.total_rooms_expenses",
+                {"actual": 1000, "expected": 900, "variance": 100}),
+    ]})
+    assert bundle.rendered_count == 1
+    assert any(f.destination == "internal_only" for f in bundle.findings)
+
+
+def test_named_comparison_handles_a_missing_period_without_inventing_zero():
+    review = _review("source_discrepancy", "Two reported expense totals differ.", ["S8.other_expenses"],
+                     source_rows=["Integrated!10", "Schedule!20"])
+    review.update(selected_source_rows=["Integrated!10"], alternate_source_rows=["Schedule!20"],
+                  selected_source_operation="direct", alternate_source_operation="direct")
+    bundle = _compose(reviews=[review], evidence=[
+        {"row_key": "Integrated!10", "label": "Maintenance expenses", "selected_values": {"actual": 100, "budget": None}},
+        {"row_key": "Schedule!20", "label": "Total maintenance", "selected_values": {"actual": 80, "budget": 90}},
+    ])
+    note = bundle.findings[0].rendered_text
+    assert "Maintenance expenses on Integrated" in note
+    assert "Total maintenance on Schedule" in note
+    assert "20 higher in 2025 Actual" in note
+    assert "Could not verify this comparison for 2025 Budget" in note
+    assert "alternate source" not in note
+
+
 @pytest.mark.parametrize("variance,direction", [(106, "below"), (-106, "above")])
 def test_review_comparison_cannot_reverse_summary_department_direction(variance, direction):
     summary = "S12.total_food_and_beverage_expenses"

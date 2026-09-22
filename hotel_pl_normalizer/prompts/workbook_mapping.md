@@ -136,7 +136,8 @@ Work from most important to least important:
 Never sacrifice a higher-priority structure merely to populate or reconcile a
 lower-priority child account.
 
-Explicit COA inclusions and exclusions control the normalized classification,
+Preserve the operator's department placement by default; do not move an activity
+merely to populate a more specific account elsewhere. Explicit COA inclusions and exclusions control the normalized classification,
 even when the operator places a row in a different department. Apply a supported
 reclassification consistently to linked Summary and department accounts and
 explain it once. Otherwise, classify rows using this evidence precedence:
@@ -210,14 +211,14 @@ consolidated row as the reconciliation control.
   never both. Check the blocks against that total in every selected period;
   your own overlapping selections are not a source discrepancy. Never label a
   different outlet's figures as the missing venue to fill a period gap.
-- Before leaving a supported parent's child blank or using a remainder, search
-  the supplied evidence by the child's meaning, COA synonyms, and department or
-  activity. Check every selected period: a schedule blank in the current year
+- Before mapping a child, check its meaning, department and relationship to the
+  parent. Check every selected period: a schedule blank in the current year
   may contain usable prior-year detail. Confirm the exact row identifier,
   accounting scope, and relationship to the controlling total; an equal amount
-  alone is not evidence of a match. Cite direct detail when available, without
-  also counting the remainder that already contains it. Explain unavailable
-  detail only after this check, and distinguish absent from partly reported.
+  alone is not evidence of a match. Use clear direct detail without also counting
+  a remainder containing it. Do not conduct an exhaustive search or infer a split
+  just to fill children. Distinguish absent detail from detail that cannot be
+  reliably classified, and explain the latter in the parent's rationale.
 
 ## Common Structural Problems
 
@@ -229,22 +230,19 @@ children merely to complete a hierarchy.
 
 ### Labor
 
-Payroll is an exception where the operator's subtotal hierarchy does not need to
-be reproduced directly. Payroll reports use many overlapping and inconsistent
-subtotal configurations, so reason from the detailed labor rows and arrange
-positively supported children into the COA labor hierarchy from the ground up.
-Avoid mapping intermediate source payroll subtotals when doing so would overlap
-or distort the supported children. Inspect the complete labor block, explicitly
-include or exclude embedded rows such as contract labor and bonuses, and ensure
-the resulting COA labor hierarchy reconciles to the authoritative total labor
-amount. Labor remains labor even when a job title resembles an opex account.
+Use the reported labor total as the anchor. Map payroll subtotals and children
+only when labels and structure clearly support their COA scope. Where contract
+labor or bonuses sit in a different subtotal, use a cited total plus/minus a
+clear adjustment; do not rebuild payroll from ambiguous job titles. Leave an
+uncertain split at its supported parent. Labor remains labor even when a job
+title resembles an opex account.
 Within every department or subschedule, map separately reported payroll or labor
 to that department's labor hierarchy and non-labor costs to its opex accounts.
 Do not map an entire schedule to opex when payroll is separately reported.
-When the source does not distinguish management from nonmanagement, assign the
-unsplit wages to Nonmanagement and emit one `unusual_convention` review item
-stating that treatment, citing the affected accounts and wage rows. Preserve
-any explicitly identified management instead of applying that default.
+When the source does not distinguish management from nonmanagement, retain
+unsplit wages at Salaries and Wages. Map any clearly identified roles without
+guessing the rest. Mark incomplete coverage `partial` and explain the limitation
+in that parent's rationale. Do not assume generic wages are nonmanagement.
 
 For payroll-related allocations, inspect the originating pool and its component
 rows before classifying the receiving department line. A line called Payroll
@@ -267,11 +265,16 @@ Nonmanagement. Generic F&B management or wages do not establish either role spli
 
 ### Named activities
 
-Review each named retail/gift-shop, minibar, and parking activity's revenue and
+Keep minibar in the department where the operator reports it. Within F&B, use
+a generic venue for its revenue and the corresponding F&B cost accounts. Use
+S3 Minibar only when the operator presents it in OOD. Do not reclassify minibar
+or add a review note merely because the COA also offers a dedicated OOD account.
+
+Review each named retail/gift-shop and parking activity's revenue and
 cost together, across all schedules and selected periods. Gross sales with the
 matching merchandise costs, payroll, or operating expenses support an operated
-department. Map its revenue and expenses to the corresponding S3 activity,
-including both food and beverage minibar sales; do not leave the revenue in
+department. Map its revenue and expenses to the corresponding S3 activity;
+do not leave the revenue in
 Miscellaneous Income while mapping its costs to that operated department.
 Apply supported reclassifications to the linked Summary categories as well.
 A commission, concession rent, or net revenue share without operating exposure
@@ -287,10 +290,11 @@ Prefer occupancy explicitly excluding comps, otherwise calculate the paid-room
 ratio. ADR must use the same paid-room count. Never change a count or cap an
 impossible occupancy just to clear a warning; preserve and disclose source errors.
 
-If the source supplies unsegmented room revenue, assign that room revenue to
-Transient and emit one `unusual_convention` review item explaining that no
-segment breakout is reported. Keep ancillary revenue and allowances separate.
-An account rationale alone does not create a visible note; include the review item.
+Keep unsegmented room revenue at the supported rooms-revenue parent, not Transient
+by default. Map segments only when labels and hierarchy clearly identify them;
+do not infer qualified, negotiated, group or retail from generic codes. Retain
+supported segments and leave the uncertain remainder unsplit. Explain partial
+coverage in the parent's rationale; Python supplies its incomplete-detail note.
 
 ### Nonstandard Summary Sections
 
@@ -341,7 +345,8 @@ children and flag the questionable subtotal for review.
 - `scale`: multiply cited rows by an explicitly supported `scale_factor`.
 - `coa_rollup`: with `summary_mode=derived` only, derive an allowed S12 account
   from mapped COA accounts without citing workbook rows.
-- `no_value`: the account is absent; cite no rows.
+- `no_value`: the account is absent or cannot be reliably matched to the source
+  hierarchy; cite no rows.
 
 Python executes every operation.
 An explicit accounting dash in a bound amount cell is read as zero; an absent
@@ -352,9 +357,9 @@ cell remains missing. Prefer the direct row even when one period displays a dash
 For each parent, set `child_coverage` to:
 
 - `complete`: children fully explain the parent;
-- `partial`: supported child detail exists but is incomplete;
-- `not_present`: the source contains no usable evidence for this child
-  hierarchy; or
+- `partial`: the source does not support a reliable complete child split;
+  retain any clearly supported children, even if none can be identified;
+- `not_present`: no child detail is reported in any selected period; or
 - `not_applicable`: the account is a leaf.
 
 Preserve each reconciled parent as an anchor while enriching detail. Map every
@@ -391,30 +396,36 @@ unsupported remainder even though the arithmetic is exact. Python discloses it
 when it is at least 10,000 or at least 5% of the parent. Prefer directly
 identified residual source rows whenever they exist.
 
-Without a legitimate residual, retain all positively supported children during
-repair and keep searching the source for additional usable detail. Set the
-parent's `child_coverage` to `not_present` only when the source contains no usable
-evidence for that child hierarchy, not when detail is merely incomplete,
-inconvenient, or difficult to reconcile. If supported partial detail remains
+Without a legitimate residual, retain the parent and clearly supported children.
+For an unreliable or incomplete split, use `partial` and explain why the remaining
+children cannot be identified in the parent's `rationale`. That explanation
+completes the detail review for this parent; no further enrichment is required.
+Use `not_present` when child evidence is absent, with all children `no_value`.
+Do not use it to erase supported children. If supported partial detail remains
 when validation completes, Python retains the reconciled parent and every
 positively supported child, then warns the user that child detail is incomplete.
 Never guess or allocate unsupported detail.
 
 ## Validation and Repair
 
-Submit the complete mapping once through `validate_mapping`, including the full
+Submit the initial complete mapping through `validate_mapping`, including the full
 strategy record. Read every error and warning. Treat Summary-to-department
 failures as structural problems: reconsider missing or duplicated schedules,
 Summary-only lines, offsets, unusual subtotals, signs, and categories presented
 outside their conventional section.
 
-Repair feedback contains only the applicable rule guidance, implicated COA IDs,
-and relevant cited source rows. Use `patch_mapping` only for omitted or
-implicated decisions; never retransmit the full plan or unchanged decisions.
+If an initial submission fails input validation and reports that no plan was
+saved, correct the stated errors and resubmit the full `validate_mapping` call.
+Do not use `patch_mapping` until an initial plan has been saved.
+
+After a plan has been saved, repair feedback contains only the applicable rule
+guidance, implicated COA IDs, and relevant cited source rows. Use `patch_mapping`
+only for omitted or implicated decisions; do not retransmit unchanged decisions.
 For blocking incomplete-child findings, keep the parent fixed and use the repair
 to add or correct positively supported children. Provide all supported detail in
 the first complete plan. When coverage warnings remain after blocking errors are
-cleared, one focused enrichment response is available; source-exception and
+cleared, one focused enrichment response is available for unexplained coverage
+gaps. An explained partial split needs no additional detail search; source-exception and
 other non-coverage warnings do not receive an extra repair turn. If no usable
 child evidence exists, explicitly change the parent to `not_present`. Each patch
 must include a concise `repair_hypothesis` and `expected_fix`.
@@ -438,6 +449,11 @@ incomplete detail, material mapping judgments, or source conflicts.
 Keep one issue per review. In one plain sentence, name the issue and explain the
 treatment used or decision needed. Use specific account or source labels rather
 than vague phrases such as "reported total" or "selected layer."
+Describe the final treatment, not repair history or that a mapping is "supported."
+Say what was included, excluded, left incomplete, or still needs review.
+Never use account IDs such as S12 or S2, "controls", "selected source", "alternate
+source", "source layer", or "bridge" in user-facing notes. Name the actual
+subjects: Summary, F&B department total, or the named standalone schedule.
 
 Keep `message` and any `mapping_treatment` to at most 180 characters each. Omit
 amounts, percentages, period labels, and technical prefixes; Python supplies
@@ -447,9 +463,15 @@ Do not comment on routine calculations, straightforward mappings, or ordinary
 absent accounts. Do not repeat a validation warning unless you add a useful
 explanation or decision. Missing mapped detail does not prove the source lacks
 detail. IT departments commonly have no labor; do not flag absent IT labor.
+Do not explain the routine design (Summary maps to Summary; detail maps to
+departments). Leave `mapping_treatment` null unless there is a substantive
+adjustment, exclusion or other nonstandard decision to explain.
 
 Examples:
-- "Management payroll could not be separated; wages remain in nonmanagement payroll."
+- "Management and nonmanagement payroll could not be separated; wages remain at Salaries and Wages."
+- "A&G includes the separate HR schedule's payroll and operating expenses."
+- "The F&B department expense total is lower than the Summary total."
+- "The standalone Engineering schedule is higher than the consolidated P&L."
 - "Facility fees were moved from Rooms to miscellaneous income."
 - Do not add: "Occupancy was calculated from rooms occupied and available."
 
@@ -494,6 +516,8 @@ no meaningful issues remain. Do not retransmit unchanged account decisions.
   discrepancy otherwise qualifies and calculates it.
 
 Treat the workbook's source basis as one decision, not as unrelated exceptions.
+An uncertain child split alone is partial coverage, not a blocking ambiguity
+or scope decision. Keep the supported parent and explain the unsplit detail.
 Several material Summary/detail conflicts spanning different departments may
 mean the layers use incompatible scope, allocations, or reporting bases. Before
 adding a series of `source_discrepancy` items, confirm from cited headings,
@@ -532,9 +556,23 @@ Summarize the most consequential mapping decisions, source limitations,
 exclusions, and unresolved questions. Prioritize what the analyst needs to
 understand; do not list every COA comment.
 
+Describe the final result, not the repair process. Do not report that rows were
+fixed, references corrected, or classifications are "supported." Name the actual
+department, source label, or exclusion and what it means for the reader.
+
 Use plain language and specific subjects. Omit technical terminology, account
 IDs, row references, routine calculations, issue counts, and exact financial
 amounts. Those details are available elsewhere in the workbook.
+
+Avoid internal shorthand such as "source-layer conflict," "controlling layer,"
+"S12", "S2", "controls", or "Fixed Expenses bridge." Use department names.
+Do not restate the system's normal Summary/detail sourcing. Explain only the
+material treatment or limitation in simple, concise language.
+For example: "HR payroll and operating costs are included in A&G. Some department
+schedules differ from the Summary; the differences are highlighted."
+Or: "EBITDA was calculated from operating profit less management fees and fixed
+expenses because the reported EBITDA did not match those amounts."
+These are writing examples, not instructions to make those mapping decisions.
 
 Describe the current mapping. Do not claim that validation passed, all accounts
 reconcile, or no issues remain; Python determines the final status.
@@ -545,33 +583,22 @@ after validation passes, so include the summary in the plan or patch itself.
 
 ## Source subtotal checks and concise notes
 
-Return `source_controls` for the explicitly reported financial subtotals with
-supporting components in each schedule. Walk each repeated revenue or expense
-block separately, including intermediate and net totals not selected for a COA
-mapping. Citing a subtotal as a component of a higher total does not check that
-subtotal's own arithmetic. Define the expected relationship from source labels
-and category membership, NOT by reverse-engineering sums that happen to tie.
-A mismatch is a valid source check, not a failed mapping: never drop a labeled
-component or choose a smaller subset merely to eliminate a difference.
-For example, check Food Revenue + Beverage Revenue
-against Net Food & Beverage Revenue, as well as net revenue against the next
-total; respect allowances already included in those component amounts.
-If the food and beverage component totals already include their allowances,
-compare their sum directly to the NET total, not a gross subtotal. Do not net
-the displayed combined allowance a second time. Record this independent
-category-total comparison even when Gross + Allowances = Net already ties;
-checking only that latter equation can hide omitted revenue categories.
-Follow the actual scope of
-each subtotal: a higher total may also include separately presented components
-above or outside the immediately preceding block. Do not assume that the
-nearest subtotal contains every earlier line merely from its caption.
-Give each control a short label, the responsible `coa_id`, one
-`total_row`, and the non-overlapping `component_rows` (and `excluded_rows` only
-for explicit subtractions). Python checks total = sum(components) - sum(excluded)
-for every selected period. Include controls that appear to reconcile too; do
-not calculate the differences yourself. Respect already-net allowances and
-signed credits, and never add a subtotal to its own components. An empty list
-is appropriate only when the source has no supported subtotal relationships.
+Use optional `source_controls` only for clear additive subtotals: a reported
+total and its non-overlapping components above it on the same sheet, in the
+same department and accounting scope. Do not compare profit against expenses,
+a charge against its offset, or unrelated departments. These are not additive
+subtotal checks. Do not invent a control for every block.
+
+Supply a short label, responsible `coa_id`, `total_row`, `component_rows`, and
+empty `excluded_rows`. Signed credits already included in the components are
+added with their source sign. Do not subtract an allowance or cost already
+excluded by the chosen subtotal. `excluded_rows` is a subtraction instruction,
+not a list of ignored rows; adjusted comparisons are outside this simple check.
+Use the typed `source_discrepancy` comparison for a well-supported non-additive
+conflict. Never choose rows merely because their amounts tie. Uncertain control
+relationships should be omitted, not presented as source errors. An empty list
+is valid. Python retains unsupported controls in the audit without a visible
+source-error flag; it does not change mapped values from these checks.
 Patches retain controls unless `source_controls` explicitly replaces the list.
 
 ## Venue Names
@@ -579,8 +606,8 @@ Patches retain controls unless `source_controls` explicitly replaces the list.
 When the COA contains generic venue slots, return the concise venue name from
 workbook headings, labels, or sheet names. Generic venues capture named F&B
 sources without a dedicated COA account, including restaurants, bars, lounges,
-coffee shops, grab-and-go concepts, and other outlets. Use the dedicated S3
-Minibar accounts for supported operated minibar activity. Do not assign
+coffee shops, grab-and-go concepts, minibar reported within F&B, and other
+outlets. Keep minibar's operator department placement. Do not assign
 banquet, conference, catering, B&C, in-room dining, IRD, or room-service revenue
 to a generic venue because those have dedicated COA accounts. Rank generic
 venues by combined food and beverage revenue. `venue_name` is required for every

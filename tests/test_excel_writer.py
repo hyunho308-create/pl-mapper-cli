@@ -540,7 +540,7 @@ def test_review_items_attach_to_their_accounts(tmp_path):
     note = sheet.cell(row=FIRST_ACCOUNT_ROW + ids.index(target), column=FEEDBACK_COL).value
 
     assert note == "Contract labor sits inside the salary subtotal."
-    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
+    assert book["Run Notes"]["C9"].value is None
 
 
 def test_review_item_is_displayed_once_on_summary_account(tmp_path):
@@ -569,7 +569,7 @@ def test_review_item_is_displayed_once_on_summary_account(tmp_path):
         row=FIRST_ACCOUNT_ROW + ids.index(detail), column=FEEDBACK_COL
     ).value
 
-    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
+    assert book["Run Notes"]["C9"].value is None
     assert message in (summary_note or "")
     assert message in detail_note
 
@@ -603,7 +603,7 @@ def test_review_items_hide_internal_ids_but_keep_readable_source_rows(tmp_path):
     assert "S12." not in note
     assert "no_value" not in note
     assert "left blank" in note
-    assert run_note == "See highlighted COA accounts for details."
+    assert run_note == ""
 
 
 def test_per_period_checks_name_their_period(tmp_path):
@@ -881,10 +881,10 @@ def test_run_notes_lists_final_rollup_mismatches_over_ten(tmp_path):
     )["Run Notes"]
 
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value == "See highlighted COA accounts for details."
+    assert notes["C9"].value is None
     assert notes["C9"].font.sz == 11
     assert notes["C9"].alignment.wrap_text is True
-    assert notes.row_dimensions[9].height > 14.5
+    assert notes.row_dimensions[9].height == 14.5
 
 
 def test_run_notes_keeps_targetless_validation_and_execution_detail(tmp_path):
@@ -900,7 +900,7 @@ def test_run_notes_keeps_targetless_validation_and_execution_detail(tmp_path):
     assert book.sheetnames[0] == "Run Notes"
     notes = book["Run Notes"]
     assert notes["B9"].value == "Notes"
-    assert notes["C9"].value.splitlines()[:-1] == [
+    assert notes["C9"].value.splitlines() == [
         "Needs review: Rooms row 14 may have been assigned to unrelated accounts. "
         "Affected periods: YTD Actual.",
         "Needs review: Sheet 'Budget' could not be read.",
@@ -1053,7 +1053,7 @@ def test_run_notes_status_treats_rollup_mismatch_as_warning(tmp_path):
     )["Run Notes"]
 
     assert notes["C6"].value == "Completed — review highlighted items"
-    assert notes["C9"].value == "See highlighted COA accounts for details."
+    assert notes["C9"].value is None
 
 
 def test_run_notes_status_preserves_stopped_state(tmp_path):
@@ -1080,7 +1080,7 @@ def test_room_kpi_warning_is_counted_and_shows_the_cited_problem(tmp_path):
         outcome="source_exception",
     )
     book = load_workbook(write_normalized_workbook(result, tmp_path / "o.xlsx"))
-    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
+    assert book["Run Notes"]["C9"].value is None
     feedback = [row[FEEDBACK_COL - 1].value for row in book["COA"].iter_rows()]
     assert any(message in (item or "") for item in feedback)
 
@@ -1406,7 +1406,7 @@ def test_partial_child_highlights_preserve_values_formulas_and_clear_on_rebuild(
     }
     assert model_targets
     assert any(flagged["COA"][ref].value is None for ref in targets)
-    for name, expected in (("COA", targets), ("KHP Model Accounts", model_targets)):
+    for name, expected in (("COA", targets), ("KHP Model Accounts", set())):
         for row in flagged[name]:
             for after in row:
                 before = baseline[name][after.coordinate]
@@ -1423,6 +1423,10 @@ def test_partial_child_highlights_preserve_values_formulas_and_clear_on_rebuild(
             for rule in flagged[name].conditional_formatting[scope]
             if rule.formula == ["TRUE"]
         ]
+        if name == "KHP Model Accounts":
+            assert rules == []
+            assert list(flagged[name].conditional_formatting) == list(baseline[name].conditional_formatting)
+            continue
         assert len(rules) == 1
         scope, rule = rules[0]
         assert set(scope.split()) == expected
@@ -1455,7 +1459,7 @@ def test_period_scoped_review_note_keeps_unaffected_value_neutral(tmp_path):
     assert book["COA"].cell(row, FEEDBACK_COL).value == "Confirm the operator's allocation."
     assert book["COA"].cell(row, 4).fill.fgColor.rgb == "00FFFF00"
     assert book["COA"].cell(row, 3).fill.fgColor.rgb != "00FFFF00"
-    assert book["Run Notes"]["C9"].value == "See highlighted COA accounts for details."
+    assert book["Run Notes"]["C9"].value is None
     book.close()
 
 

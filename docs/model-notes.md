@@ -22,7 +22,11 @@ aid, not an approval of accounting meaning.
 
 The existing mapping call can return `source_controls` alongside its account
 decisions. Each control names a reported subtotal, non-overlapping component
-rows, explicit subtraction rows if necessary, and a responsible COA account.
+rows and a responsible COA account. Current controls are limited to additive
+subtotals with components above the total on the same sheet. Subtractions,
+profit/offset totals, opposite-sign comparisons, cross-sheet comparisons and
+missing values remain audit-only, not visible source-error flags. Legacy
+equations and their values remain in the audit; code does not normalize signs.
 Code calculates each comparison independently for every selected period, even
 if the reported subtotal was not used in the final financial mapping.
 
@@ -61,7 +65,45 @@ highlighted COA account receives the concise issue, including partial children.
 Run Notes uses the mapper's `run_summary` (up to 500 characters), saved with each
 mapping version. Every repair refreshes that summary and the complete review
 list; restoring an earlier mapping restores its comments too. Old logs without
-a summary use a simple pointer to highlighted accounts, not reconstructed prose.
+a summary leave Notes blank unless there is a separate run-level issue.
 Its deterministic status describes completion, review needs, unresolved
 errors, a required scope decision, or a stopped run. Raw findings remain in the
 run log even when merged or hidden from the workbook.
+
+Narratives describe final decisions rather than repair history, using named
+departments and plain explanations instead of internal mapping terminology.
+Source-subtotal notes show the named subtotal and differences by period; exact
+reported totals, component totals, and row references remain in the audit.
+If the initial mapping cannot be parsed or fails input validation, no plan is
+saved: the model must correct and resubmit the full `validate_mapping` call.
+Only saved plans can be repaired with `patch_mapping`.
+
+Issue highlighting is confined to COA, not KHP Model Accounts. Summary/detail
+comments name the department and use Summary as the reference; duplicate proven
+comparisons are merged. Routine descriptions of where totals are sourced do
+not belong in model notes. A coverage review not reached because another error
+stopped the run is retained as an informational audit event, not another flag.
+
+Mapping preserves minibar's operator department: F&B minibar uses a generic
+venue; only OOD minibar uses S3. Unsegmented room revenue stays at its supported
+parent, and wages with unknown management status stay at Salaries and Wages.
+Use partial coverage and a parent rationale for an unreliable split. That
+explanation ends enrichment for this incomplete-detail warning, but preserves
+the parent, supported children and visible coverage note. It never waives
+Summary arithmetic, Summary/detail reconciliation or large residual errors.
+
+### Instruction audit
+
+Aligned the main mapping prompt (priorities, labor, rooms segmentation, named
+activities, coverage, repair, review notes and venues), live repair instructions,
+validation definitions, rule registry, and COA notes. Removed the old forced
+minibar-to-OOD, unsegmented-to-Transient and unsplit-wages-to-Nonmanagement defaults.
+The upstream exploration prompt only discovers schedules and contains no
+conflicting classification rule; it is unchanged. Historical analysis, archived
+plans, saved run logs and prior workbooks are deliberately not rewritten.
+
+No account IDs, hierarchy equations, baseline amounts, model settings, Summary
+checks or source-row execution rules changed. The optional source-control
+guardrails do not prove semantic correctness of every remaining comparison;
+membership still requires model judgment. Prompt behavior needs a new live test;
+saved-run replays verify presentation and arithmetic only.

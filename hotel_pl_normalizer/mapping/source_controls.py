@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 
 from pydantic import Field, model_validator
 
@@ -69,7 +70,7 @@ def check_source_controls(controls, evidence, period_id) -> list[Finding]:
             for value in amounts.values()
         ):
             findings.append(Finding(
-                "warning", "source_control_unverified", control.coa_id,
+                "info", "source_control_unverified", control.coa_id,
                 details, period_id=period_id,
             ))
             continue
@@ -78,6 +79,14 @@ def check_source_controls(controls, evidence, period_id) -> list[Finding]:
             amounts[key] for key in control.excluded_rows
         )
         variance = actual - expected
+        reason = _unsupported_additive_control(control, rows, actual, expected)
+        if reason:
+            findings.append(Finding(
+                "info", "source_control_unverified", control.coa_id,
+                {**details, "actual": actual, "expected": expected,
+                 "variance": variance, "reason": reason}, period_id=period_id,
+            ))
+            continue
         # Retain rounding differences in the audit. The feedback composer
         # suppresses their display using the common reconciliation tolerance.
         if abs(variance) > 1e-7:
@@ -88,3 +97,26 @@ def check_source_controls(controls, evidence, period_id) -> list[Finding]:
                 period_id=period_id,
             ))
     return findings
+
+
+def _unsupported_additive_control(control, rows, actual, expected):
+    """Conservative guardrails, not a semantic proof of source membership.
+
+    Optional controls outside this small additive contract remain in the audit.
+    Do not normalize signs or silently fix the model's proposed equation.
+    """
+    if control.excluded_rows:
+        return "adjusted comparison; excluded rows are not a list of ignored rows"
+    try:
+        sheet, number = control.total_row.rsplit("!", 1)
+        components = [key.rsplit("!", 1) for key in control.component_rows]
+        if any(tab != sheet or int(row) >= int(number) for tab, row in components):
+            return "components are not above the subtotal on the same sheet"
+    except (ValueError, TypeError):
+        return "source layout does not establish an additive subtotal"
+    label = str(rows.get(control.total_row, {}).get("label") or "")
+    if re.search(r"\b(profit|loss|offset)\b|\bexp(?:ense)?\s+alloc", label, re.I):
+        return "profit or allocation offset is not an additive expense subtotal"
+    if actual * expected < 0:
+        return "subtotal and component sum use opposite signs"
+    return None

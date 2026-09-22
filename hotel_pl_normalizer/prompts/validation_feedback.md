@@ -300,19 +300,18 @@ review. Do not create a plug merely to eliminate a small source inconsistency.
 
 ### `source_detail_incomplete`
 
-Description: The source supports the parent and some children but lacks enough
-detail to complete the COA hierarchy.
+Description: The parent is supported but a reliable complete child split could
+not be determined; some or all children may remain unmapped.
 
 Resolution: Preserve the reconciled parent as an anchor and map every positively
 identifiable child without changing it. Do not clear supported children merely
-because coverage is incomplete. Search by child meaning and COA synonyms across
-the relevant schedules, including periods where a current-year blank conceals
-prior-year detail. Verify the row's department, role, and accounting scope before
-using it. Use `not_present` only when no selected period has usable child
-evidence. An unsplit mixed payroll-tax/benefit allocation or generic F&B wage
-line can remain at its supported parent; do not invent a split. After validation
-has no blocking errors, use one focused enrichment pass for all such parents,
-then finish with the warnings preserved rather than repeatedly revisiting them.
+because coverage is incomplete. Use clear labels and scope, not inferred room
+segments or labor roles. Keep an unreliable split `partial` (even when no child
+can be identified) and explain the limitation in the parent's `rationale`.
+This completes its detail review; retain the warning without more enrichment.
+Use `not_present` for absent child evidence with no mapped children. An unsplit
+payroll allocation or generic wage line stays at its supported parent. Only
+unexplained gaps receive one focused review after blocking errors are cleared.
 
 ### `unsupported_residual_remainder`
 

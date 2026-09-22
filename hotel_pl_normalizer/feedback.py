@@ -219,6 +219,7 @@ class _FindingBuilder:
     rules: set[str] = field(default_factory=set)
     department_comparison: str | None = None
     alternate_subtotal: str | None = None
+    comparison_subjects: tuple[str, str] | None = None
 
     def add_input(self, item: _Input, *, review: bool = False) -> None:
         if item.input_id not in self.source_input_ids:
@@ -759,13 +760,21 @@ def _period_sentence(
             for item in periods if item.rooms_sold is not None and item.rooms_available is not None
         )
     if "source_control_difference" in rules:
-        return " ".join(
-            f"{item.period_label}: reported ${item.selected_value:,.2f} versus "
-            f"components ${item.comparison_value:,.2f}, a ${abs(item.variance):,.2f} "
-            f"{'shortfall' if item.variance < 0 else 'excess'}."
-            for item in periods if item.variance is not None
-            and item.comparison_value is not None and not _below_reconciliation_tolerance(item)
-        )
+        measured = [item for item in periods if item.variance is not None
+                    and item.comparison_value is not None
+                    and not _below_reconciliation_tolerance(item)]
+        if not measured:
+            return ""
+        if all((item.variance < 0) == (measured[0].variance < 0) for item in measured):
+            direction = "below" if measured[0].variance < 0 else "above"
+            amounts = _join_phrases([
+                f"{abs(item.variance):,.2f} in {item.period_label}" for item in measured
+            ])
+            return f"The source subtotal is {direction} its listed component total by {amounts}."
+        return "The source subtotal is " + _join_phrases([
+            f"{'below' if item.variance < 0 else 'above'} its listed component total "
+            f"by {abs(item.variance):,.2f} in {item.period_label}" for item in measured
+        ]) + "."
     if category == COVERAGE_GAP and rules & {
         "large_residual_plug",
         "unsupported_residual_remainder",
@@ -881,6 +890,19 @@ def _render(
         return (f"Mapped {name} expenses match Summary. The mapped total is "
                 f"{_join_phrases(phrases)} than the separately reported "
                 f"{builder.alternate_subtotal} subtotal.")
+    if builder.comparison_subjects:
+        selected, alternate = builder.comparison_subjects
+        phrases = _variance_phrases([item for item in builder.periods.values()
+                                    if item.variance is not None
+                                    and not _below_reconciliation_tolerance(item)], "relative")
+        sentence = f"{selected} is {_join_phrases(phrases)} than {alternate}."
+        missing = [item.period_label for item in builder.periods.values() if item.variance is None]
+        if missing:
+            sentence += f" Could not verify this comparison for {_join_phrases(missing)}."
+        treatment = builder.explanation
+        if treatment and treatment != "The mapped amount differs from the cited source comparison.":
+            return _clean_message(treatment, coa, builder.source_refs) + " " + sentence
+        return sentence
     quantified = any(item.variance is not None for item in builder.periods.values())
     if quantified and builder.category in {SOURCE_PRESENTATION, COVERAGE_GAP, RECONCILIATION_DIFFERENCE} and not builder.review_input_ids:
         # Numeric findings state what was measured, not a model's diagnosis of
@@ -1154,6 +1176,11 @@ def _review_comparisons(
     for period_id, label in labels.items():
         if review.period_ids and period_id not in review.period_ids:
             continue
+        # Missing evidence in one period must not erase verified comparisons
+        # in other periods or silently turn the missing amount into zero.
+        comparisons[period_id] = PeriodComparison(
+            period_id=period_id, period_label=label,
+        )
         # The legacy arithmetic falls back to the primary value when a period
         # key is missing. That cannot prove a difference is small in this period.
         if any(
@@ -1164,7 +1191,7 @@ def _review_comparisons(
             )
             for row in cited
         ):
-            return {}
+            continue
         try:
             selected = _source_layer_value(
                 rows, value.selected_source_rows, value.selected_excluded_rows,
@@ -1175,11 +1202,11 @@ def _review_comparisons(
                 value.alternate_source_operation, period_id,
             )
         except (KeyError, TypeError, ValueError):
-            return {}
+            continue
         if selected is None or alternate is None or not all(
             math.isfinite(number) for number in (selected, alternate)
         ):
-            return {}
+            continue
         comparisons[period_id] = PeriodComparison(
             period_id=period_id, period_label=label,
             selected_value=selected, comparison_value=alternate,
@@ -1238,7 +1265,15 @@ def _same_adjustment(
 def _review_treatment(review: _Review, rows: dict[str, Any]) -> str | None:
     """Prefer separate treatment; recover legacy adjusted equations from rows."""
     if review.mapping_treatment and review.mapping_treatment.strip():
-        return review.mapping_treatment.strip()
+        treatment = review.mapping_treatment.strip()
+        # Legacy boilerplate describes normal sourcing, not an adjustment.
+        # Keep it in the raw review, but do not turn a rounding-only comparison
+        # into a visible treatment note. Restrict this to sourcing-only clauses.
+        clauses = re.split(r";|\bwhile\b", treatment, flags=re.I)
+        if not all(re.fullmatch(r"[^.;]+\bcontrols?\b[^.;]+\.?", clause.strip(), re.I)
+                   for clause in clauses):
+            return treatment
+        return None
     value = normalize_review_items([review.source.payload])[0]
     if not value.selected_excluded_rows or value.selected_source_operation != "adjusted_subtotal":
         return None
@@ -1612,7 +1647,8 @@ def compose_feedback(
         source_reviews = [review for review in reviews if review.source.input_id in finding.review_input_ids]
         if (finding.category == SOURCE_PRESENTATION and source_reviews
                 and all(review.kind == "source_discrepancy" for review in source_reviews)
-                and any(item.variance is not None for item in finding.periods.values())):
+                and any(item.variance is not None and not _below_reconciliation_tolerance(item)
+                        for item in finding.periods.values())):
             treatments = list(dict.fromkeys(filter(None, (
                 _review_treatment(review, rows) for review in source_reviews
             ))))
@@ -1745,6 +1781,12 @@ def compose_feedback(
     # Presentation-only routing. Keep the original checks and comparisons in
     # the audit; a Summary/detail difference belongs beside the detail value.
     for finding in builders.values():
+        if (finding.rules == {"source_control_unverified"}
+                or (finding.rules == {"coverage_review_not_completed"}
+                    and finding.severity == "info")):
+            internal_keys.add(finding.key)
+            for input_id in finding.source_input_ids:
+                dispositions[input_id] = (finding.key, "internal_only")
         if (finding.category == MAPPING_TREATMENT and finding.severity == "info"
                 and finding.affected_coa_ids
                 and set(finding.affected_coa_ids) <= kpi_ids):
@@ -1764,6 +1806,33 @@ def compose_feedback(
                            if check.source.input_id in finding.source_input_ids]
         is_summary_comparison = any(_is_summary_department_check(check)
                                     for check in matching_checks)
+        if not is_summary_comparison and finding.category == SOURCE_PRESENTATION and values_by_period:
+            # A typed comparison can describe the same Summary/detail difference
+            # without a summary_department check attached. Prove both amounts;
+            # never infer orientation from the author's prose or first COA ID.
+            for summary_id, detail_id in SUMMARY_LINKS.items():
+                if not {summary_id, detail_id} <= set(finding.affected_coa_ids):
+                    continue
+                measured = {period: item for period, item in finding.periods.items()
+                            if item.selected_value is not None and item.comparison_value is not None}
+                if not measured or not all(
+                    ((
+                        _same_number(item.selected_value, values_by_period.get(period, {}).get(summary_id))
+                        and _same_number(item.comparison_value, values_by_period.get(period, {}).get(detail_id))
+                    ) or (
+                        _same_number(item.selected_value, values_by_period.get(period, {}).get(detail_id))
+                        and _same_number(item.comparison_value, values_by_period.get(period, {}).get(summary_id))
+                    )) for period, item in measured.items()
+                ):
+                    continue
+                finding.periods.update({period: replace(
+                    item, selected_value=values_by_period[period][summary_id],
+                    comparison_value=values_by_period[period][detail_id],
+                    variance=values_by_period[period][summary_id] - values_by_period[period][detail_id],
+                ) for period, item in measured.items()})
+                detail_accounts = [detail_id]
+                is_summary_comparison = True
+                break
         if detail_accounts and is_summary_comparison:
             finding.primary_coa_id = detail_accounts[0]
             finding.affected_coa_ids = detail_accounts
@@ -1790,6 +1859,43 @@ def compose_feedback(
                 finding.primary_coa_id = detail
                 finding.affected_coa_ids = [detail]
                 finding.alternate_subtotal = ", ".join(alternate_sheets)
+
+        if (finding.category == SOURCE_PRESENTATION and not finding.department_comparison
+                and not finding.alternate_subtotal and finding.review_input_ids
+                and any(item.variance is not None for item in finding.periods.values())):
+            source_review = next((review for review in reviews
+                if review.source.input_id in finding.review_input_ids
+                and review.selected_source_rows and review.alternate_source_rows), None)
+            if source_review:
+                def subject(refs):
+                    sheets = sorted({ref.rsplit("!", 1)[0] for ref in refs if "!" in ref})
+                    name = (str(rows.get(refs[0], {}).get("label") or "Reported amount")
+                            if len(refs) == 1 else _account_name(finding.primary_coa_id, coa))
+                    return f"{name} on {_join_phrases(sheets)}"
+                finding.comparison_subjects = (
+                    subject(source_review.selected_source_rows),
+                    subject(source_review.alternate_source_rows),
+                )
+
+    # Merge only proven identical Summary/detail comparisons, keeping all raw
+    # inputs and references in the audit. A different value/period stays separate.
+    comparisons = {}
+    for finding in list(builders.values()):
+        if not finding.department_comparison:
+            continue
+        identity = (finding.department_comparison, tuple(sorted(
+            (p, round(item.selected_value, 4), round(item.comparison_value, 4))
+            for p, item in finding.periods.items()
+            if item.selected_value is not None and item.comparison_value is not None
+        )))
+        prior = comparisons.get(identity)
+        if prior is None:
+            comparisons[identity] = finding
+        else:
+            if finding.severity == "error":
+                prior.severity = "error"
+                prior.action_required = True
+            _merge_builder(prior, finding, builders, dispositions)
 
     # Shorten only when the year uniquely identifies a selected period.
     # Actual/Budget and multiple months in one year must remain distinguishable.

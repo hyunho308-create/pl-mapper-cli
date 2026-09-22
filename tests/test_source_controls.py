@@ -44,10 +44,30 @@ def test_unmapped_source_total_is_checked_for_each_period_without_changing_evide
     assert check_source_controls([control()], rows, "prior") == []
     assert rows == original
     note = feedback({"actual": findings}).findings[0]
-    assert "$10.00 shortfall" in note.rendered_text
+    assert "below its listed component total by 10.00 in 2025" in note.rendered_text
     assert "Outlet row 4" in note.rendered_text
-    assert "2025:" in note.rendered_text
+    assert note.periods[0].selected_value == 90
+    assert note.periods[0].comparison_value == 100
     assert note.periods[0].period_label == "2025 Actual"
+    assert set(note.source_refs) == {"Outlet!1", "Outlet!2", "Outlet!4"}
+
+
+@pytest.mark.parametrize("prior_total", [25, 75])
+def test_compact_source_checks_keep_each_period_direction_and_audit_amounts(prior_total):
+    rows = evidence()
+    rows[-1]["selected_values"]["prior"] = prior_total
+    checks = {p: check_source_controls([control()], rows, p) for p in LABELS}
+    note = feedback(checks).findings[0]
+    assert "The source subtotal is below its listed component total by 10.00 in 2025" in note.rendered_text
+    if prior_total == 25:
+        assert "and 25.00 in 2024" in note.rendered_text
+        assert note.rendered_text.count("its listed component total") == 1
+    else:
+        assert "above its listed component total by 25.00 in 2024" in note.rendered_text
+    assert "reported $" not in note.rendered_text
+    assert [(p.selected_value, p.comparison_value, p.variance) for p in note.periods] == [
+        (90, 100, -10), (prior_total, 50, prior_total - 50),
+    ]
     assert set(note.source_refs) == {"Outlet!1", "Outlet!2", "Outlet!4"}
 
 
@@ -58,7 +78,7 @@ def test_missing_or_invalid_period_value_is_unverified_not_zero(invalid):
     rows[0]["selected_value"] = 20
     findings = check_source_controls([control()], rows, "prior")
     assert findings[0].rule == "source_control_unverified"
-    assert feedback({"prior": findings}).rendered_count == 1
+    assert feedback({"prior": findings}).rendered_count == 0
 
 
 def test_missing_period_key_never_falls_back_to_primary():
@@ -99,6 +119,39 @@ def test_same_source_equation_is_reported_once_despite_label_or_row_order():
     assert len(check_source_controls([control(), repeated], evidence(), "actual")) == 1
 
 
+@pytest.mark.parametrize("total,components,excluded,label", [
+    (-100, ["Outlet!1", "Outlet!2"], [], "DEPT NET PROFIT/(EXP)"),
+    (-100, ["Outlet!1", "Outlet!2"], [], "Exp Alloc 123"),
+    (100, ["Outlet!1", "Other!2"], [], "Total"),
+    (100, ["Outlet!1", "Outlet!5"], [], "Total"),
+    (100, ["Outlet!1", "Outlet!2"], ["Outlet!3"], "Total"),
+])
+def test_unsupported_control_is_audit_only_not_a_source_error(total, components, excluded, label):
+    rows = evidence(total) + [
+        {"row_key": key, "selected_values": {"actual": amount}}
+        for key, amount in [("Other!2", 40), ("Outlet!5", 40), ("Outlet!3", 10)]
+    ]
+    rows[2]["label"] = label
+    checks = check_source_controls([control(component_rows=components, excluded_rows=excluded)], rows, "actual")
+    assert checks[0].rule == "source_control_unverified"
+    assert checks[0].severity == "info"
+    assert checks[0].details["reason"]
+    bundle = feedback({"actual": checks}, rows=rows)
+    assert bundle.rendered_count == 0
+    assert bundle.findings[0].destination == "internal_only"
+    assert bundle.findings[0].periods[0].selected_value == total
+
+
+def test_negative_additive_totals_and_signed_credits_are_not_normalized_or_hidden():
+    rows = evidence(-90)
+    rows[0]["selected_values"]["actual"] = -60
+    rows[1]["selected_values"]["actual"] = -40
+    findings = check_source_controls([control()], rows, "actual")
+    assert findings[0].rule == "source_control_difference"
+    assert findings[0].details["variance"] == 10
+    assert feedback({"actual": findings}).rendered_count == 1
+
+
 @pytest.mark.parametrize("updates", [
     {"component_rows": ["Outlet!4"]},
     {"component_rows": ["Outlet!1", "Outlet!1"]},
@@ -116,7 +169,9 @@ def test_unknown_row_and_account_are_validation_issues():
 
 def test_explicit_exclusion_and_signed_credit_are_arithmetic_not_double_netting():
     rows = evidence(95) + [{"row_key": "Outlet!3", "selected_values": {"actual": 5}}]
-    assert check_source_controls([control(excluded_rows=["Outlet!3"])], rows, "actual") == []
+    excluded = check_source_controls([control(excluded_rows=["Outlet!3"])], rows, "actual")
+    assert excluded[0].rule == "source_control_unverified"
+    assert feedback({"actual": excluded}).rendered_count == 0
     rows[-1]["selected_values"]["actual"] = -5
     findings = check_source_controls([control(component_rows=["Outlet!1", "Outlet!2", "Outlet!3"])], rows, "actual")
     assert findings == []

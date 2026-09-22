@@ -11,7 +11,7 @@ summary_department,error,Validation error,rejected,Summary and independently map
 source_discrepancy,warning,Source presentation,source_exception,Independent supported source layers still differ.,Preserve both source values and disclose the difference.,false
 source_layer_conflict,warning,Source presentation,source_exception,A selected layer differs from a typed alternate layer.,Preserve the supported selection and its cited comparison.,false
 source_control_difference,warning,Source presentation,source_exception,A reported source subtotal differs from its cited components.,Review the source arithmetic without changing the mapped values automatically.,false
-source_control_unverified,warning,Validation warning,source_exception,A cited source subtotal cannot be checked in this period.,Inspect the missing source values without assuming zero.,false
+source_control_unverified,info,Validation warning,source_exception,A proposed subtotal comparison is unsupported or lacks period values.,Retain in the audit only; do not present it as a source error.,false
 invalid_source_layer_comparison,error,Validation error,rejected,A typed selected layer does not reproduce its mapped target.,Correct the operations and cited row sets.,false
 period_detail_available,error,Validation error,rejected,An equivalent row supplies a period the selected row leaves blank.,Use the period-complete row or complementary non-overlapping rows.,false
 source_presentation_exception,warning,Source presentation,source_exception,A proven combined source presentation differs from standard categories.,Preserve the operator Summary and separate detailed categories.,false
@@ -27,14 +27,14 @@ source_row_repeated,error,Validation error,rejected,A source row occurs more tha
 source_row_included_and_excluded,error,Validation error,rejected,One calculation both includes and excludes the same row.,Keep the row only on the required side.,true
 source_row_double_count,error,Validation error,rejected,A source row is assigned to unrelated accounts.,Choose one valid account or non-overlapping detail.,false
 small_source_reconciliation_difference,warning,Reconciliation difference,source_exception,Supported reported values differ slightly.,Preserve both reported values and disclose the difference.,false
-source_detail_incomplete,warning,Coverage gap,coverage_gap,The source supports a parent and only some child detail.,Preserve the parent and map every identifiable child.,false
+source_detail_incomplete,warning,Coverage gap,coverage_gap,A reliable complete child split could not be determined.,Preserve the parent and clearly supported children; explain the uncertain split in the parent rationale without guessing.,false
 unsupported_residual_remainder,warning,Coverage gap,coverage_gap,A material residual is calculated rather than directly supported.,Prefer identifiable rows or disclose the retained remainder.,false
 large_residual_plug,warning,Coverage gap,coverage_gap,A material difference was assigned to a residual for final presentation.,Review the residual and preserve supported values.,false
 unresolved_negative_residual,warning,Coverage gap,coverage_gap,A material negative remainder was not forced into a residual.,Check duplicates offsets signs and already-netted amounts.,false
 unresolved_ambiguity,error,Validation error,rejected,Two materially different mappings remain plausible.,Preserve the evidence and request human classification.,false
 scope_exception,error,Validation error,scope_exception,A material scope decision requires operator direction.,Reject until the operator chooses the intended scope.,false
 scope_exclusion,warning,Scope exclusion,source_exception,A supported material item was excluded from the Standard COA.,Retain and visibly disclose the supported exclusion.,false
-coverage_review_not_completed,error,Validation error,rejected,The required focused coverage review did not complete.,Reject and rerun when another review turn is available.,false
+coverage_review_not_completed,error,Validation error,rejected,An unexplained detail gap did not receive its focused review.,An earlier blocking failure makes this audit-only; otherwise complete the detail review.,false
 unused_financial_schedule,error,Validation error,rejected,A populated routed schedule was neither mapped nor explained.,Map it or name the exact superseding schedule and reason.,false
 ood_misc_summary_mode_unknown,error,Validation error,rejected,The Summary OOD and miscellaneous presentation mode is unknown.,Inspect the Summary and select the supported mode.,false
 mapping_repair_truncated,warning,Validation warning,clean,A repair response reached its output limit.,Use the best earlier completed validation and disclose truncation.,false

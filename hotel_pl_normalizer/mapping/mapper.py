@@ -495,11 +495,16 @@ class WorkbookMappingValidator(AgentToolset):
                     "validate_mapping is only for the initial complete plan. "
                     "Use patch_mapping for repairs."
                 )
-            arguments = _prevalidate_plan_arguments(arguments)
             try:
+                arguments = _prevalidate_plan_arguments(arguments)
                 plan = WorkbookSourcePlan.model_validate(arguments)
-            except ValueError as exc:
-                raise ModelToolError(f"Draft mapping is not valid: {exc}") from exc
+            except (ValueError, ModelToolError) as exc:
+                raise ModelToolError(
+                    "Draft mapping is not valid. No initial plan was saved. "
+                    "Correct the errors below and resubmit the full validate_mapping "
+                    "call, including all decisions and review fields; do not use "
+                    f"patch_mapping yet. Errors: {exc}"
+                ) from exc
             action = {"tool": name, "submitted_decision_count": len(plan.decisions)}
         elif name == "patch_mapping":
             plan, action = self._apply_patch(arguments)
@@ -561,7 +566,7 @@ class WorkbookMappingValidator(AgentToolset):
             and previous
             and not previous.get("accepted")
             and result.get("accepted")
-            and _needs_coverage_review(result.get("warnings", []))
+            and _needs_coverage_review(result.get("warnings", []), plan)
         ):
             # A repair that moves a blocked mapping to warning-only has already
             # performed the focused coverage review. Keep the extra review turn
@@ -697,7 +702,9 @@ class WorkbookMappingValidator(AgentToolset):
     def _apply_patch(self, arguments):
         if self.current_plan is None:
             raise ModelToolError(
-                "patch_mapping requires an initial validate_mapping submission."
+                "patch_mapping requires an initial validate_mapping submission. "
+                "No initial plan was saved. Correct and resubmit the full "
+                "validate_mapping call before using patch_mapping."
             )
         arguments = _prevalidate_patch_arguments(arguments)
         try:
@@ -925,7 +932,7 @@ class WorkbookMappingValidator(AgentToolset):
             item for item in checked.global_findings if item.severity == "warning"
         )
         accepted = not errors
-        needs_detail_enrichment = _needs_coverage_review(warnings)
+        needs_detail_enrichment = _needs_coverage_review(warnings, plan)
         return {
             "ok": True,
             "accepted": accepted,
@@ -941,11 +948,12 @@ class WorkbookMappingValidator(AgentToolset):
                 item.model_dump(mode="json") for item in plan.review_items
             ],
             "instruction": (
-                "Keep the reconciled parent fixed and continue mapping every "
-                "positively identifiable child for each source_detail_incomplete "
-                "parent. Do not clear supported children merely because coverage "
-                "is incomplete. Use not_present only when the source contains no "
-                "usable evidence for that child hierarchy. One final warning-cleanup "
+                "Keep reconciled parents fixed. Map only clearly identifiable "
+                "children; do not infer room segments or labor roles from ambiguous "
+                "labels. Keep partial coverage and explain in the parent's rationale "
+                "why remaining detail cannot be reliably separated. That explanation "
+                "completes the detail review for this parent. Use not_present for "
+                "absent child evidence, not an uncertain split. One final warning-cleanup "
                 "response is available: make one evidence-supported patch only if "
                 "it reduces warnings without disturbing accepted structure; "
                 "otherwise return completion unchanged."
@@ -1020,7 +1028,7 @@ class WorkbookMappingValidator(AgentToolset):
         if not result.get("accepted"):
             return None
         if (
-            _needs_coverage_review(result.get("warnings", []))
+            _needs_coverage_review(result.get("warnings", []), self.current_plan)
             and not self.warning_cleanup_attempted
         ):
             self.warning_cleanup_pending = True
@@ -1632,9 +1640,20 @@ def _review_item_warnings(review_items) -> list[Finding]:
     return warnings
 
 
-def _needs_coverage_review(findings) -> bool:
+def _needs_coverage_review(findings, plan: WorkbookSourcePlan | None = None) -> bool:
     typed = _compatibility_findings(findings, default_severity="warning")
-    return any(item.rule in COVERAGE_GAP_RULES for item in typed)
+    # An explained partial split is an intentional limit, not an invitation to
+    # guess. Keep its warning, supported children and parent; skip enrichment.
+    explained = {
+        decision.coa_id for decision in (plan.decisions if plan else [])
+        if decision.child_coverage == ChildCoverage.PARTIAL
+        and str(decision.rationale or "").strip()
+    }
+    return any(
+        item.rule in COVERAGE_GAP_RULES
+        and not (item.rule == "source_detail_incomplete" and item.target in explained)
+        for item in typed
+    )
 
 
 def _outcome_from_result(result: dict[str, Any], review_items) -> MappingOutcome:
@@ -2844,20 +2863,25 @@ def map_workbook(
     residual_plugs_by_period = checked.residual_plugs_by_period
     primary_period_id = next(iter(period_labels))
     has_coverage_gap = any(
-        _needs_coverage_review(period_checks)
+        _needs_coverage_review(period_checks, final_plan)
         for period_checks in checks_by_period.values()
     )
     if has_coverage_gap and not validator.warning_cleanup_attempted:
+        blocked_elsewhere = validator.stopped_reason is not None or any(
+            item.severity == "error"
+            for period_checks in checks_by_period.values() for item in period_checks
+        )
         checks_by_period[primary_period_id].append(
             Finding(
-                "error",
+                "info" if blocked_elsewhere else "error",
                 "coverage_review_not_completed",
                 "mapping_session",
-                note="the required focused coverage review did not complete",
+                note=("detail review was not reached before the run stopped"
+                      if blocked_elsewhere else "the required focused coverage review did not complete"),
                 period_id=primary_period_id,
             )
         )
-        if validator.stopped_reason is None:
+        if not blocked_elsewhere and validator.stopped_reason is None:
             validator.stopped_reason = "coverage_review_not_completed"
     values = values_by_period[primary_period_id]
     execution_issues = [

@@ -336,9 +336,9 @@ def test_canonical_mapping_prompt_prefix_has_golden_bytes_and_hash():
     }
     encoded = _stable_mapping_prompt_prefix(model_coa).encode("utf-8")
 
-    assert len(encoded) == 105475
+    assert len(encoded) == 107178
     assert hashlib.sha256(encoded).hexdigest() == (
-        "a4bbe934eab83a6b3144a97ac82ac5d28055f155a796dab3ccb05e36ed3f9c12"
+        "7df59fc69b85744d9c9d49f38deff76ffd45d045f0cfef95d1d3834d5f0e50ea"
     )
 
 

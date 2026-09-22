@@ -26,6 +26,46 @@ def test_summary_length_is_bounded():
         plan(run_summary="a" * 501)
 
 
+def test_explained_partial_detail_needs_no_enrichment_but_keeps_its_warning():
+    from hotel_pl_normalizer.mapping.mapper import AccountSourceDecision, _needs_coverage_review
+    parent = "S1.total_rooms_revenue"
+    finding = f"warning|source_detail_incomplete|{parent}|parent=100|children=0|variance=100"
+    p = plan()
+    p.decisions = [AccountSourceDecision(coa_id=parent, operation="direct",
+        source_rows=["Rooms!10"], child_coverage="partial",
+        rationale="The operator's generic segments do not support a reliable COA split.")]
+    assert not _needs_coverage_review([finding], p)
+    assert _needs_coverage_review([finding])
+    p.decisions[0].rationale = None
+    assert _needs_coverage_review([finding], p)
+    p.decisions[0].rationale = "Unsplit segments."
+    assert _needs_coverage_review([
+        "warning|unsupported_residual_remainder|S1.other_transient_rooms_revenue|variance=100"
+    ], p)
+
+
+def test_invalid_initial_review_requires_full_resubmission_not_a_patch():
+    validator = WorkbookMappingValidator("wb", [], {})
+    initial = plan(run_summary=None).model_dump(mode="json")
+    initial["review_items"] = [{
+        "kind": "source_discrepancy", "message": "Reported totals differ.",
+        "coa_ids": ["S1.test"], "source_rows": ["Sheet!1"],
+    }]
+    with pytest.raises(ModelToolError) as caught:
+        validator.dispatch("validate_mapping", initial)
+    assert "No initial plan was saved" in str(caught.value)
+    assert "resubmit the full validate_mapping" in str(caught.value)
+    assert "selected_source_rows" in str(caught.value)
+    assert validator.current_plan is None
+    with pytest.raises(ModelToolError, match="No initial plan was saved"):
+        validator.dispatch("patch_mapping", dict(patch_id="retry", workbook_id="wb", replacements=[]))
+    initial["review_items"] = []
+    validator.dispatch("validate_mapping", initial)
+    assert validator.current_plan is not None
+    with pytest.raises(ModelToolError, match="Use patch_mapping for repairs"):
+        validator.dispatch("validate_mapping", initial)
+
+
 @pytest.mark.parametrize("fields", [{}, {"run_summary": None}, {"review_items": []}])
 def test_modern_patch_requires_refreshed_comments(fields):
     validator = WorkbookMappingValidator("wb", [], {})

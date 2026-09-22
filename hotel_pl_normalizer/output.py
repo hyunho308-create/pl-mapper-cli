@@ -908,8 +908,6 @@ def _write_run_notes(book, result, orphans, periods) -> None:
     summary = str(result.run_summary or "").strip()
     note_lines = [summary] if summary else []
     note_lines.extend(dict.fromkeys(orphans))
-    if visible:
-        note_lines.append("See highlighted COA accounts for details.")
     label_cell = sheet.cell(row=9, column=2, value="Notes")
     label_cell._style = copy(sheet.cell(row=8, column=2)._style)
     label_cell.alignment = Alignment(horizontal="left", vertical="bottom")
@@ -1008,18 +1006,12 @@ def _highlight_review_values(book, result, periods, canonical) -> None:
     columns = {period_id: FIRST_PERIOD_COL + i for i, (period_id, _, _) in enumerate(periods)}
     rows = {coa_id: FIRST_ACCOUNT_ROW + i for i, coa_id in enumerate(canonical)}
     targets, _ = _review_value_targets(result, periods)
-    coa, model = book["COA"], book["KHP Model Accounts"]
+    coa = book["COA"]
     yellow = PatternFill("solid", fgColor="FFFF00")
-    references = {coa: set(), model: set()}
+    references = {coa: set()}
     for account, period in targets:
         if account in rows and period in columns:
             references[coa].add(coa.cell(rows[account], columns[period]).coordinate)
-    links = {f"=COA!{ref}" for ref in references[coa]}
-    # Compound formulas can represent a reconciled parent; mirror direct links only.
-    for row in model:
-        for cell in row:
-            if cell.data_type == "f" and cell.value in links:
-                references[model].add(cell.coordinate)
     for sheet, refs in references.items():
         if not refs:
             continue
